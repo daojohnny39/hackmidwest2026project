@@ -839,6 +839,15 @@ class VerificationResult(BaseModel):
   - bio: up to 3 sentences from the LinkedIn bio, or else the longest eligible bio; null if none
 - **No accepted candidate.** Return `NoMatch` with the verification reason and top three scored candidates. `review_required` and `evidence_unavailable` must remain distinct from a successful search with no matches. Skip the summary model.
 
+**Built** (2026-10-10, `pipeline/stage4_summarize.py`, `tests/test_stage4.py`). Sections 1–3 weren't built yet, so the tests run on hand-built 01–03 artifacts made from the seed's facts. These choices fill gaps in 4.1. They are implementation defaults, not decisions:
+
+- **Facts:** only HTML accounts supply facts. Snippet accounts appear in `accounts` but supply no role, workplace, location, or bio. The name is the profile name, cited to every account whose display name matches it. If no account matches, the stage fails.
+- **Workplace and role:** cited to every account at the newest date that states that value. The flags are `workplace_conflict` and `role_conflict`, set whenever accounts disagree. Alex's default case therefore carries `workplace_conflict` because of the 2022 Photogram employer. When the newest accounts disagree, the value is null.
+- **Location:** the most common value. A tie gives null. Any location containing a digit (street or ZIP) is skipped, to keep it city level.
+- **Public-facts rule:** a keyword screen drops any bio sentence that touches age, relationships or family, religion, ethnicity or nationality, health, sexual orientation or gender identity, politics, contact details, or a street address. A false hit only costs that sentence.
+- **Agent draft:** each sentence must exactly match an eligible sentence in a cited account's bio, with at most 3 sentences. Sources must be accounts or attributed mentions of the accepted profile, after `url_aliases`. Limits are 4 agent turns per attempt and a 10 s budget shared by the draft and its one correction. A failed draft falls back to the template bio with the `summary_fallback` flag. The agent's only tool is `read_verification`, a read-only copy of `03_verification.json`. Stage 4 builds its own fresh agent from the artifacts, and does not produce `VerificationNotes`.
+- **Accounts:** listed highest trust first. An account no one links to has trust 0.
+
 ### 4.2 Contract
 
 ```python
@@ -902,12 +911,14 @@ Example output for `alex` on the mock, fake Jev and optional LLM summary (abridg
 
 ### 4.3 Done when (mock)
 
-- [ ] **`alex` default and stale:** the workplace is Prairie Atlas Labs, not Old Mill Software.
-- [ ] **`sam`:** the name is "Sam Rivera" and the workplace is Mosaic Kite Design.
-- [ ] **`unknown`, and cases where every candidate is rejected:** the result is `NoMatch`.
-- [ ] **Sources:** every `sources` URL in the output is a page in `01_raw_evidence.json`.
-- [ ] Unrelated-but-collected URLs, invented sources, changed confidence, and unsupported employers cannot enter the result. Check missing bio, conflicting dates, and summary failure fallback.
-- [ ] **Optional, with the LLM on:** the same checks pass when the agent writes the bio.
+Checked against hand-built Section 1–3 artifacts. The Section 5 end-to-end test still has to confirm these on real pipeline output.
+
+- [x] **`alex` default and stale:** the workplace is Prairie Atlas Labs, not Old Mill Software.
+- [x] **`sam`:** the name is "Sam Rivera" and the workplace is Mosaic Kite Design.
+- [x] **`unknown`, and cases where every candidate is rejected:** the result is `NoMatch`.
+- [x] **Sources:** every `sources` URL in the output is a page in `01_raw_evidence.json`.
+- [x] Unrelated-but-collected URLs, invented sources, changed confidence, and unsupported employers cannot enter the result. Check missing bio, conflicting dates, and summary failure fallback.
+- [ ] **Optional, with the LLM on:** the same checks pass when the agent writes the bio. Stub agents and a scripted-model Strands agent cover this offline; no real model run yet.
 
 ## 8. Section 5: End-to-end run and demo
 
@@ -1071,9 +1082,9 @@ Section 3
 
 Section 4
 
-- [ ] Deterministic template and `NoMatch`
-- [ ] Synthesis agent with read-only verification tool, `SummaryDraft`, and citation/content checks; code assembles `FinalProfile`
-- [ ] Section 4 mock tests
+- [x] Deterministic template and `NoMatch`
+- [x] Synthesis agent with read-only verification tool, `SummaryDraft`, and citation/content checks; code assembles `FinalProfile`
+- [x] Section 4 mock tests (on hand-built 01–03 artifacts; end-to-end in Section 5)
 
 Section 5
 
