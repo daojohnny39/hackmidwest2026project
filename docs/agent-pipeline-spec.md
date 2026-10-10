@@ -946,7 +946,7 @@ Checked against hand-built Section 1–3 artifacts. The Section 5 end-to-end tes
 
 ### 5.1 CLI
 
-Today `run` works through every stage registered in `STAGE_RUNNERS` and exits with code 3 at the first stage that isn't. `stage N --run` re-checks consent, invalidates stage N and later outputs, and reruns stage N. `smoke-search` runs one image through deterministic stage 1 with models off, and `purge` and `set-key` work. `purge` also deletes uploaded images when `AWS_REGION` is set. The rest are commands to implement.
+Today `run` works through every stage registered in `STAGE_RUNNERS` (stages 1–4 are all registered) and exits with code 3 at the first stage that isn't. `stage N --run` re-checks consent, invalidates stage N and later outputs, and reruns stage N. `smoke-search` runs one image through deterministic stage 1 with models off, and `purge` and `set-key` work. `purge` also deletes uploaded images when `AWS_REGION` is set. The rest are commands to implement.
 
 ```bash
 # Save the SerpApi key once (hidden prompt; checked with the free Account API)
@@ -1103,7 +1103,7 @@ Section 3
 - [x] Signals, fallback formula, and decision rule
 - [x] Jev confidence call, `best` cross-check, incomplete-evidence reasons, and live fallback policy
 - [x] Section 3 mock tests (on hand-built 01/02 artifacts until Sections 1 and 2 land)
-- [ ] CLI wiring (`STAGE_RUNNERS[3]`), after stage 2 is wired
+- [x] CLI wiring (`STAGE_RUNNERS[3]`, plus `[4]` for Section 4); `tests/test_stage3.py` runs `run --mock` through stage 4 and replays `stage 3`
 
 Section 4
 

@@ -4,13 +4,17 @@ Seed collection stays in memory. Jev responders exercise the real adapter withou
 HTTP. Only boundary tests alter artifacts or provider answers.
 """
 
+import io
 import json
 import math
+import os
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from pipeline import stage3_verify, stage4_summarize
+from pipeline.__main__ import OK, REFUSED, main
 from pipeline.artifacts import ArtifactError, read_artifact, write_artifact
 from pipeline.config import load_settings
 from pipeline.contracts import (
@@ -28,7 +32,7 @@ from pipeline.jev import Jev
 from pipeline.stage2_profiles import build_graphs, build_profiles
 from pipeline.stage3_verify import apply_notes, compute_signals, fallback_confidence, verify
 from tests.seed_evidence import collect
-from tests.support import OfflineTestCase
+from tests.support import FIXTURE_CAPTURES, MockServerTestCase, OfflineTestCase
 
 WHEN = "2026-10-10T14:03:00Z"
 MODEL = "jev-1.13.0-test"
@@ -621,3 +625,63 @@ class StageRunnerTests(OfflineTestCase):
 
     def test_no_candidates_report_keeps_the_reason(self):
         self.assertIn("no accepted candidate (no_candidates)", stage3_verify.report(verify(*seed_case("unknown"))))
+
+
+class CliTests(MockServerTestCase):
+    """`run` and `stage 3` through the CLI, with stage 1 searching a per-class mock internet."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["MOCK_INTERNET_URL"] = self.mock_url
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.runs = Path(folder.name) / "runs"
+
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main([*argv, "--runs-dir", str(self.runs)])
+        return code, out.getvalue(), err.getvalue()
+
+    def run_capture(self, capture, *options):
+        code, out, err = self.cli("run", "--capture", str(FIXTURE_CAPTURES / capture), "--mock", *options)
+        self.assertEqual(code, OK, err)
+        [run_dir] = list(self.runs.iterdir())
+        return run_dir, out
+
+    def test_full_run_verifies_and_summarizes(self):
+        run_dir, out = self.run_capture("alex")
+        result = read_artifact(run_dir, 3)
+        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
+        self.assertEqual(round(result.verdicts[0].confidence, 2), 0.99)
+        self.assertIn("Verification: accepted p1", out)
+        self.assertIn("Stage 3 done.", out)
+        self.assertEqual(read_artifact(run_dir, 4).status, "match")
+        self.assertIn("Stage 4 done.", out)
+
+    def test_ambiguous_run_rejects_the_namesake(self):
+        run_dir, out = self.run_capture("alex", "--scenario", "ambiguous", "--until", "3")
+        result = read_artifact(run_dir, 3)
+        self.assertEqual([(v.profile_id, v.decision, round(v.confidence, 2)) for v in result.verdicts],
+                         [("p1", "accepted", 0.98), ("p2", "rejected", 0.69)])
+        self.assertFalse((run_dir / "04_final.json").exists())
+
+    def test_unknown_run_ends_without_a_match(self):
+        run_dir, out = self.run_capture("unknown")
+        self.assertEqual(read_artifact(run_dir, 3).reason, "no_candidates")
+        self.assertEqual(read_artifact(run_dir, 4).status, "no_match")
+        self.assertIn("no accepted candidate (no_candidates)", out)
+
+    def test_stage_3_replays_saved_profiles_and_refuses_mismatches(self):
+        run_dir, _ = self.run_capture("sam", "--until", "2")
+        code, out, _ = self.cli("stage", "3", "--run", str(run_dir))
+        self.assertEqual(code, OK)
+        self.assertEqual(read_artifact(run_dir, 3).accepted_profile_id, "p1")
+        self.assertIn("Stage 3 done.", out)
+
+        # Profiles built from another capture's evidence don't belong to this run's pages.
+        write_artifact(run_dir, 2, build_profiles(collect("casey", run_id=run_dir.name), jev=None))
+        code, _, err = self.cli("stage", "3", "--run", str(run_dir))
+        self.assertEqual(code, REFUSED)
+        self.assertIn("Refused (stage 3)", err)
+        self.assertFalse((run_dir / "03_verification.json").exists())

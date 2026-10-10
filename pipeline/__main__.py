@@ -28,7 +28,7 @@ from pipeline.contracts import CaptureArtifact
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected, check_typesafe_key
 from pipeline.hosting import remote_deleter, require_hosting
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
-from pipeline import stage1_collect, stage2_profiles
+from pipeline import stage1_collect, stage2_profiles, stage3_verify, stage4_summarize
 
 STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3: "verification", 4: "summary"}
 
@@ -39,6 +39,8 @@ StageRunner = Callable[[Path, Settings, bool], str]
 STAGE_RUNNERS: dict[int, StageRunner] = {}
 STAGE_RUNNERS[1] = stage1_collect.run
 STAGE_RUNNERS[2] = stage2_profiles.run
+STAGE_RUNNERS[3] = stage3_verify.run
+STAGE_RUNNERS[4] = stage4_summarize.run_stage
 DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
