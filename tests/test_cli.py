@@ -10,12 +10,14 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from PIL import Image
+
 from pipeline.__main__ import BAD_CONFIG, NOT_BUILT, OK, REFUSED, main
 from pipeline.artifacts import read_artifact
 from tests.support import FIXTURE_CAPTURES, REPO_ROOT, OfflineTestCase
 
 ALEX = FIXTURE_CAPTURES / "alex"
-LIVE_ENV = {"SERPAPI_KEY": "test-serpapi-key", "IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
+SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
 
 
 class CliTests(OfflineTestCase):
@@ -42,6 +44,14 @@ class CliTests(OfflineTestCase):
         if edit:
             edit(manifest)
         (target / "manifest.json").write_text(json.dumps(manifest))
+        return target
+
+    def real_image_capture(self):
+        """The alex consent block with one real PNG instead of mock fixtures."""
+        def use_file(manifest):
+            manifest["images"] = [{"image_id": "img-1", "angle": "front", "file": "img-1.png"}]
+        target = self.capture_copy(use_file)
+        Image.new("RGB", (640, 480), (200, 120, 40)).save(target / "img-1.png")
         return target
 
     def test_until_0_writes_capture_artifact(self):
@@ -102,28 +112,53 @@ class CliTests(OfflineTestCase):
         self.assertNotIn("test-anthropic-key", err)
         self.assertEqual(self.run_dirs(), [])
 
-    def test_serpapi_backend_needs_live_flag(self):
-        os.environ.update(SEARCH_BACKEND="serpapi", **LIVE_ENV)
-        code, _, _ = self.cli("run", "--capture", str(ALEX), "--until", "0")
-        self.assertEqual(code, BAD_CONFIG)
-        self.assertEqual(self.run_dirs(), [])
-
-    def test_live_without_credentials_fails_before_capture(self):
-        code, _, err = self.cli("run", "--capture", str(ALEX), "--until", "0", "--live")
+    def test_serpapi_is_the_default_and_needs_a_key(self):
+        del os.environ["SEARCH_BACKEND"]
+        code, _, err = self.cli("run", "--capture", str(ALEX), "--until", "0")
         self.assertEqual(code, BAD_CONFIG)
         self.assertIn("SERPAPI_KEY", err)
+        self.assertIn("set-key serpapi", err)
         self.assertEqual(self.run_dirs(), [])
 
-    def test_live_rejects_mock_fixtures(self):
-        os.environ.update(LIVE_ENV)
-        code, _, _ = self.cli("run", "--capture", str(ALEX), "--until", "0", "--live")
+    def test_mock_flag_overrides_serpapi_setting(self):
+        os.environ.update(SEARCH_BACKEND="serpapi")
+        code, _, _ = self.cli("run", "--capture", str(ALEX), "--until", "0", "--mock")
+        self.assertEqual(code, OK)
+        self.assertEqual(read_artifact(self.run_dirs()[0], 0).backend, "mock")
+
+    def test_serpapi_rejects_mock_fixtures(self):
+        os.environ.update(SERPAPI_ENV)
+        code, _, err = self.cli("run", "--capture", str(ALEX), "--until", "0")
         self.assertEqual(code, REFUSED)
+        self.assertIn("--mock", err)
         self.assertEqual(self.run_dirs(), [])
 
-    def test_live_rejects_scenario(self):
-        os.environ.update(LIVE_ENV)
-        code, _, _ = self.cli("run", "--capture", str(ALEX), "--until", "0", "--live", "--scenario", "ambiguous")
+    def test_serpapi_rejects_scenario(self):
+        os.environ.update(SERPAPI_ENV)
+        code, _, _ = self.cli("run", "--capture", str(ALEX), "--until", "0", "--scenario", "ambiguous")
         self.assertEqual(code, BAD_CONFIG)
+
+    def test_serpapi_run_with_real_image(self):
+        os.environ.update(SERPAPI_ENV)
+        capture = self.real_image_capture()
+        code, out, err = self.cli("run", "--capture", str(capture), "--until", "0")
+        self.assertEqual(code, OK, err)
+        self.assertIn("search: serpapi", out)
+        self.assertNotIn("test-serpapi-key", out + err)
+        [run_dir] = self.run_dirs()
+        artifact = read_artifact(run_dir, 0)
+        self.assertEqual((artifact.backend, artifact.scenario), ("serpapi", "default"))
+        self.assertNotIn("test-serpapi-key", "".join(path.read_text() for path in run_dir.iterdir()))
+
+    def test_stage_of_serpapi_run_needs_external_consent(self):
+        os.environ.update(SERPAPI_ENV)
+        capture = self.real_image_capture()
+        self.assertEqual(self.cli("run", "--capture", str(capture), "--until", "0")[0], OK)
+        [run_dir] = self.run_dirs()
+        manifest = json.loads((capture / "manifest.json").read_text())
+        manifest["consent"]["external_processing"] = False
+        (capture / "manifest.json").write_text(json.dumps(manifest))
+        self.assertEqual(self.cli("stage", "1", "--run", str(run_dir))[0], REFUSED)
 
     def test_stage_rechecks_consent(self):
         capture = self.capture_copy()
@@ -151,9 +186,13 @@ class CliTests(OfflineTestCase):
         self.assertFalse(run_dir.exists())
         self.assertTrue(capture.exists(), "plain purge must not delete the source capture")
 
-    def test_smoke_search_needs_live(self):
+    def test_smoke_search_always_uses_serpapi(self):
+        code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
+        self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; the key is missing
+        self.assertIn("SERPAPI_KEY", err)
+        os.environ.update(SERPAPI_KEY="test-serpapi-key")
         code, _, _ = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
-        self.assertEqual(code, BAD_CONFIG)
+        self.assertEqual(code, REFUSED)  # mock fixtures can't be searched on SerpApi
 
     def test_module_entry_point(self):
         """The exact 0.6 command, as a subprocess with the offline environment."""

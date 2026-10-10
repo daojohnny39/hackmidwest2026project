@@ -20,8 +20,12 @@ LIVE = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "IMAGE_BUCKET": "hm-bucket", "AWS
 
 
 def load(env=None, **options):
-    """Load from an explicit environment and no .env unless a path is given."""
+    """Load from an explicit environment and no .env unless a path is given.
+
+    Mock search unless a test picks a backend; backend=None tests the env/default choice.
+    """
     options.setdefault("dotenv_path", None)
+    options.setdefault("backend", "mock")
     return load_settings(environ=env or {}, **options)
 
 
@@ -46,7 +50,20 @@ class ConfigTestCase(OfflineTestCase):
 
 
 class DefaultsTests(ConfigTestCase):
-    def test_empty_environment_is_offline(self):
+    def test_default_backend_is_serpapi(self):
+        settings = load({"SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend=None)
+        self.assertEqual(settings.search_backend, "serpapi")
+        self.assertTrue(settings.live)
+        self.assertEqual(settings.serpapi_key, SECRETS["SERPAPI_KEY"])
+        self.assertEqual((settings.jev_mode, settings.llm_mode), ("fake", "off"))
+        self.assertFalse(settings.models or settings.real_models_enabled)
+
+    def test_default_backend_needs_serpapi_key(self):
+        error = self.assertConfigError(r"SERPAPI_KEY \(for SerpApi search\)", backend=None)
+        self.assertIn("set-key serpapi", str(error))
+        self.assertIn("--mock", str(error))
+
+    def test_mock_backend_is_offline(self):
         settings = load()
         self.assertEqual(settings.search_backend, "mock")
         self.assertEqual(settings.mock_internet_url, "http://127.0.0.1:8765")
@@ -62,9 +79,10 @@ class DefaultsTests(ConfigTestCase):
         self.assertEqual((settings.mock_scenario, settings.mock_delay_ms), ("stale", 25))
 
     def test_empty_strings_count_as_unset(self):
-        env = {"SEARCH_BACKEND": "", "MOCK_SCENARIO": " ", "JEV_MODE": "", "LLM_MODE": "", "MOCK_DELAY_MS": ""}
-        settings = load(env)
-        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("mock", "fake", "off"))
+        env = {"SEARCH_BACKEND": "", "MOCK_SCENARIO": " ", "JEV_MODE": "", "LLM_MODE": "", "MOCK_DELAY_MS": "",
+               "SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}
+        settings = load(env, backend=None)
+        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("serpapi", "fake", "off"))
         self.assertEqual((settings.mock_scenario, settings.mock_delay_ms), ("default", 0))
 
     def test_settings_are_frozen(self):
@@ -110,40 +128,43 @@ class DotenvTests(ConfigTestCase):
     def test_missing_dotenv_file_is_ignored(self):
         self.assertEqual(load(dotenv_path=self.folder / "absent.env").mock_scenario, "default")
 
-    def test_env_example_loads_offline(self):
-        settings = load(dotenv_path=REPO_ROOT / ".env.example")
-        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("mock", "fake", "off"))
+    def test_env_example_selects_serpapi_and_needs_the_key(self):
+        example = REPO_ROOT / ".env.example"
+        self.assertConfigError("SERPAPI_KEY", backend=None, dotenv_path=example)
+        settings = load({"SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend=None, dotenv_path=example)
+        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("serpapi", "fake", "off"))
 
 
 class SearchBackendTests(ConfigTestCase):
-    def test_live_selects_serpapi(self):
-        settings = load({**LIVE, "SEARCH_BACKEND": "mock"}, live=True)
+    def test_backend_option_selects_serpapi(self):
+        settings = load({**LIVE, "SEARCH_BACKEND": "mock"}, backend="serpapi")
         self.assertEqual(settings.search_backend, "serpapi")
         self.assertEqual(settings.serpapi_key, SECRETS["SERPAPI_KEY"])
         self.assertEqual((settings.image_bucket, settings.aws_region), ("hm-bucket", "us-east-1"))
 
-    def test_serpapi_without_live_is_rejected(self):
-        self.assertConfigError("SEARCH_BACKEND=serpapi.*--live", {**LIVE, "SEARCH_BACKEND": "serpapi"})
+    def test_backend_option_selects_mock_over_env(self):
+        settings = load({**LIVE, "SEARCH_BACKEND": "serpapi"}, backend="mock")
+        self.assertEqual(settings.search_backend, "mock")
+        self.assertFalse(settings.live)
 
-    def test_serpapi_from_dotenv_without_live_is_rejected(self):
-        path = self.write_dotenv("SEARCH_BACKEND=serpapi\n")
-        self.assertConfigError("--live", dotenv_path=path)
+    def test_env_and_dotenv_can_select_mock(self):
+        self.assertEqual(load({"SEARCH_BACKEND": "mock"}, backend=None).search_backend, "mock")
+        path = self.write_dotenv("SEARCH_BACKEND=mock\n")
+        self.assertEqual(load(backend=None, dotenv_path=path).search_backend, "mock")
+
+    def test_dotenv_supplies_serpapi_key(self):
+        path = self.write_dotenv(f"SERPAPI_KEY={SECRETS['SERPAPI_KEY']}\n")
+        self.assertEqual(load(backend=None, dotenv_path=path).serpapi_key, SECRETS["SERPAPI_KEY"])
 
     def test_unknown_backend(self):
-        self.assertConfigError("SEARCH_BACKEND", {"SEARCH_BACKEND": "google"})
+        self.assertConfigError("SEARCH_BACKEND", {"SEARCH_BACKEND": "google"}, backend=None)
+        self.assertConfigError("unknown search backend", backend="google")
 
-    def test_live_requires_each_credential(self):
-        for name in LIVE:
-            with self.subTest(missing=name):
-                env = {key: value for key, value in LIVE.items() if key != name}
-                self.assertConfigError(rf"{name} \(for --live\)", env, live=True)
+    def test_serpapi_does_not_require_hosting_settings_yet(self):
+        settings = load({"SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend="serpapi")
+        self.assertEqual((settings.image_bucket, settings.aws_region), (None, None))
 
-    def test_live_reports_all_missing_credentials(self):
-        error = self.assertConfigError("SERPAPI_KEY", live=True)
-        self.assertIn("IMAGE_BUCKET", str(error))
-        self.assertIn("AWS_REGION", str(error))
-
-    def test_serpapi_key_dropped_without_live(self):
+    def test_serpapi_key_dropped_with_mock(self):
         self.assertIsNone(load(LIVE).serpapi_key)
 
 
@@ -160,11 +181,11 @@ class ScenarioTests(ConfigTestCase):
         self.assertConfigError("MOCK_SCENARIO", {"MOCK_SCENARIO": "chaos"})
         self.assertConfigError("unknown scenario", scenario="chaos")
 
-    def test_scenario_rejected_in_live_mode(self):
-        self.assertConfigError("--scenario.*--live", LIVE, live=True, scenario="ambiguous")
+    def test_scenario_rejected_with_serpapi(self):
+        self.assertConfigError("--scenario.*--mock", LIVE, backend="serpapi", scenario="ambiguous")
 
-    def test_live_scenario_is_default(self):
-        self.assertEqual(load({**LIVE, "MOCK_SCENARIO": "empty"}, live=True).mock_scenario, "default")
+    def test_serpapi_scenario_is_default(self):
+        self.assertEqual(load({**LIVE, "MOCK_SCENARIO": "empty"}, backend="serpapi").mock_scenario, "default")
 
 
 class MockSettingsTests(ConfigTestCase):
@@ -207,8 +228,9 @@ class ModelGateTests(ConfigTestCase):
             with self.subTest(pattern):
                 self.assertConfigError(f"{pattern}.*--models", env)
 
-    def test_live_alone_does_not_permit_models(self):
-        self.assertConfigError("--models", {**LIVE, "LLM_MODE": "anthropic", "ANTHROPIC_API_KEY": "k"}, live=True)
+    def test_serpapi_alone_does_not_permit_models(self):
+        self.assertConfigError("--models", {**LIVE, "LLM_MODE": "anthropic", "ANTHROPIC_API_KEY": "k"},
+                               backend="serpapi")
 
     def test_models_flag_with_offline_modes_is_allowed(self):
         settings = load(models=True)
@@ -271,11 +293,6 @@ class LlmTests(ConfigTestCase):
         error = self.assertConfigError(r"LLM_MODEL \(for LLM_MODE=bedrock\)", {"LLM_MODE": "bedrock", "AWS_REGION": "r"}, models=True)
         self.assertNotIn("ANTHROPIC_API_KEY", str(error))
 
-    def test_shared_aws_region_is_reported_for_both_uses(self):
-        error = self.assertConfigError("AWS_REGION", {**LIVE, "AWS_REGION": "", "LLM_MODE": "bedrock", "LLM_MODEL": "m"},
-                                       live=True, models=True)
-        self.assertIn("AWS_REGION (for --live, LLM_MODE=bedrock)", str(error))
-
     def test_off_has_no_model_or_key(self):
         settings = load({**SECRETS, "LLM_MODEL": "claude-sonnet-5-5"}, models=True)
         self.assertIsNone(settings.llm_model)
@@ -294,7 +311,7 @@ class TrustTests(ConfigTestCase):
 class SecretTests(ConfigTestCase):
     def everything_enabled(self, **extra):
         env = {**LIVE, **SECRETS, "JEV_MODE": "typesafe", "LLM_MODE": "anthropic", **extra}
-        return load(env, live=True, models=True)
+        return load(env, backend="serpapi", models=True)
 
     def test_repr_and_describe_hide_secrets(self):
         for settings in (self.everything_enabled(), self.everything_enabled(JEV_MODE="openrouter")):
@@ -320,10 +337,10 @@ class SecretTests(ConfigTestCase):
         cases = (
             ({**SECRETS, "JEV_MODE": "typesafe"}, {}),
             ({**SECRETS, "LLM_MODE": "anthropic"}, {}),
-            ({**SECRETS, "SEARCH_BACKEND": "serpapi"}, {}),
+            ({**SECRETS, "SEARCH_BACKEND": "bing"}, {"backend": None}),
             ({**SECRETS, "JEV_MODE": "typesafe", "MOCK_DELAY_MS": "x"}, {"models": True}),
-            ({**SECRETS, "IMAGE_BUCKET": "b"}, {"live": True}),
-            ({**SECRETS, **LIVE}, {"live": True, "scenario": "stale"}),
+            ({**SECRETS, "SERPAPI_KEY": ""}, {"backend": "serpapi"}),
+            ({**SECRETS, **LIVE}, {"backend": "serpapi", "scenario": "stale"}),
         )
         for env, options in cases:
             with self.subTest(env=sorted(env), options=options):

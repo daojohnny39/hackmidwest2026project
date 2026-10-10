@@ -215,9 +215,9 @@ class ManifestTests(CaptureCase):
         data["images"][0]["mock_fixture"] = "alex-back"
         self.assert_refused(data, "unknown mock_fixture 'alex-back'")
 
-    def test_file_only_image_in_mock_mode_needs_live(self):
+    def test_file_only_image_in_mock_mode_needs_serpapi(self):
         self.write_image(self.folder / "img-1.png")
-        self.assert_refused(self.live_manifest("img-1.png"), "--live")
+        self.assert_refused(self.live_manifest("img-1.png"), "without --mock")
 
 
 class LiveImageTests(CaptureCase):

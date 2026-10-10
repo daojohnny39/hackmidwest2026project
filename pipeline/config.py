@@ -1,14 +1,17 @@
 """Pipeline settings from the environment, .env, and CLI switches (spec 0.3).
 
 Precedence is CLI options, then exported variables, then .env; empty values count
-as unset. Environment values alone never permit external calls: live search needs
-`live=True` and real Jev/LLM modes need `models=True`. Secrets stay out of repr,
-describe(), and every error message. No model or AWS SDK is imported here.
+as unset. Search defaults to SerpApi and needs SERPAPI_KEY; the mock internet is
+opt-in (`backend="mock"`, `--mock`, or SEARCH_BACKEND=mock). Real Jev/LLM modes
+still need `models=True`. Secrets stay out of repr, describe(), and every error
+message. No model or AWS SDK is imported here.
 """
 
 from __future__ import annotations
 
 import os
+import re
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -23,7 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MOCK_SCENARIOS = ("default", "ambiguous", "stale", "duplicates", "empty", "rate_limited", "server_error")
 TRUST_TABLE = {0: 0, 1: 50, 2: 95, 3: 99}  # key 3 means "3 or more" (spec 2c)
 
-SEARCH_BACKENDS = ("mock", "serpapi")
+SEARCH_BACKENDS = ("serpapi", "mock")
+DEFAULT_SEARCH_BACKEND = "serpapi"
 JEV_MODES = ("fake", "typesafe", "openrouter", "off")
 LLM_MODES = ("off", "anthropic", "bedrock")
 JEV_DEFAULT_MODELS = {"typesafe": "jev-latest", "openrouter": "typesafe/jev-1.13"}
@@ -35,6 +39,17 @@ ENV_VARS = (
     "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
     "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
 )
+
+
+# `python -m pipeline set-key <name>` stores these in .env.
+SECRET_ENV = {
+    "serpapi": "SERPAPI_KEY",
+    "typesafe": "TYPESAFE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+# Characters a key may use so it can sit unquoted on one .env line.
+SECRET_PATTERN = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class ConfigError(ValueError):
@@ -78,7 +93,7 @@ class Settings:
 
 def load_settings(
     *,
-    live: bool = False,
+    backend: str | None = None,
     models: bool = False,
     scenario: str | None = None,
     environ: Mapping[str, str] | None = None,
@@ -86,11 +101,11 @@ def load_settings(
 ) -> Settings:
     env = _read_env(os.environ if environ is None else environ, dotenv_path)
 
-    backend = _choice(env, "SEARCH_BACKEND", SEARCH_BACKENDS, "mock")
-    if backend == "serpapi" and not live:
-        raise ConfigError("SEARCH_BACKEND=serpapi needs --live; without it the pipeline only uses the mock")
-    if live:
-        backend = "serpapi"
+    if backend is None:
+        backend = _choice(env, "SEARCH_BACKEND", SEARCH_BACKENDS, DEFAULT_SEARCH_BACKEND)
+    elif backend not in SEARCH_BACKENDS:
+        raise ConfigError(f"unknown search backend {backend!r}; expected one of {', '.join(SEARCH_BACKENDS)}")
+    live = backend == "serpapi"
 
     mock_url = env.get("MOCK_INTERNET_URL", "http://127.0.0.1:8765")
     try:
@@ -104,7 +119,7 @@ def load_settings(
     env_scenario = _choice(env, "MOCK_SCENARIO", MOCK_SCENARIOS, "default")
     if scenario is not None:
         if live:
-            raise ConfigError("--scenario applies to mock search only and cannot be used with --live")
+            raise ConfigError("--scenario applies to mock search only; add --mock to use it")
         if scenario not in MOCK_SCENARIOS:
             raise ConfigError(f"unknown scenario {scenario!r}; expected one of {', '.join(MOCK_SCENARIOS)}")
     mock_scenario = "default" if live else scenario or env_scenario
@@ -123,9 +138,10 @@ def load_settings(
             )
 
     required: dict[str, list[str]] = {}
+    # Image hosting (spec 1.2) isn't chosen yet, so IMAGE_BUCKET is checked by the
+    # hosting step once it exists, not here.
     if live:
-        for name in ("SERPAPI_KEY", "IMAGE_BUCKET", "AWS_REGION"):
-            required.setdefault(name, []).append("--live")
+        required.setdefault("SERPAPI_KEY", []).append("SerpApi search")
     if jev_mode == "typesafe":
         required.setdefault("TYPESAFE_API_KEY", []).append("JEV_MODE=typesafe")
     elif jev_mode == "openrouter":
@@ -137,7 +153,12 @@ def load_settings(
             required.setdefault(name, []).append("LLM_MODE=bedrock")
     missing = [f"{name} (for {', '.join(why)})" for name, why in required.items() if name not in env]
     if missing:
-        raise ConfigError(f"missing required settings: {'; '.join(missing)}. Set them in the environment or .env")
+        hint = ""
+        if "SERPAPI_KEY" in required and "SERPAPI_KEY" not in env:
+            hint = " Save the SerpApi key with `python -m pipeline set-key serpapi`, or pass --mock for the mock internet."
+        raise ConfigError(
+            f"missing required settings: {'; '.join(missing)}. Set them in the environment or .env.{hint}"
+        )
 
     # Keys for routes that are not enabled are dropped, so nothing downstream can use them by accident.
     return Settings(
@@ -190,3 +211,47 @@ def _delay(raw: str) -> int:
     if not 0 <= delay <= MAX_MOCK_DELAY_MS:
         raise ConfigError(f"MOCK_DELAY_MS must be from 0 to {MAX_MOCK_DELAY_MS}, got {delay}")
     return delay
+
+
+def set_env_value(path: Path, name: str, value: str, *, template: Path | None = None) -> None:
+    """Set NAME=value in a .env file, keeping its other lines.
+
+    A missing file starts from `template` (normally .env.example). Earlier copies of
+    the variable are replaced in place and later duplicates dropped, since python-dotenv
+    would let a later line win. The file is replaced atomically with mode 0600.
+    """
+    if name not in ENV_VARS:
+        raise ValueError(f"{name} is not a pipeline setting")
+    if not SECRET_PATTERN.fullmatch(value):
+        # Never echo the value: it is usually a secret.
+        raise ValueError(f"{name} may contain only letters, digits, '.', '_' and '-'")
+
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+    elif template is not None and template.exists():
+        text = template.read_text(encoding="utf-8")
+    else:
+        text = ""
+    assignment = re.compile(rf"\s*(export\s+)?{re.escape(name)}\s*=")
+    lines, placed = [], False
+    for line in text.splitlines():
+        if assignment.match(line):
+            if placed:
+                continue
+            line, placed = f"{name}={value}", True
+        lines.append(line)
+    if not placed:
+        lines.append(f"{name}={value}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp creates the file with mode 0600, so the key is never world-readable.
+    handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write("\n".join(lines) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise

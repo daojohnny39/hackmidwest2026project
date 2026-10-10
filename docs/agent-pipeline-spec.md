@@ -37,7 +37,7 @@ Each section reads the artifacts named in its **In** line and writes its **Out**
 ## 2. Ground rules
 
 - **Consent gate.** Require affirmative participant consent before reading real images, creating an artifact, or making a call. Live consent must cover image disclosure to S3, SerpApi and Yandex, and evidence disclosure to the selected model providers. Apply the gate to `run`, `stage`, and `smoke-search`. Real tests use consenting team members; mock tests use fictional participants.
-- **Mock first.** Default to the mock, `LLM_MODE=off`, and `JEV_MODE=fake`. `--live` permits live search; `--models` separately permits paid model calls, including models used with mock evidence. Environment variables alone never permit external calls. Normal tests block non-loopback connections.
+- **SerpApi by default, mock for tests.** Search defaults to SerpApi (Johnny, 2026-10-10); `run --mock` or `SEARCH_BACKEND=mock` selects the mock internet, which costs no search credits. `LLM_MODE=off` and `JEV_MODE=fake` stay the defaults, and `--models` separately permits paid model calls, including models used with mock evidence. Normal tests force the mock and block non-loopback connections.
 - **Code holds the data; models make judgments.** Tools store evidence and provenance. The LLM may extract supported fields, triage URLs, and write a sourced bio. Code sets IDs, graph values, confidence, and acceptance. Treat page text as untrusted data, never as tool instructions.
 - **Every model step has a fallback.** Tests run without an LLM or Jev. Runtime failures use the rules and template below and record the fallback. A mock demonstration is not proof of live retrieval or identity accuracy.
 - **Keep data out of git.** Add `runs/` and `captures/` to `.gitignore` before collecting real data; they are not ignored today. Existing rules cover `.env`, bytecode, and `data/*.sqlite3*`. Keep real photos, pages, prompts, responses, caches, and traces under those ignored roots. Commit only synthetic fixtures and blank key placeholders.
@@ -60,6 +60,7 @@ Project Directory/
     contracts.py              Pydantic models for every artifact in this spec
     capture.py                load and validate a capture bundle; consent gate
     artifacts.py              read/write runs/<run_id>/NN_*.json and run_log.jsonl
+    serpapi_account.py        SerpApi Account API: free key check and quota for `set-key`
     platforms.py              domain → platform, account-URL patterns, URL normalization
     scrape.py                 HTML → PageRecord (meta, Open Graph, JSON-LD, links)
     search/
@@ -92,11 +93,11 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 
 | Variable | Values | Default | Used by |
 |---|---|---|---|
-| `SEARCH_BACKEND` | `mock`, `serpapi` | `mock` | Section 1 |
+| `SEARCH_BACKEND` | `serpapi`, `mock` | `serpapi` | Section 1 |
 | `MOCK_INTERNET_URL` | loopback URL | `http://127.0.0.1:8765` | mock backend |
 | `MOCK_SCENARIO` | `default`, `ambiguous`, `stale`, `duplicates`, `empty`, `rate_limited`, `server_error` | `default` | mock backend |
 | `MOCK_DELAY_MS` | integer 0–5000, search requests only | `0` | concurrency tests |
-| `SERPAPI_KEY` | key | none | serpapi backend |
+| `SERPAPI_KEY` | key; save with `set-key serpapi` | none | serpapi backend |
 | `IMAGE_BUCKET` + AWS credentials | S3 bucket name | none | `hosting.py` (live only) |
 | `JEV_MODE` | `fake`, `typesafe`, `openrouter`, `off` | `fake` | Sections 2, 3 |
 | `JEV_MODEL` | route-specific model ID | `jev-latest` for TypeSafe; `typesafe/jev-1.13` for OpenRouter | `jev.py` |
@@ -106,7 +107,9 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `LLM_MODEL` | provider-specific model ID | `claude-sonnet-5-5` for Anthropic; required for Bedrock | `llm.py` |
 | `AWS_REGION` | region with bucket/model access | required for S3/Bedrock | hosting and Bedrock |
 
-`config.py` loads `.env` without overriding exported variables. CLI options win. `--live` selects `serpapi`; without it, reject `SEARCH_BACKEND=serpapi`. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
+`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `serpapi`, which requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. `IMAGE_BUCKET` is checked by the hosting step rather than at startup, because hosting (1.2) isn't decided. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
+
+`python -m pipeline set-key {serpapi,typesafe,openrouter,anthropic}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`, and the file is replaced atomically with mode 0600. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. `--no-check` skips the check.
 
 The Anthropic model ID above is documented. The existing Haiku alternative, `claude-haiku-4-5-20251001`, is also documented; access still needs a smoke check. Never reuse an Anthropic API ID as a Bedrock ID. See [Claude model IDs](https://platform.claude.com/docs/en/models/overview) and [Haiku 4.5](https://platform.claude.com/docs/en/models/haiku-4-5/overview).
 
@@ -147,7 +150,7 @@ class Consent(BaseModel):
     confirmed: bool
     participant: str
     confirmed_at: datetime
-    external_processing: bool = False  # required true for --live or --models
+    external_processing: bool = False  # required true for SerpApi search or --models
 
 class CaptureImage(BaseModel):
     image_id: str
@@ -169,7 +172,7 @@ class CaptureArtifact(BaseModel):
     capture: CaptureBundle
     capture_dir: str                  # validated local folder; images remain here
     backend: Literal["mock", "serpapi"]
-    scenario: str                     # mock scenario; "default" in live mode
+    scenario: str                     # mock scenario; "default" with SerpApi
     llm_mode: Literal["off", "anthropic", "bedrock"]
     jev_mode: Literal["fake", "typesafe", "openrouter", "off"]
     llm_model: str | None = None
@@ -240,7 +243,7 @@ class FetchedPage(BaseModel):
 
 The backend owns fixture lookup or image hosting and cleanup. The pipeline uses normalized original page URLs. Map mock fetch dictionary keys `url`, `local_url`, `status_code`, `content_type`, and `html` into `FetchedPage`. Catch `MockHTTPError` using `.status` and `.headers`; ignore any HTML in its `.payload`. HTTP errors carry status and `Retry-After` to the collector; they do not return a successful `FetchedPage`.
 
-| | Mock (default) | Live (`--live`) |
+| | Mock (`--mock`; tests) | SerpApi (default) |
 |---|---|---|
 | Image reference | bare fixture ID, e.g. `alex-front` | presigned S3 URL from `hosting.py` |
 | Reverse search | `client.reverse_image(image.mock_fixture, scenario=scenario, delay_ms=delay)` | `GET https://serpapi.com/search.json` with `engine=yandex_images`, `url`, `tab=about`, `api_key` |
@@ -255,8 +258,8 @@ Rules:
 - In mock mode, `mock_original_url` is the page identity. Normalize `/web/<host>/<path>` links only when their origin exactly matches the configured mock origin, including its port. This covers tests on an ephemeral port. Do not hard-code port 8765 or unwrap arbitrary live URLs. Keep a fetch URL separately.
 - Live normalization removes fragments and known tracking parameters, preserves meaningful query parameters and case-sensitive paths, and resolves relative links. Use canonical hints only after validation; keep source URLs and merged provenance. Do not collapse different account URLs based only on an untrusted canonical tag.
 - Cache only successful search responses inside the run (0.5). Replaying Section 2 onward needs no search cache. Defer shared caches across participants/runs; they complicate consent and purge.
-- Normal tests block all non-loopback sockets as well as selecting mock/fake/off. Constructing the live backend requires explicit `--live`; real models require `--models`. Starting the mock alone does not redirect another client's traffic.
-- Smoke-search uses a consent-bearing capture: `python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1 --live`. It writes a run and cleanup record, uploads one photo, queries `tab=about`, and prints hits. `about` is already Yandex's default; do not pay to compare it with itself. The free plan currently lists 250 searches/month and 50/hour; check the account dashboard before the demo. Quota reporting is optional and uses the separate Account API; allowlist counters because its response includes the key. See [pricing](https://serpapi.com/pricing) and [Account API](https://serpapi.com/account-api).
+- Normal tests block all non-loopback sockets as well as selecting mock/fake/off. Real runs use SerpApi unless `--mock` is given; real models require `--models`. Starting the mock alone does not redirect another client's traffic.
+- Smoke-search uses a consent-bearing capture: `python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1`. It writes a run and cleanup record, uploads one photo, queries `tab=about`, and prints hits. `about` is already Yandex's default; do not pay to compare it with itself. The free plan currently lists 250 searches/month and 50/hour; check the account dashboard before the demo. Quota reporting is optional and uses the separate Account API; allowlist counters because its response includes the key. See [pricing](https://serpapi.com/pricing) and [Account API](https://serpapi.com/account-api).
 
 ### 1.2 Image hosting (live only, **Proposal**)
 
@@ -910,23 +913,26 @@ Example output for `alex` on the mock, fake Jev and optional LLM summary (abridg
 
 ### 5.1 CLI
 
-Today `run` works through stage 0 (it exits with code 3 when asked for a stage that isn't built), `stage` re-checks consent and stops, `smoke-search` validates config and capture and stops, and `purge` works. The rest are commands to implement.
+Today `run` works through stage 0 (it exits with code 3 when asked for a stage that isn't built), `stage` re-checks consent and stops, `smoke-search` validates config and capture and stops, and `purge` and `set-key` work. The rest are commands to implement.
 
 ```bash
-# Mock (default). Start the mock internet in another terminal first.
+# Save the SerpApi key once (hidden prompt; checked with the free Account API)
+python3 -m pipeline set-key serpapi
+
+# Mock search, no credits. Start the mock internet in another terminal first.
 python3 -m mock_internet serve
-python3 -m pipeline run --capture tests/fixtures/captures/alex
-python3 -m pipeline run --capture tests/fixtures/captures/alex --scenario ambiguous
+python3 -m pipeline run --capture tests/fixtures/captures/alex --mock
+python3 -m pipeline run --capture tests/fixtures/captures/alex --mock --scenario ambiguous
 
 # Re-run one stage from a saved run
 python3 -m pipeline stage 2 --run runs/<run_id>
 
 # Optional paid models with mock search; select modes and keys in .env first
-python3 -m pipeline run --capture tests/fixtures/captures/alex --models
+python3 -m pipeline run --capture tests/fixtures/captures/alex --mock --models
 
-# Live search: consent-bearing manifest and one selected image
-python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1 --live
-python3 -m pipeline run --capture captures/<session_id> --live --models
+# SerpApi search (default): consent-bearing manifest with real images
+python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
+python3 -m pipeline run --capture captures/<session_id> --models
 
 # Delete a run's data and any uploaded images
 python3 -m pipeline purge --run runs/<run_id>
@@ -934,9 +940,9 @@ python3 -m pipeline purge --run runs/<run_id>
 python3 -m pipeline purge --run runs/<run_id> --include-capture
 ```
 
-- `run --until N` stops after stage N (0–4). `--scenario` overrides `MOCK_SCENARIO` for mock search; reject it in live mode. Each run gets new artifacts and a new cache.
-- `stage N --run ...` supports 1–4 and loads saved run settings/prerequisites. Require `--live` again for stage 1 of a live run and `--models` for any real model call. Re-read the source manifest's consent; refuse a missing/revoked manifest or changed participant/session. A later stage may read saved live evidence without `--live`; that flag gates new search/hosting, not local reads. Invalidate downstream outputs and never reuse mismatched artifacts.
-- `--models` authorizes the selected modes, without choosing a provider. If modes remain fake/off, print that no real model is enabled. `--live` alone therefore performs live collection with deterministic verification and returns `review_required` if it finds a candidate.
+- `run --until N` stops after stage N (0–4). `--scenario` overrides `MOCK_SCENARIO` for mock search; reject it with SerpApi. Each run gets new artifacts and a new cache.
+- `stage N --run ...` supports 1–4 and loads saved run settings/prerequisites. A saved run keeps the search backend it was created with, and real model calls need `--models`. Re-read the source manifest's consent; refuse a missing/revoked manifest or changed participant/session. Later stages read saved SerpApi evidence locally and make no new search. Invalidate downstream outputs and never reuse mismatched artifacts.
+- `--models` authorizes the selected modes, without choosing a provider. If modes remain fake/off, print that no real model is enabled. A SerpApi run without `--models` therefore performs live collection with deterministic verification and returns `review_required` if it finds a candidate.
 - `--refresh` is valid for live search in `run`, `stage 1`, or `smoke-search`; it bypasses only this run's cache. Smoke-search stores a stage-0 bundle containing only the selected image and stage-1 evidence with `num_images=1`, while retaining the original capture folder for consent/cleanup.
 - `purge` needs no consent or API search key. Attempt S3 deletion, then delete run artifacts, logs, and caches even if remote cleanup fails. On failure, keep only the minimal cleanup manifest, report failure, and allow a retry. Reject paths outside `runs/` and never follow symlinks. `--include-capture` deletes only the registered folder under `captures/`, never test fixtures or arbitrary external paths. Default purge reports the source capture still retained. The capture owner must clear it and any other runs for the participant on withdrawal.
 
@@ -953,7 +959,7 @@ As it runs, `run` prints each of the diagram's views in turn:
 
 `python3 -m unittest discover -s tests -v` is the normal offline suite. Future pipeline tests start their own mock server on a free port, following `tests/test_mock_internet.py`, with mock/fake/off modes forced regardless of `.env`. Patch or reject external connections and model constructors. Tests may inspect synthetic SQLite entity IDs in assertions; the pipeline never receives those IDs.
 
-Keep optional provider smoke checks outside normal discovery and require the same `--live` / `--models` gates as the CLI. Unit tests inject 429s, timeouts, malformed SDK answers, failed cleanup, and invalid citations without paid calls. Do not write brittle tests for model wording or exact live probabilities.
+Keep optional provider smoke checks outside normal discovery and require an explicit SerpApi backend and `--models`, as the CLI does. Unit tests inject 429s, timeouts, malformed SDK answers, failed cleanup, and invalid citations without paid calls. Do not write brittle tests for model wording or exact live probabilities.
 
 Review validation, 2026-10-10: the database persistence test passed. The HTTP suite could not start because the review sandbox blocks sockets (`PermissionError`); it was not rerun successfully here. Direct calls to the existing search handler against the seed in memory confirmed the counts below. Those checks do not replace HTTP integration tests or test the unbuilt pipeline.
 

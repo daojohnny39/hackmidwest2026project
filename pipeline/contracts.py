@@ -55,7 +55,7 @@ class Consent(Contract):
     confirmed: StrictBool
     participant: str = Field(min_length=1)
     confirmed_at: AwareDatetime
-    external_processing: StrictBool = False  # required true for --live or --models
+    external_processing: StrictBool = False  # required true for SerpApi search or --models
 
 
 class CaptureImage(Contract):
@@ -107,7 +107,7 @@ class CaptureArtifact(Contract):
     capture: CaptureBundle
     capture_dir: str  # validated local folder; images remain here
     backend: Backend
-    scenario: str  # mock scenario; "default" in live mode
+    scenario: str  # mock scenario; "default" with SerpApi
     llm_mode: LlmMode
     jev_mode: JevMode
     llm_model: str | None = None

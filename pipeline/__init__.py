@@ -1,6 +1,6 @@
 """Agent pipeline: capture bundle -> evidence -> profiles -> verification -> final profile.
 
-The build spec is docs/agent-pipeline-spec.md. Defaults are offline: mock search,
-fake Jev, and no LLM. `--live` and `--models` are the only switches that allow
-external calls.
+The build spec is docs/agent-pipeline-spec.md. Search defaults to SerpApi (key from
+`python -m pipeline set-key serpapi`); `--mock` uses the local mock internet instead.
+Jev and the LLM default to fake/off, and `--models` is required for real model calls.
 """

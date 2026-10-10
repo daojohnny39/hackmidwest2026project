@@ -210,12 +210,23 @@ create the environment:
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-cp .env.example .env    # optional; defaults are offline (mock, fake Jev, no LLM)
 ```
+
+Search uses SerpApi by default. Save your key once; the prompt hides what you
+type, checks the key with SerpApi's free Account API (no search credits), and
+writes it to the gitignored `.env`, creating it from `.env.example` if needed:
+
+```bash
+.venv/bin/python -m pipeline set-key serpapi
+```
+
+`set-key typesafe`, `set-key openrouter`, and `set-key anthropic` save the other
+keys the same way. Add `--mock` to search the local mock internet instead
+(no key or credits needed), or set `SEARCH_BACKEND=mock` in `.env`.
 
 ```bash
 # Validate a mock capture bundle and write runs/<run_id>/00_capture.json.
-.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 0
+.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 0 --mock
 
 # Delete a run (and, with --include-capture, its source folder under captures/).
 .venv/bin/python -m pipeline purge --run runs/<run_id>
@@ -225,9 +236,11 @@ cp .env.example .env    # optional; defaults are offline (mock, fake Jev, no LLM
 ```
 
 Every run needs a capture folder whose `manifest.json` records the participant's
-consent (spec 0.4). `--live` (real search) and `--models` (paid model calls) are the
-only ways to allow external calls, and both also require
-`consent.external_processing: true`. `runs/` and `captures/` are gitignored.
+consent (spec 0.4). SerpApi search (the default) and `--models` (paid model calls)
+send data to outside services, so both require `consent.external_processing: true`,
+and SerpApi runs need real image files. The mock fixtures under `tests/fixtures/`
+only run with `--mock`. The offline tests always force the mock. `runs/`,
+`captures/`, and `.env` are gitignored.
 
 ## OpenCV setup
 

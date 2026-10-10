@@ -1,4 +1,8 @@
-"""CLI: python3 -m pipeline {run,stage,smoke-search,purge}.
+"""CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
+
+Search uses SerpApi unless `run --mock` (or SEARCH_BACKEND=mock) picks the local
+mock internet. `set-key serpapi` prompts for the key with hidden input and saves
+it to .env.
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 2 bad configuration or usage, 3 stopped because a requested stage isn't built yet.
@@ -7,18 +11,24 @@ Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 from __future__ import annotations
 
 import argparse
+import getpass
+import os
 import sys
 from pathlib import Path
 
 from pipeline.artifacts import ArtifactError, create_run, log_event, purge_run, read_artifact, resolve_run_dir, write_artifact
 from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_consent
-from pipeline.config import REPO_ROOT, ConfigError, Settings, load_settings
+from pipeline.config import REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings, set_env_value
 from pipeline.contracts import CaptureArtifact
+from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 
 LAST_BUILT_STAGE = 0
 STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3: "verification", 4: "summary"}
 DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
+DEFAULT_ENV_FILE = REPO_ROOT / ".env"
+ENV_TEMPLATE = REPO_ROOT / ".env.example"
+SERVICE_NAMES = {"serpapi": "SerpApi", "typesafe": "TypeSafe", "openrouter": "OpenRouter", "anthropic": "Anthropic"}
 
 OK, REFUSED, BAD_CONFIG, NOT_BUILT = 0, 1, 2, 3
 
@@ -32,8 +42,8 @@ def not_built(stage: int) -> int:
     return fail(f"Stage {stage} ({STAGE_NAMES[stage]}) is not built yet.", NOT_BUILT)
 
 
-def settings_for(args: argparse.Namespace, *, scenario: str | None = None) -> Settings:
-    settings = load_settings(live=args.live, models=args.models, scenario=scenario)
+def settings_for(args: argparse.Namespace, *, backend: str | None = None, scenario: str | None = None) -> Settings:
+    settings = load_settings(backend=backend, models=args.models, scenario=scenario)
     if args.models and not settings.real_models_enabled:
         print("--models given, but JEV_MODE and LLM_MODE are fake/off: no real model calls will be made.")
     return settings
@@ -41,11 +51,11 @@ def settings_for(args: argparse.Namespace, *, scenario: str | None = None) -> Se
 
 def cmd_run(args: argparse.Namespace) -> int:
     try:
-        settings = settings_for(args, scenario=args.scenario)
+        settings = settings_for(args, backend="mock" if args.mock else None, scenario=args.scenario)
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
-        loaded = load_capture(args.capture, live=args.live, models=args.models)
+        loaded = load_capture(args.capture, live=settings.live, models=args.models)
     except ConsentError as exc:
         return fail(f"Refused (consent): {exc}", REFUSED)
     except CaptureError as exc:
@@ -94,7 +104,8 @@ def cmd_stage(args: argparse.Namespace) -> int:
     except ArtifactError as exc:
         return fail(f"Refused (run): {exc}", REFUSED)
     try:
-        recheck_consent(artifact, live=args.live, models=args.models)
+        # The run keeps the backend it was made with, so a SerpApi run needs external consent.
+        recheck_consent(artifact, live=artifact.backend == "serpapi", models=args.models)
     except ConsentError as exc:
         return fail(f"Refused (consent): {exc}", REFUSED)
     except CaptureError as exc:
@@ -103,10 +114,8 @@ def cmd_stage(args: argparse.Namespace) -> int:
 
 
 def cmd_smoke_search(args: argparse.Namespace) -> int:
-    if not args.live:
-        return fail("smoke-search makes a real SerpApi call; pass --live to allow it.", BAD_CONFIG)
     try:
-        settings_for(args)
+        settings_for(args, backend="serpapi")
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
@@ -134,14 +143,42 @@ def cmd_purge(args: argparse.Namespace) -> int:
     return OK if clean else REFUSED
 
 
+def cmd_set_key(args: argparse.Namespace) -> int:
+    name, service = SECRET_ENV[args.service], SERVICE_NAMES[args.service]
+    try:
+        value = getpass.getpass(f"Paste your {service} API key (input is hidden), then press Enter: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return fail("Cancelled; nothing was saved.", REFUSED)
+    if not value:
+        return fail("No key entered; nothing was saved.", BAD_CONFIG)
+    if not SECRET_PATTERN.fullmatch(value):
+        return fail("That doesn't look like an API key (expected only letters, digits, '.', '_' and '-'); "
+                    "nothing was saved.", BAD_CONFIG)
+
+    if args.service == "serpapi" and args.check:
+        try:
+            print(f"SerpApi accepted the key: {describe_quota(account_quota(value))}.")
+        except KeyRejected as exc:
+            return fail(f"SerpApi rejected the key ({exc}); nothing was saved.", REFUSED)
+        except AccountCheckFailed as exc:
+            print(f"Warning: couldn't check the key with SerpApi ({exc}); saving it anyway.")
+
+    set_env_value(args.env_file, name, value, template=ENV_TEMPLATE)
+    print(f"Saved {name} to {args.env_file}")
+    if os.environ.get(name, "").strip():
+        print(f"Note: {name} is also exported in this shell, and exported values win over .env. "
+              f"Run `unset {name}` to use the saved key.")
+    return OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m pipeline", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
 
     def gates(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("--live", action="store_true", help="allow real image hosting and SerpApi search")
         sub.add_argument("--models", action="store_true", help="allow paid model calls for the modes set in .env")
-        sub.add_argument("--refresh", action="store_true", help="bypass this run's search cache (live only)")
+        sub.add_argument("--refresh", action="store_true", help="bypass this run's search cache (SerpApi only)")
 
     def runs_dir(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR, help=argparse.SUPPRESS)
@@ -149,7 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="run the pipeline on a capture folder")
     run.add_argument("--capture", type=Path, required=True)
     run.add_argument("--until", type=int, choices=range(5), default=4, metavar="N", help="stop after stage N (0-4)")
-    run.add_argument("--scenario", help="mock scenario (overrides MOCK_SCENARIO; mock only)")
+    run.add_argument("--mock", action="store_true",
+                     help="search the local mock internet instead of SerpApi (no search credits)")
+    run.add_argument("--scenario", help="mock scenario (overrides MOCK_SCENARIO; mock search only)")
     gates(run)
     runs_dir(run)
     run.set_defaults(handler=cmd_run)
@@ -161,7 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_dir(stage)
     stage.set_defaults(handler=cmd_stage)
 
-    smoke = commands.add_parser("smoke-search", help="one live reverse-image search on one image")
+    smoke = commands.add_parser("smoke-search", help="one SerpApi reverse-image search on one image")
     smoke.add_argument("--capture", type=Path, required=True)
     smoke.add_argument("--image-id", required=True)
     gates(smoke)
@@ -175,6 +214,13 @@ def build_parser() -> argparse.ArgumentParser:
     purge.add_argument("--captures-dir", type=Path, default=DEFAULT_CAPTURES_DIR, help=argparse.SUPPRESS)
     runs_dir(purge)
     purge.set_defaults(handler=cmd_purge)
+
+    set_key = commands.add_parser("set-key", help="prompt for an API key (hidden input) and save it to .env")
+    set_key.add_argument("service", choices=SECRET_ENV, help="which key to save")
+    set_key.add_argument("--no-check", dest="check", action="store_false",
+                         help="save without checking a SerpApi key against SerpApi's free Account API")
+    set_key.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help=argparse.SUPPRESS)
+    set_key.set_defaults(handler=cmd_set_key)
     return parser
 
 
