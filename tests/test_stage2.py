@@ -1,8 +1,9 @@
 """Section 2: account extraction, grouping, and the connection graph (spec 2a-2e).
 
 Mock cases use tests/seed_evidence.py, which builds 01_raw_evidence bundles from the
-mock seed the way Section 1's deterministic collector does. Real-Jev behavior runs
-through an injected responder, so no test reaches a provider.
+mock seed the way Section 1's deterministic collector does; CollectorEndToEndTests
+checks that the real collector, over a local mock server, gives the same result.
+Real-Jev behavior runs through an injected responder, so no test reaches a provider.
 """
 
 import io
@@ -28,6 +29,7 @@ from pipeline.contracts import (
     validate_references,
 )
 from pipeline.jev import Jev
+from pipeline.stage1_collect import run_stage1
 from pipeline.stage2_profiles import (
     build_graphs,
     build_profiles,
@@ -41,7 +43,7 @@ from pipeline.stage2_profiles import (
     title_fields,
 )
 from tests.seed_evidence import SEARCHED_AT, collect
-from tests.support import FIXTURE_CAPTURES, OfflineTestCase
+from tests.support import FIXTURE_CAPTURES, MockServerTestCase, OfflineTestCase
 
 
 def settings(mode="fake", **env):
@@ -485,6 +487,37 @@ class ExtractionTests(OfflineTestCase):
         bundle = build_profiles(self.raw_with(source, target))
         self.assertEqual(len(bundle.profiles), 1)
         self.assertEqual(incoming(bundle, "p1"), {"https://x.com/caseykeys": (1, 50)})
+
+
+class CollectorEndToEndTests(MockServerTestCase):
+    """The real Section 1 collector over HTTP, then Section 2, for every mock-matrix row (spec 2e)."""
+
+    def stage2_after_stage1(self, capture, scenario="default"):
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        loaded = load_capture(FIXTURE_CAPTURES / capture)
+        run_id, run_dir = create_run(Path(tmp), loaded.bundle.session_id)
+        write_artifact(run_dir, 0, CaptureArtifact(
+            run_id=run_id, capture=loaded.bundle, capture_dir=str(loaded.capture_dir), backend="mock",
+            scenario=scenario, llm_mode="off", jev_mode="fake"))
+        settings = load_settings(backend="mock", environ={"MOCK_INTERNET_URL": self.mock_url, "JEV_MODE": "fake"},
+                                 dotenv_path=None)
+        run_stage1(run_dir, settings)
+        return run_stage2(run_dir, settings), run_id
+
+    def test_matches_seed_built_evidence(self):
+        for capture, scenario in (("alex", "default"), ("alex", "ambiguous"), ("alex", "stale"), ("alex", "duplicates"),
+                                  ("alex", "empty"), ("sam", "default"), ("casey", "default"), ("unknown", "default")):
+            with self.subTest(capture=capture, scenario=scenario):
+                collected, run_id = self.stage2_after_stage1(capture, scenario)
+                expected = build_profiles(collect(capture, scenario, run_id=run_id), jev=fake_jev())
+                self.assertEqual(collected.model_dump(exclude={"jev_calls"}), expected.model_dump(exclude={"jev_calls"}))
+                self.assertEqual([c.answers for c in collected.jev_calls], [c.answers for c in expected.jev_calls])
+
+    def test_alex_targets_through_the_collector(self):
+        bundle, _ = self.stage2_after_stage1("alex", "ambiguous")
+        self.assertEqual([(p.name, len(p.account_ids)) for p in bundle.profiles], [("Alex Morgan", 5), ("Alex Morgan", 4)])
+        self.assertEqual([(g.mean_link_trust, g.internal_link_density) for g in bundle.graphs.values()],
+                         [(76.0, 0.4), (72.5, 0.5)])
 
 
 class StageRunTests(OfflineTestCase):
