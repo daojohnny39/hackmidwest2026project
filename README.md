@@ -221,12 +221,24 @@ writes it to the gitignored `.env`, creating it from `.env.example` if needed:
 ```
 
 `set-key typesafe`, `set-key openrouter`, and `set-key anthropic` save the other
-keys the same way. Add `--mock` to search the local mock internet instead
+keys the same way. A TypeSafe (Jev) key is checked first by listing TypeSafe's
+models, which makes no Jev decision; a rejected key isn't saved. Saving a key doesn't
+switch anything on: to use Jev, set `JEV_MODE=typesafe` in `.env` and add `--models`
+to `run` or `stage`, since those calls are paid.
+
+```bash
+.venv/bin/python -m pipeline set-key typesafe
+```
+
+Add `--mock` to search the local mock internet instead
 (no key or credits needed), or set `SEARCH_BACKEND=mock` in `.env`.
 
 ```bash
 # Validate a mock capture bundle and write runs/<run_id>/00_capture.json.
 .venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 0 --mock
+
+# Rebuild accounts, profiles, and trust graphs (Section 2) from a run's saved evidence.
+.venv/bin/python -m pipeline stage 2 --run runs/<run_id>
 
 # Delete a run (and, with --include-capture, its source folder under captures/).
 .venv/bin/python -m pipeline purge --run runs/<run_id>

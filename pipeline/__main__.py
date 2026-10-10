@@ -1,8 +1,8 @@
 """CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
 
 Search uses SerpApi unless `run --mock` (or SEARCH_BACKEND=mock) picks the local
-mock internet. `set-key serpapi` prompts for the key with hidden input and saves
-it to .env.
+mock internet. `set-key {serpapi,typesafe,openrouter,anthropic}` prompts for a key
+with hidden input and saves it to .env; SerpApi and TypeSafe keys are checked first.
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 2 bad configuration or usage, 3 stopped because a requested stage isn't built yet.
@@ -24,6 +24,7 @@ from pipeline.artifacts import (
 from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_consent
 from pipeline.config import REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings, set_env_value
 from pipeline.contracts import CaptureArtifact
+from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected, check_typesafe_key
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 from pipeline import stage2_profiles
 
@@ -40,6 +41,8 @@ DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 ENV_TEMPLATE = REPO_ROOT / ".env.example"
 SERVICE_NAMES = {"serpapi": "SerpApi", "typesafe": "TypeSafe", "openrouter": "OpenRouter", "anthropic": "Anthropic"}
+# The .env mode that puts a saved model key to use; real modes also need --models.
+KEY_MODES = {"typesafe": "JEV_MODE=typesafe", "openrouter": "JEV_MODE=openrouter", "anthropic": "LLM_MODE=anthropic"}
 
 OK, REFUSED, BAD_CONFIG, NOT_BUILT = 0, 1, 2, 3
 
@@ -210,9 +213,21 @@ def cmd_set_key(args: argparse.Namespace) -> int:
             return fail(f"SerpApi rejected the key ({exc}); nothing was saved.", REFUSED)
         except AccountCheckFailed as exc:
             print(f"Warning: couldn't check the key with SerpApi ({exc}); saving it anyway.")
+    if args.service == "typesafe" and args.check:
+        # Lists models: an authenticated request that makes no Jev decision.
+        try:
+            models = check_typesafe_key(value)
+            print(f"TypeSafe accepted the key; models available: {', '.join(models) or 'none listed'}.")
+        except TypeSafeKeyRejected as exc:
+            return fail(f"TypeSafe rejected the key ({exc}); nothing was saved.", REFUSED)
+        except TypeSafeCheckFailed as exc:
+            print(f"Warning: couldn't check the key with TypeSafe ({exc}); saving it anyway.")
 
     set_env_value(args.env_file, name, value, template=ENV_TEMPLATE)
     print(f"Saved {name} to {args.env_file}")
+    if args.service in KEY_MODES:
+        print(f"To use it, set {KEY_MODES[args.service]} in .env and add --models to `run` or `stage`; "
+              "those calls are paid.")
     if os.environ.get(name, "").strip():
         print(f"Note: {name} is also exported in this shell, and exported values win over .env. "
               f"Run `unset {name}` to use the saved key.")
@@ -265,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     set_key = commands.add_parser("set-key", help="prompt for an API key (hidden input) and save it to .env")
     set_key.add_argument("service", choices=SECRET_ENV, help="which key to save")
     set_key.add_argument("--no-check", dest="check", action="store_false",
-                         help="save without checking a SerpApi key against SerpApi's free Account API")
+                         help="save without checking the key (SerpApi's free Account API, TypeSafe's model list)")
     set_key.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help=argparse.SUPPRESS)
     set_key.set_defaults(handler=cmd_set_key)
     return parser

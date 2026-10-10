@@ -1,6 +1,6 @@
-"""`python -m pipeline set-key`, the .env writer, and the SerpApi key check.
+"""`python -m pipeline set-key`, the .env writer, and the SerpApi and TypeSafe key checks.
 
-The prompt and SerpApi are patched; nothing leaves the machine.
+The prompt, SerpApi, and TypeSafe are patched; nothing leaves the machine.
 """
 
 import fnmatch
@@ -21,12 +21,14 @@ from dotenv import dotenv_values
 from pipeline import __main__ as cli
 from pipeline.__main__ import BAD_CONFIG, OK, REFUSED, main
 from pipeline.config import REPO_ROOT, load_settings, set_env_value
+from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 from tests.support import OfflineTestCase
 
 KEY = "0123abcdSECRETkey9876"
 QUOTA = {"plan_name": "Free Plan", "searches_per_month": 250, "total_searches_left": 250,
          "account_rate_limit_per_hour": 50}
+MODELS = ["jev-1.13.0"]
 
 
 class EnvFileCase(OfflineTestCase):
@@ -126,16 +128,22 @@ class SetEnvValueTests(EnvFileCase):
 
 
 class SetKeyCommandTests(EnvFileCase):
-    def set_key(self, *argv, entered=KEY, quota=QUOTA):
-        """Run set-key with a patched prompt and Account API; return (code, out, err, check mock)."""
+    def set_key(self, *argv, entered=KEY, quota=QUOTA, models=MODELS):
+        """Run set-key with patched prompt and key checks; return (code, out, err, SerpApi check mock).
+
+        The TypeSafe check mock is left on self.typesafe_checked.
+        """
         prompt = patch.object(cli.getpass, "getpass",
                               side_effect=entered if isinstance(entered, BaseException) or callable(entered) else None,
                               return_value=entered)
         check = patch.object(cli, "account_quota",
                              side_effect=quota if isinstance(quota, BaseException) else None,
                              return_value=quota)
+        typesafe = patch.object(cli, "check_typesafe_key",
+                                side_effect=models if isinstance(models, BaseException) else None,
+                                return_value=models)
         out, err = io.StringIO(), io.StringIO()
-        with prompt, check as checked, redirect_stdout(out), redirect_stderr(err):
+        with prompt, check as checked, typesafe as self.typesafe_checked, redirect_stdout(out), redirect_stderr(err):
             code = main(["set-key", *argv, "--env-file", str(self.env_file)])
         self.assertNotIn(KEY, out.getvalue() + err.getvalue())
         return code, out.getvalue(), err.getvalue(), checked
@@ -170,10 +178,46 @@ class SetKeyCommandTests(EnvFileCase):
         self.assertEqual(self.saved(), KEY)
 
     def test_other_services_are_saved_without_a_check(self):
-        code, _, _, checked = self.set_key("typesafe")
+        for service, name, mode in (("openrouter", "OPENROUTER_API_KEY", "JEV_MODE=openrouter"),
+                                    ("anthropic", "ANTHROPIC_API_KEY", "LLM_MODE=anthropic")):
+            with self.subTest(service=service):
+                code, out, _, checked = self.set_key(service)
+                self.assertEqual(code, OK)
+                checked.assert_not_called()
+                self.typesafe_checked.assert_not_called()
+                self.assertEqual(dotenv_values(self.env_file)[name], KEY)
+                self.assertIn(f"set {mode} in .env and add --models", out)
+
+    def typesafe_saved(self):
+        return dotenv_values(self.env_file).get("TYPESAFE_API_KEY") if self.env_file.exists() else None
+
+    def test_saves_a_checked_typesafe_key(self):
+        code, out, _, checked = self.set_key("typesafe")
         self.assertEqual(code, OK)
+        self.typesafe_checked.assert_called_once_with(KEY)
         checked.assert_not_called()
-        self.assertEqual(dotenv_values(self.env_file)["TYPESAFE_API_KEY"], KEY)
+        self.assertIn("TypeSafe accepted the key; models available: jev-1.13.0.", out)
+        self.assertIn("set JEV_MODE=typesafe in .env and add --models", out)
+        self.assertEqual(self.typesafe_saved(), KEY)
+        self.assertEqual(dotenv_values(self.env_file)["JEV_MODE"], "fake")  # set-key never switches the mode
+
+    def test_rejected_typesafe_key_is_not_saved(self):
+        code, _, err, _ = self.set_key("typesafe", models=TypeSafeKeyRejected("HTTP 401"))
+        self.assertEqual(code, REFUSED)
+        self.assertIn("TypeSafe rejected the key (HTTP 401); nothing was saved.", err)
+        self.assertIsNone(self.typesafe_saved())
+
+    def test_unreachable_typesafe_check_still_saves(self):
+        code, out, _, _ = self.set_key("typesafe", models=TypeSafeCheckFailed("TypeSafeAPIConnectionError"))
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the key with TypeSafe", out)
+        self.assertEqual(self.typesafe_saved(), KEY)
+
+    def test_no_check_skips_typesafe(self):
+        code, _, _, _ = self.set_key("typesafe", "--no-check")
+        self.assertEqual(code, OK)
+        self.typesafe_checked.assert_not_called()
+        self.assertEqual(self.typesafe_saved(), KEY)
 
     def test_empty_or_malformed_input_saves_nothing(self):
         for entered in ("", "   ", "not a key", "key#comment"):
