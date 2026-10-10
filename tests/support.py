@@ -8,10 +8,13 @@ may hold real keys), and makes any non-loopback socket connection fail.
 import ipaddress
 import os
 import socket
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from mock_internet.server import create_server
 from pipeline.config import load_settings
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,3 +77,37 @@ class OfflineTestCase(unittest.TestCase):
             patcher = patch.object(socket.socket, name, guard)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+
+class MockServerTestCase(OfflineTestCase):
+    """OfflineTestCase plus one seeded mock internet per test class, on a free loopback port.
+
+    self.mock_url is its origin, e.g. http://127.0.0.1:50123. Request counts are in
+    self.mock_server.counts (route:/fetch, route:/api/reverse-image, ...).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._mock_folder = tempfile.TemporaryDirectory()
+        cls.mock_server = create_server(port=0, db_path=Path(cls._mock_folder.name) / "mock.sqlite3")
+        cls._mock_thread = threading.Thread(target=cls.mock_server.serve_forever, daemon=True)
+        cls._mock_thread.start()
+        cls.mock_url = cls.mock_server.base_url
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock_server.shutdown()
+        cls.mock_server.server_close()
+        cls._mock_thread.join()
+        cls._mock_folder.cleanup()
+        super().tearDownClass()
+
+    def setUp(self):
+        super().setUp()
+        with self.mock_server.counts_lock:
+            self.mock_server.counts.clear()
+
+    def mock_count(self, route: str) -> int:
+        with self.mock_server.counts_lock:
+            return self.mock_server.counts[f"route:{route}"]
