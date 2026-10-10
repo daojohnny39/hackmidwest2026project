@@ -327,6 +327,39 @@ class Jev:
         raise _CallFailed("timeout", request_id=request_id, retries=self.max_retries)  # not reached
 
 
+class KeyRejected(Exception):
+    """TypeSafe refused the key."""
+
+
+class KeyCheckFailed(Exception):
+    """TypeSafe couldn't be reached or answered unexpectedly; the key may still be valid."""
+
+
+def check_typesafe_key(api_key: str, *, transport=None) -> list[str]:
+    """List TypeSafe's models with this key: an authenticated GET that sends no decision request.
+
+    Returns the model names. Errors carry the failure type or HTTP status, never the key.
+    """
+    from typesafe_sdk import (
+        RetryPolicy, TypeSafeAPIError, TypeSafeAuthenticationError, TypeSafeClient, TypeSafeError,
+        TypeSafePermissionDeniedError,
+    )
+
+    options = {"api_key": api_key, "retry": RetryPolicy(max_retries=0), "timeout": 10.0}
+    if transport is not None:
+        options["transport"] = transport
+    try:
+        with TypeSafeClient(**options) as client:
+            listing = client.models.list()
+    except (TypeSafeAuthenticationError, TypeSafePermissionDeniedError) as exc:
+        raise KeyRejected(f"HTTP {exc.status}") from None
+    except TypeSafeAPIError as exc:
+        raise KeyCheckFailed(f"HTTP {exc.status}") from None
+    except TypeSafeError as exc:
+        raise KeyCheckFailed(type(exc).__name__) from None
+    return [model.name for model in listing.models]
+
+
 def _retry_after(value: str | None) -> float | None:
     if not value:
         return None

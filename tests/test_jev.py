@@ -12,7 +12,10 @@ import httpx
 import httpx2
 
 from pipeline.config import load_settings
-from pipeline.jev import Jev, JevAnswerError, check_questions, choice, noul, score, validate_answers
+from pipeline.jev import (
+    Jev, JevAnswerError, KeyCheckFailed, KeyRejected, check_questions, check_typesafe_key, choice, noul, score,
+    validate_answers,
+)
 from tests.support import OfflineTestCase
 
 QUESTIONS = {
@@ -258,6 +261,34 @@ class TypeSafeRouteTests(OfflineTestCase):
         self.assertEqual(seen["body"]["questions"]["best"]["criteria"], {"p1": "Candidate p1", "none": "No candidate"})
         self.assertEqual(call.model, "jev-1.13.0")
         self.assertEqual(call.answers["best"]["choice"], "p1")
+
+    def test_key_check_lists_models_without_a_decision_request(self):
+        seen = []
+
+        def handler(request):
+            seen.append((request.method, request.url.path, request.headers["authorization"]))
+            return httpx2.Response(200, json={"models": [
+                {"name": "jev-1.13.0", "description": "Jev", "release_date": "2026-09-17"}]})
+
+        self.assertEqual(check_typesafe_key("ts-key", transport=httpx2.MockTransport(handler)), ["jev-1.13.0"])
+        self.assertEqual(seen, [("GET", "/v1/models", "Bearer ts-key")])
+
+    def test_key_check_failures(self):
+        def respond(status):
+            return httpx2.MockTransport(lambda request: httpx2.Response(status, json={"error": {"message": "no"}}))
+
+        for status in (401, 403):
+            with self.subTest(status=status), self.assertRaises(KeyRejected):
+                check_typesafe_key("bad", transport=respond(status))
+        with self.assertRaises(KeyCheckFailed):
+            check_typesafe_key("key", transport=respond(500))
+
+        def refuse(request):
+            raise httpx2.ConnectError("refused", request=request)
+
+        with self.assertRaises(KeyCheckFailed) as caught:
+            check_typesafe_key("secret-key", transport=httpx2.MockTransport(refuse))
+        self.assertNotIn("secret-key", str(caught.exception))
 
     def test_sdk_errors_become_codes(self):
         for status, code in ((401, "unauthorized"), (400, "invalid_request")):
