@@ -198,3 +198,33 @@ For assertions, `pages.entity_id` provides synthetic ground truth. Ground-truth
 IDs are absent from search responses and scraped HTML, so retrieval tests must
 work with the visible content. Request counters reset when the server restarts;
 page data persists.
+
+## Agent pipeline
+
+The pipeline in `pipeline/` follows `docs/agent-pipeline-spec.md`. Only Section 0
+(foundation) is built so far: settings, artifact contracts, the capture loader and
+consent gate, run folders, and the CLI. It needs Python 3.12 and the packages in
+`requirements.txt`. If your Python has no pip, [uv](https://docs.astral.sh/uv/) can
+create the environment:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+cp .env.example .env    # optional; defaults are offline (mock, fake Jev, no LLM)
+```
+
+```bash
+# Validate a mock capture bundle and write runs/<run_id>/00_capture.json.
+.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 0
+
+# Delete a run (and, with --include-capture, its source folder under captures/).
+.venv/bin/python -m pipeline purge --run runs/<run_id>
+
+# Offline test suite: mock internet plus pipeline.
+.venv/bin/python -m unittest discover -s tests
+```
+
+Every run needs a capture folder whose `manifest.json` records the participant's
+consent (spec 0.4). `--live` (real search) and `--models` (paid model calls) are the
+only ways to allow external calls, and both also require
+`consent.external_processing: true`. `runs/` and `captures/` are gitignored.

@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. The pipeline package and capture fixtures below do not exist yet. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures) is built; Sections 1–5 are not. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -84,7 +84,7 @@ Project Directory/
 
 ### 0.2 Dependencies
 
-Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`, `pillow` (image validation), and `python-dotenv` directly. Add `strands-agents[anthropic]` for the proposed Anthropic route, `typesafe-sdk` for direct TypeSafe, and `boto3` for S3 or Bedrock. The existing mock needs only the standard library. Pin versions after one install and SDK smoke check; package compatibility on this machine's Python 3.14 has not been tested. Import model clients lazily so offline mode needs no credentials.
+Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`, `pillow` (image validation), and `python-dotenv` directly. Add `strands-agents[anthropic]` for the proposed Anthropic route, `typesafe-sdk` for direct TypeSafe, and `boto3` for S3 or Bedrock. The existing mock needs only the standard library. `requirements.txt` pins the versions that installed cleanly on Python 3.12 (created with `uv venv --python 3.12 .venv`, since this machine's Python 3.14 has no pip) and passed an import-only SDK smoke check. Import model clients lazily so offline mode needs no credentials.
 
 **Proposal:** build one LLM provider and the Jev route matching Johnny's key first. Keep the wrapper boundary; defer the second provider, text-search expansion, and graph-driven re-merging. Plain Python owns stage order. No graph database or multi-agent orchestration framework is needed.
 
@@ -205,11 +205,11 @@ Contract snippets omit imports and validators. Use postponed annotations, `BaseM
 
 ### 0.6 Done when
 
-- [ ] `python3 -m pipeline run --capture tests/fixtures/captures/alex --until 0` validates the manifest and writes `00_capture.json`.
-- [ ] The same command refuses a manifest with `"confirmed": false`, or with no `consent` block.
-- [ ] Full artifacts for each stage round-trip through `contracts.py`; snippets marked abridged are illustrative only.
-- [ ] Missing external consent, duplicate IDs, escaping paths, and mock fixture IDs in live mode fail before any call. `purge` remains available after consent withdrawal.
-- [ ] Ignore rules cover captures, artifacts, caches, and traces before a real run.
+- [x] `python3 -m pipeline run --capture tests/fixtures/captures/alex --until 0` validates the manifest and writes `00_capture.json`.
+- [x] The same command refuses a manifest with `"confirmed": false`, or with no `consent` block.
+- [x] Full artifacts for each stage round-trip through `contracts.py`; snippets marked abridged are illustrative only.
+- [x] Missing external consent, duplicate IDs, escaping paths, and mock fixture IDs in live mode fail before any call. `purge` remains available after consent withdrawal.
+- [x] Ignore rules cover captures, artifacts, caches, and traces before a real run.
 
 ## 4. Section 1: Per-image search and scrape → raw structured data
 
@@ -495,7 +495,7 @@ Implement the route matching Johnny's key first:
 | TypeSafe | `TypeSafeClient` / `AsyncTypeSafeClient` from `typesafe_sdk`; `system_one(state=..., questions=...)`. REST: `POST https://api.typesafe.ai/v1/systemone` | `jev-latest`; log the returned version |
 | OpenRouter | `POST https://openrouter.ai/api/alpha/decisions` with Bearer key and JSON `model`, `state`, `questions` | `typesafe/jev-1.13`; alias `~typesafe/jev-latest` |
 
-Use `Noul`, `Choice`, and `Score` from `typesafe_sdk` for SDK questions. Documented accessors are `result.nouls[key].noul`, `result.choices[key].choice`, and `result.scores[key].score`. The quickstart also shows `answers`; verify against the pinned SDK. TypeSafe documents OpenRouter configuration with `base_url="https://openrouter.ai/api"` and its route-specific key/model. Direct HTTP to Decisions is a small fallback if SDK routing differs. Do not send Jev to a chat-completions endpoint or use it as the Strands text model. See [TypeSafe quickstart](https://docs.typesafe.ai/introduction/quickstart), [SDK usage](https://docs.typesafe.ai/sdk/python/usage), and [OpenRouter Jev guide](https://openrouter.ai/docs/guides/community/jev).
+Use `Noul`, `Choice`, and `Score` from `typesafe_sdk` for SDK questions. The pinned `typesafe-sdk==0.7.4` returns `SystemOneResponse` with only `model`, `usage`, and `answers`. `answers[key]` is discriminated by `type`: `NoulAnswer.noul`; `ChoiceAnswer.choice`, `.confidence`, `.probabilities`; `ScoreAnswer.score`, `.confidence`, `.probabilities`, `.legend`. The docs' `result.nouls[key]`-style accessors do not exist in this version (checked 2026-10-10). TypeSafe documents OpenRouter configuration with `base_url="https://openrouter.ai/api"` and its route-specific key/model. Direct HTTP to Decisions is a small fallback if SDK routing differs. Do not send Jev to a chat-completions endpoint or use it as the Strands text model. See [TypeSafe quickstart](https://docs.typesafe.ai/introduction/quickstart), [SDK usage](https://docs.typesafe.ai/sdk/python/usage), and [OpenRouter Jev guide](https://openrouter.ai/docs/guides/community/jev).
 
 Normalize both routes to `JevCall` (2d). Validate question IDs, types, probability bounds, and choices before using answers. `noul` is itself a probability, with no `confidence` field. `choice.criteria` maps option IDs (including `none`) to descriptions; use `probabilities[choice]`, not `choice.confidence`. `score.criteria` is an ordered list; its answer is a possibly fractional zero-based level. See the [Decisions schema](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request).
 
@@ -910,7 +910,7 @@ Example output for `alex` on the mock, fake Jev and optional LLM summary (abridg
 
 ### 5.1 CLI
 
-These are commands to implement. Today only the `mock_internet` commands and existing mock tests work.
+Today `run` works through stage 0 (it exits with code 3 when asked for a stage that isn't built), `stage` re-checks consent and stops, `smoke-search` validates config and capture and stops, and `purge` works. The rest are commands to implement.
 
 ```bash
 # Mock (default). Start the mock internet in another terminal first.
@@ -1032,11 +1032,11 @@ External checks still open: actual package installation and authenticated provid
 
 Section 0
 
-- [ ] `requirements.txt`, the `pipeline/` package, `config.py`, and new `.env.example` entries
-- [ ] `contracts.py` with every model in this spec
-- [ ] `capture.py` with the consent gate, plus mock capture bundles for alex, sam, casey, and unknown
-- [ ] `artifacts.py` and `run_log.jsonl`
-- [ ] Ignore captures/runs/caches/traces; enforce both external-call gates and redact logs
+- [x] `requirements.txt`, the `pipeline/` package, `config.py`, and new `.env.example` entries
+- [x] `contracts.py` with every model in this spec
+- [x] `capture.py` with the consent gate, plus mock capture bundles for alex, sam, casey, and unknown
+- [x] `artifacts.py` and `run_log.jsonl`
+- [x] Ignore captures/runs/caches/traces; enforce both external-call gates and redact logs
 - [ ] Send the capture contract (0.4) to the teammates
 
 Section 1
