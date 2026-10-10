@@ -2,7 +2,8 @@
 
 OfflineTestCase forces the mock/fake/off modes regardless of .env, clears every
 credential variable, stops load_settings() from reading the repo's .env (which
-may hold real keys), and makes any non-loopback socket connection fail.
+may hold real keys) and boto3 from reading ~/.aws, and makes any non-loopback
+socket connection fail.
 """
 
 import ipaddress
@@ -23,11 +24,13 @@ FIXTURE_CAPTURES = REPO_ROOT / "tests" / "fixtures" / "captures"
 PIPELINE_ENV = (
     "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS",
     "SERPAPI_KEY", "IMAGE_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN", "AWS_PROFILE", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
-    "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
+    "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "JEV_MODE", "JEV_MODEL",
+    "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
 )
 
-OFFLINE_ENV = {"SEARCH_BACKEND": "mock", "JEV_MODE": "fake", "LLM_MODE": "off"}
+# boto3 reads ~/.aws (where `set-key aws` saves keys) unless these point elsewhere; os.devnull is never a file it loads.
+OFFLINE_ENV = {"SEARCH_BACKEND": "mock", "JEV_MODE": "fake", "LLM_MODE": "off",
+               "AWS_SHARED_CREDENTIALS_FILE": os.devnull, "AWS_CONFIG_FILE": os.devnull}
 
 
 class ExternalNetworkBlocked(RuntimeError):

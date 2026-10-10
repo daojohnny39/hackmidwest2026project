@@ -3,6 +3,7 @@
 Search uses SerpApi unless `run --mock` (or SEARCH_BACKEND=mock) picks the local
 mock internet. `set-key {serpapi,typesafe,openrouter,anthropic}` prompts for a key
 with hidden input and saves it to .env; SerpApi and TypeSafe keys are checked first.
+`set-key aws` saves an AWS access key pair to ~/.aws/credentials after a free STS check.
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 2 bad configuration or usage, 3 stopped because a requested stage isn't built yet.
@@ -19,6 +20,7 @@ import warnings
 from collections.abc import Callable
 from pathlib import Path
 
+from pipeline import aws_credentials
 from pipeline.artifacts import (
     ArtifactError, create_run, invalidate_from, log_event, purge_run, read_artifact, resolve_run_dir, write_artifact,
 )
@@ -219,19 +221,37 @@ def cmd_purge(args: argparse.Namespace) -> int:
     return OK if clean else REFUSED
 
 
-def cmd_set_key(args: argparse.Namespace) -> int:
-    name, service = SECRET_ENV[args.service], SERVICE_NAMES[args.service]
+class InputRefused(Exception):
+    def __init__(self, message: str, code: int):
+        super().__init__(message)
+        self.code = code
+
+
+def read_hidden(prompt: str) -> str:
+    """One line read without echo; raises InputRefused if it can't be hidden or the user cancels."""
     try:
         # getpass falls back to visible input with only a warning; refuse instead, before anything is read.
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
-            value = getpass.getpass(f"Paste your {service} API key (input is hidden), then press Enter: ").strip()
+            return getpass.getpass(prompt).strip()
     except getpass.GetPassWarning:
-        return fail("This terminal can't hide what you type, so set-key won't read the key here. "
-                    "Run it from an interactive terminal; nothing was saved.", REFUSED)
+        raise InputRefused("This terminal can't hide what you type, so set-key won't read the key here. "
+                           "Run it from an interactive terminal; nothing was saved.", REFUSED) from None
     except (EOFError, KeyboardInterrupt):
         print()
-        return fail("Cancelled; nothing was saved.", REFUSED)
+        raise InputRefused("Cancelled; nothing was saved.", REFUSED) from None
+
+
+def cmd_set_key(args: argparse.Namespace) -> int:
+    if args.service == "aws":
+        return set_aws_keys(args)
+    if args.region:
+        return fail("--region applies to `set-key aws` only.", BAD_CONFIG)
+    name, service = SECRET_ENV[args.service], SERVICE_NAMES[args.service]
+    try:
+        value = read_hidden(f"Paste your {service} API key (input is hidden), then press Enter: ")
+    except InputRefused as exc:
+        return fail(str(exc), exc.code)
     if not value:
         return fail("No key entered; nothing was saved.", BAD_CONFIG)
     if not SECRET_PATTERN.fullmatch(value):
@@ -263,6 +283,53 @@ def cmd_set_key(args: argparse.Namespace) -> int:
     if os.environ.get(name, "").strip():
         print(f"Note: {name} is also exported in this shell, and exported values win over .env. "
               f"Run `unset {name}` to use the saved key.")
+    return OK
+
+
+def set_aws_keys(args: argparse.Namespace) -> int:
+    """Check an AWS access key pair with STS, save it as the default profile, and optionally set AWS_REGION."""
+    if args.region and not aws_credentials.REGION.fullmatch(args.region):
+        return fail(f"{args.region!r} isn't an AWS region name (for example us-east-1); nothing was saved.",
+                    BAD_CONFIG)
+    try:
+        key_id = read_hidden("Paste your AWS access key ID (input is hidden), then press Enter: ")
+        if aws_credentials.TEMPORARY_KEY_ID.fullmatch(key_id):
+            return fail("That's a temporary key ID (ASIA...), which needs a session token and expires. "
+                        "Create a long-term access key (AKIA...) for an IAM user; nothing was saved.", BAD_CONFIG)
+        if not aws_credentials.ACCESS_KEY_ID.fullmatch(key_id):
+            return fail("That doesn't look like an AWS access key ID (20 characters starting with AKIA); "
+                        "nothing was saved.", BAD_CONFIG)
+        secret = read_hidden("Paste your AWS secret access key (input is hidden), then press Enter: ")
+    except InputRefused as exc:
+        return fail(str(exc), exc.code)
+    if not aws_credentials.SECRET_ACCESS_KEY.fullmatch(secret):
+        return fail("That doesn't look like an AWS secret access key (40 characters); nothing was saved.",
+                    BAD_CONFIG)
+
+    if args.check:
+        try:
+            identity = aws_credentials.check_keys(key_id, secret, args.region)
+            print(f"AWS accepted the keys: account {identity.account}, {identity.arn}.")
+            if identity.is_root:
+                print("Warning: these are the account's root-user keys, which can do anything in the account. "
+                      "AWS recommends an IAM user's keys instead; delete the root keys once you have those.")
+        except aws_credentials.KeyRejected as exc:
+            return fail(f"AWS rejected the keys ({exc}); nothing was saved.", REFUSED)
+        except aws_credentials.KeyCheckFailed as exc:
+            print(f"Warning: couldn't check the keys with AWS ({exc}); saving them anyway.")
+
+    path = args.credentials_file or aws_credentials.default_credentials_file()
+    replaced = aws_credentials.save_keys(path, key_id, secret)
+    print(f"{'Replaced' if replaced else 'Saved'} the [default] profile in {path} "
+          f"(key ending {key_id[-4:]}). S3 hosting and Bedrock read it from there.")
+    if args.region:
+        set_env_value(args.env_file, "AWS_REGION", args.region, template=ENV_TEMPLATE)
+        print(f"Saved AWS_REGION={args.region} to {args.env_file}")
+    exported = [name for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_PROFILE", "AWS_REGION")
+                if os.environ.get(name, "").strip() and (name != "AWS_REGION" or args.region)]
+    if exported:
+        print(f"Note: {', '.join(exported)} {'is' if len(exported) == 1 else 'are'} also exported in this shell "
+              f"and win over the saved values. Run `unset {' '.join(exported)}` to use them.")
     return OK
 
 
@@ -309,11 +376,15 @@ def build_parser() -> argparse.ArgumentParser:
     runs_dir(purge)
     purge.set_defaults(handler=cmd_purge)
 
-    set_key = commands.add_parser("set-key", help="prompt for an API key (hidden input) and save it to .env")
-    set_key.add_argument("service", choices=SECRET_ENV, help="which key to save")
+    set_key = commands.add_parser("set-key", help="prompt for an API key (hidden input) and save it to .env "
+                                                  "(aws: to ~/.aws/credentials)")
+    set_key.add_argument("service", choices=[*SECRET_ENV, "aws"], help="which key to save")
     set_key.add_argument("--no-check", dest="check", action="store_false",
-                         help="save without checking the key (SerpApi's free Account API, TypeSafe's model list)")
+                         help="save without checking the key (SerpApi's free Account API, TypeSafe's model list, "
+                              "AWS STS GetCallerIdentity)")
+    set_key.add_argument("--region", help="aws only: also save this AWS_REGION to .env (for example us-east-1)")
     set_key.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help=argparse.SUPPRESS)
+    set_key.add_argument("--credentials-file", type=Path, default=None, help=argparse.SUPPRESS)
     set_key.set_defaults(handler=cmd_set_key)
     return parser
 

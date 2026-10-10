@@ -231,6 +231,17 @@ to `run` or `stage`, since those calls are paid.
 .venv/bin/python -m pipeline set-key typesafe
 ```
 
+AWS keys (for S3 image hosting and Bedrock) work differently: `set-key aws` asks for
+an IAM user's access key ID and secret access key, checks them with STS
+GetCallerIdentity (free, needs no permissions), and saves them as the `[default]`
+profile in `~/.aws/credentials` with mode 0600, outside the repo, where boto3 finds
+them. `--region` also saves `AWS_REGION` to `.env`. Temporary (`ASIA...`) keys are
+refused, and root-user keys get a warning.
+
+```bash
+.venv/bin/python -m pipeline set-key aws --region us-east-1
+```
+
 Add `--mock` to search the local mock internet instead
 (no key or credits needed), or set `SEARCH_BACKEND=mock` in `.env`. Start the mock
 first with `python3 -m mock_internet serve`.
@@ -265,7 +276,7 @@ always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
 
 SerpApi's Yandex engine only takes an image URL, so a SerpApi run hosts each photo
 briefly in S3 (spec 1.2): set `IMAGE_BUCKET` (a private bucket) and `AWS_REGION` in
-`.env`, with AWS credentials from `aws configure` or `AWS_PROFILE`. Each image is
+`.env`, with AWS credentials from `set-key aws` (or `aws configure`/`AWS_PROFILE`). Each image is
 uploaded under a random key, shared through a presigned URL valid for 10 minutes, and
 deleted after its search; `uploads.json` in the run folder tracks it until then, and
 `purge` deletes anything left over. Try one consenting teammate's photo first. It
