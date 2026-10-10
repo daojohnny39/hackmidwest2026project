@@ -275,12 +275,24 @@ require the mock backend (`--mock` or `SEARCH_BACKEND=mock`). The offline tests
 always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
 
 SerpApi's Yandex engine only takes an image URL, so a SerpApi run hosts each photo
-briefly in S3 (spec 1.2): set `IMAGE_BUCKET` (a private bucket) and `AWS_REGION` in
-`.env`, with AWS credentials from `set-key aws` (or `aws configure`/`AWS_PROFILE`). Each image is
-uploaded under a random key, shared through a presigned URL valid for 10 minutes, and
-deleted after its search; `uploads.json` in the run folder tracks it until then, and
-`purge` deletes anything left over. Try one consenting teammate's photo first. It
-costs one search and never calls a model:
+briefly (spec 1.2). `IMAGE_HOST` picks how:
+
+- `tunnel` (the default) needs only `ssh`. Stage 1 starts a web server on
+  127.0.0.1 and opens a free [localhost.run](https://localhost.run) tunnel to it
+  (`ssh -R`, no account or key). The tunnel is checked end to end before the first
+  search. Each image is served at a random `https://<random>.lhr.life/<32 hex>.jpg`
+  path until its search is over, and the tunnel closes when stage 1 ends. Nothing is
+  stored off the machine. The free tunnel slows to about 25 KB/s, so each image is
+  served as a JPEG copy at most 800 px on its longest side, with EXIF stripped.
+  Yandex refuses Cloudflare quick-tunnel (`trycloudflare.com`) URLs, so that option
+  isn't offered.
+- `s3` uploads each image to a private bucket: set `IMAGE_BUCKET` and `AWS_REGION` in
+  `.env`, with AWS credentials from `set-key aws` (or `aws configure`/`AWS_PROFILE`).
+  Each image is uploaded under a random key, shared through a presigned URL valid for
+  10 minutes, and deleted after its search. `uploads.json` in the run folder tracks
+  it until then, and `purge` deletes anything left over.
+
+Try one consenting teammate's photo first. It costs one search and never calls a model:
 
 ```bash
 .venv/bin/python -m pipeline smoke-search --capture captures/<session_id> --image-id img-1

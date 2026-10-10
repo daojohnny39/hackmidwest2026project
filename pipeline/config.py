@@ -30,6 +30,8 @@ TRUST_TABLE = {0: 0, 1: 50, 2: 95, 3: 99}  # key 3 means "3 or more" (spec 2c)
 
 SEARCH_BACKENDS = ("serpapi", "mock")
 DEFAULT_SEARCH_BACKEND = "serpapi"
+IMAGE_HOSTS = ("tunnel", "s3")  # how SerpApi runs give Yandex a public image URL (hosting.py)
+DEFAULT_IMAGE_HOST = "tunnel"
 JEV_MODES = ("fake", "typesafe", "openrouter", "off")
 LLM_MODES = ("off", "anthropic", "bedrock")
 JEV_DEFAULT_MODELS = {"typesafe": "jev-latest", "openrouter": "typesafe/jev-1.13"}
@@ -38,7 +40,7 @@ MAX_MOCK_DELAY_MS = 5000
 
 ENV_VARS = (
     "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "SERPAPI_KEY",
-    "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
+    "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
     "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
 )
 
@@ -65,6 +67,7 @@ class Settings:
     mock_scenario: str
     mock_delay_ms: int
     serpapi_key: str | None = field(repr=False)
+    image_host: Literal["tunnel", "s3"]
     image_bucket: str | None
     aws_region: str | None
     jev_mode: Literal["fake", "typesafe", "openrouter", "off"]
@@ -132,6 +135,7 @@ def load_settings(
         mock_scenario = _choice(env, "MOCK_SCENARIO", MOCK_SCENARIOS, "default")
 
     delay = _delay(env.get("MOCK_DELAY_MS", "0"))
+    image_host = _choice(env, "IMAGE_HOST", IMAGE_HOSTS, DEFAULT_IMAGE_HOST)
 
     jev_mode = _choice(env, "JEV_MODE", JEV_MODES, "fake")
     llm_mode = _choice(env, "LLM_MODE", LLM_MODES, "off")
@@ -145,8 +149,8 @@ def load_settings(
             )
 
     required: dict[str, list[str]] = {}
-    # Image hosting (spec 1.2) isn't chosen yet, so IMAGE_BUCKET is checked by the
-    # hosting step once it exists, not here.
+    # Hosting settings (ssh for tunnel, IMAGE_BUCKET for s3) are checked by
+    # hosting.require_hosting before a SerpApi search, not here.
     if live:
         required.setdefault("SERPAPI_KEY", []).append("SerpApi search")
     if jev_mode == "typesafe":
@@ -174,6 +178,7 @@ def load_settings(
         mock_scenario=mock_scenario,
         mock_delay_ms=delay,
         serpapi_key=env.get("SERPAPI_KEY") if live else None,
+        image_host=image_host,
         image_bucket=env.get("IMAGE_BUCKET"),
         aws_region=env.get("AWS_REGION"),
         jev_mode=jev_mode,

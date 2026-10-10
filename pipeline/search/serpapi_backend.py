@@ -166,7 +166,7 @@ class SerpApiBackend:
                  search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None):
         self.api_key = api_key
         self.capture_dir = Path(capture_dir)
-        self.host = host  # hosting.S3ImageHost or a test double with upload(data) / delete(record)
+        self.host = host  # a hosting.py host, or a test double with upload(data) / delete(record) and optional close()
         self.cache_dir = cache_dir
         self.refresh = refresh
         self.search_client = search_client or httpx.AsyncClient(timeout=SEARCH_TIMEOUT_S, trust_env=False,
@@ -248,6 +248,9 @@ class SerpApiBackend:
                 await asyncio.to_thread(self.host.delete, hosted[1])
             except Exception:
                 pass
+        close = getattr(self.host, "close", None)
+        if close is not None:
+            await asyncio.to_thread(close)
         await self.search_client.aclose()
         await self.pages.aclose()
 
@@ -312,11 +315,18 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def build_serpapi_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *, refresh: bool) -> SerpApiBackend:
-    """The live backend for a run: needs SERPAPI_KEY, IMAGE_BUCKET and AWS_REGION."""
-    from pipeline.hosting import host_for
+    """The live backend for a run: needs SERPAPI_KEY and an image host (IMAGE_HOST, hosting.py).
+    A tunnel host opens here, before any image's deadline starts; if it can't, no search is made."""
+    from pipeline.hosting import HostingError, host_for
 
     if not settings.serpapi_key:
         raise ConfigError("SERPAPI_KEY is missing; save it with `python -m pipeline set-key serpapi`, or pass --mock")
-    return SerpApiBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir),
-                          host=host_for(settings, run_dir), cache_dir=Path(run_dir) / "cache" / "serpapi",
-                          refresh=refresh)
+    host = host_for(settings, run_dir)
+    if hasattr(host, "start"):
+        try:
+            host.start()
+        except HostingError as error:
+            raise ConfigError(f"couldn't open the image tunnel ({error}); check the network and retry with "
+                              "`stage 1 --run <run>`, set IMAGE_HOST=s3, or pass --mock") from None
+    return SerpApiBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir), host=host,
+                          cache_dir=Path(run_dir) / "cache" / "serpapi", refresh=refresh)

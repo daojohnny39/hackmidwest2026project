@@ -21,7 +21,7 @@ from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase
 
 ALEX = FIXTURE_CAPTURES / "alex"
 SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
-HOSTING_ENV = {"IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
+HOSTING_ENV = {"IMAGE_HOST": "s3", "IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
 
 
 class CliTests(MockServerTestCase):
@@ -105,7 +105,13 @@ class CliTests(MockServerTestCase):
 
     def test_serpapi_run_needs_hosting_before_creating_a_run(self):
         os.environ.update(SERPAPI_ENV)
-        code, _, err = self.cli("run", "--capture", str(self.real_image_capture()), "--until", "1")
+        capture = str(self.real_image_capture())
+        with patch("pipeline.hosting.find_ssh", return_value=None):
+            code, _, err = self.cli("run", "--capture", capture, "--until", "1")
+        self.assertEqual(code, BAD_CONFIG)
+        self.assertIn("localhost.run", err)
+        os.environ.update(IMAGE_HOST="s3")
+        code, _, err = self.cli("run", "--capture", capture, "--until", "1")
         self.assertEqual(code, BAD_CONFIG)
         self.assertIn("IMAGE_BUCKET", err)
         self.assertEqual(self.run_dirs(), [])
@@ -224,7 +230,7 @@ class CliTests(MockServerTestCase):
         code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
         self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; the key is missing
         self.assertIn("SERPAPI_KEY", err)
-        os.environ.update(SERPAPI_KEY="test-serpapi-key")
+        os.environ.update(SERPAPI_KEY="test-serpapi-key", IMAGE_HOST="s3")
         code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
         self.assertEqual(code, BAD_CONFIG)  # image hosting isn't configured
         self.assertIn("IMAGE_BUCKET", err)

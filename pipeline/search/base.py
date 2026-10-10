@@ -201,5 +201,6 @@ def _thumbnail(value: object) -> str | None:
         value = value.get("link")
     if not isinstance(value, str) or not value.startswith(("http://", "https://")):
         return None
-    # Never keep anything that looks like a signed URL (our own hosted image).
-    return None if "x-amz-" in value.lower() or len(value) > 2048 else value
+    # Never keep anything that looks like our own hosted image (a signed S3 URL or a tunnel URL).
+    lowered = value.lower()
+    return None if "x-amz-" in lowered or ".lhr.life" in lowered or len(value) > 2048 else value

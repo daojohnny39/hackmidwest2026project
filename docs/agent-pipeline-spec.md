@@ -99,7 +99,8 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `MOCK_SCENARIO` | `default`, `ambiguous`, `stale`, `duplicates`, `empty`, `rate_limited`, `server_error` | `default` | mock backend |
 | `MOCK_DELAY_MS` | integer 0–5000, search requests only | `0` | concurrency tests |
 | `SERPAPI_KEY` | key; save with `set-key serpapi` | none | serpapi backend |
-| `IMAGE_BUCKET` + AWS credentials | S3 bucket name; keys via `set-key aws` (to `~/.aws/credentials`) | none | `hosting.py` (live only) |
+| `IMAGE_HOST` | `tunnel` or `s3` | `tunnel` | `hosting.py` (live only) |
+| `IMAGE_BUCKET` + AWS credentials | S3 bucket name; keys via `set-key aws` (to `~/.aws/credentials`) | none | `hosting.py` (`IMAGE_HOST=s3`) |
 | `JEV_MODE` | `fake`, `typesafe`, `openrouter`, `off` | `fake` | Sections 2, 3 |
 | `JEV_MODEL` | route-specific model ID | `jev-latest` for TypeSafe; `typesafe/jev-1.13` for OpenRouter | `jev.py` |
 | `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` | key | none | `jev.py` |
@@ -108,7 +109,7 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `LLM_MODEL` | provider-specific model ID | `claude-sonnet-5-5` for Anthropic; required for Bedrock | `llm.py` |
 | `AWS_REGION` | region with bucket/model access | required for S3/Bedrock | hosting and Bedrock |
 
-`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `serpapi`, which requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. `IMAGE_BUCKET` is checked by the hosting step rather than at startup, because hosting (1.2) isn't decided. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
+`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `serpapi`, which requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. Hosting settings (`IMAGE_HOST`, then `ssh` for the tunnel or `IMAGE_BUCKET` for S3) are checked by `hosting.require_hosting` before a SerpApi search, not at load, so stages that only read saved evidence don't need them. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
 
 `python -m pipeline set-key {serpapi,typesafe,openrouter,anthropic,aws}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`. python-dotenv's parser locates the assignment, so quoted keys, multi-line values, comments, and CRLF endings survive. The file is replaced atomically, through a temp file named `.env.*`, so a crash can't leave an unignored copy. The command requests mode 0600, which protects the key on filesystems that enforce POSIX permissions. On `/mnt/c` those modes aren't enforced, and `.env` inherits the folder's Windows ACLs, so protect the repo folder there. If the terminal can't hide input, the command refuses before reading anything. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. A TypeSafe key is checked by listing TypeSafe's models (`GET /v1/models`, authenticated; a fake key gets 401, checked 2026-10-10), which makes no Jev decision. A rejected key is not saved, and an unreachable check saves with a warning. `--no-check` skips the checks. Saving a model key never changes `JEV_MODE` or `LLM_MODE`; the command prints the setting to change, and real modes still need `--models`. `set-key aws` (`aws_credentials.py`) is the exception to `.env`: S3 hosting and Bedrock use boto3's standard credential chain, so it saves an IAM user's access key pair as the `[default]` profile of `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`), keeping other profiles, with mode 0600 in a 0700 folder, outside the repo and off `/mnt/c`. Both prompts are hidden. Key formats are checked first, and temporary `ASIA` keys are refused. The keys are checked with STS GetCallerIdentity, which is free and needs no IAM permissions, and the command prints only the account and ARN, warning on root-user keys. Rejected keys aren't saved (real STS answers `InvalidClientTokenId` for AWS's example key, checked 2026-10-10). `--region` also saves `AWS_REGION` to `.env`. `OfflineTestCase` points `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at `os.devnull`, so tests never load the saved keys.
 
@@ -271,9 +272,9 @@ Rules:
 - Normal tests block all non-loopback sockets as well as selecting mock/fake/off. Real runs use SerpApi unless `--mock` is given; real models require `--models`. Starting the mock alone does not redirect another client's traffic.
 - Smoke-search uses a consent-bearing capture: `python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1`. It writes a run and cleanup record, uploads one photo, queries `tab=about`, and prints hits. `about` is already Yandex's default; do not pay to compare it with itself. The free plan currently lists 250 searches/month and 50/hour; check the account dashboard before the demo. Quota reporting is optional and uses the separate Account API; allowlist counters because its response includes the key. See [pricing](https://serpapi.com/pricing) and [Account API](https://serpapi.com/account-api).
 
-### 1.2 Image hosting (live only, **Proposal**)
+### 1.2 Image hosting (live only; default changed to a tunnel, see below)
 
-SerpApi's Yandex engine requires an image `url`; it documents no file upload parameter. The URL must be fetchable without our credentials. **Unverified integration:** whether Yandex can fetch this team's presigned S3 URLs. Test that early. `hosting.py` does the following:
+SerpApi's Yandex engine requires an image `url`; it documents no file upload parameter. The URL must be fetchable without our credentials. **Unverified integration:** whether Yandex can fetch this team's presigned S3 URLs. Test that early. `hosting.py`'s S3 route does the following:
 
 1. Uploads each image to a private S3 bucket under a random key.
 2. Returns a presigned GET URL that is valid for 10 minutes.
@@ -283,7 +284,13 @@ Use a dedicated bucket/prefix with public listing disabled and a cleanup lifecyc
 
 Mock mode skips hosting.
 
-Built as specified in `hosting.py`. It reads `IMAGE_BUCKET` and `AWS_REGION` from `.env`, with credentials from the standard AWS chain. `run` and `smoke-search` refuse to start a SerpApi run without them, before creating a run folder. Keys look like `hackmidwest-faces/<32 hex>.jpg`. `purge` deletes leftovers when `AWS_REGION` is set. Still unverified: whether Yandex can fetch the presigned URLs.
+Built as specified in `hosting.py` as `IMAGE_HOST=s3`. It reads `IMAGE_BUCKET` and `AWS_REGION` from `.env`, with credentials from the standard AWS chain. `run` and `smoke-search` refuse to start a SerpApi run without them, before creating a run folder. Keys look like `hackmidwest-faces/<32 hex>.jpg`. `purge` deletes leftovers when `AWS_REGION` is set. Still unverified: whether Yandex can fetch the presigned URLs. Johnny's AWS organization denies S3 by SCP, so this route can't run in his account.
+
+**Default since 2026-10-10: `IMAGE_HOST=tunnel`** (`TunnelImageHost` in `hosting.py`). Johnny asked for real-internet search, and S3 is blocked. A `ThreadingHTTPServer` on 127.0.0.1 serves only registered random paths. `ssh -T -R 80:127.0.0.1:<port> nokey@localhost.run` (BatchMode, no key offered, host key pinned on first use) publishes it as `https://<random>.lhr.life`. `build_serpapi_backend` opens the tunnel and checks it end to end with a throwaway file before any image's 35 s deadline starts. A failure there is a configuration error, and no search is made. Each image is served as a JPEG copy at most 800 px on its longest side, with EXIF stripped, at `/<32 hex>.jpg`. The path is removed by `release()`, and the tunnel and server stop in `aclose()`. Nothing is stored remotely, so `uploads.json` stays empty. `run` and `smoke-search` need only `ssh` on PATH. Checked live on 2026-10-10 with a landmark photo, not a person:
+- Yandex refuses `*.trycloudflare.com` (Cloudflare quick tunnel) URLs without fetching them.
+- Yandex fetches `lhr.life` URLs (`YandexImageResizer/2.0`).
+- A full-size 270 KB photo took 10–13 s through the free tunnel, and Yandex answered "not publicly accessible". The 800 px copy (about 60 KB) returned 50–94 results in 3–5 s.
+- The tunnel opened and passed its check in about 1.5 s.
 
 ### 1.3 Per-image agent
 
@@ -1088,7 +1095,8 @@ Section 1
 - [x] Deterministic `collect_for_image` and the cross-image merge; Section 1 mock tests
 - [x] Strands per-image agent with its tools and `ImageTriage` output; stub-model topology/concurrency test
 - [x] `hosting.py`, cleanup manifest, and `search/serpapi_backend.py` with run-local cache; `smoke-search` command
-- [ ] Consent-bearing smoke-search on one team member (needs `IMAGE_BUCKET`; checks that Yandex can fetch presigned S3 URLs)
+- [x] Real-internet search path: `IMAGE_HOST=tunnel` (localhost.run) checked live with a landmark photo on 2026-10-10
+- [ ] Consent-bearing smoke-search on one team member (tunnel hosting; checks that Yandex finds the person's pages)
 - [x] Bound retries, deadlines, fetch destinations, and in-flight deduplication; preserve error snippets and aliases
 
 Section 2

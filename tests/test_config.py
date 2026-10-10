@@ -160,9 +160,14 @@ class SearchBackendTests(ConfigTestCase):
         self.assertConfigError("SEARCH_BACKEND", {"SEARCH_BACKEND": "google"}, backend=None)
         self.assertConfigError("unknown search backend", backend="google")
 
-    def test_serpapi_does_not_require_hosting_settings_yet(self):
+    def test_serpapi_does_not_require_hosting_settings_at_load(self):
         settings = load({"SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend="serpapi")
         self.assertEqual((settings.image_bucket, settings.aws_region), (None, None))
+
+    def test_image_host_defaults_to_tunnel(self):
+        self.assertEqual(load(LIVE, backend="serpapi").image_host, "tunnel")
+        self.assertEqual(load({**LIVE, "IMAGE_HOST": "s3"}, backend="serpapi").image_host, "s3")
+        self.assertConfigError("IMAGE_HOST", {"IMAGE_HOST": "imgur"})
 
     def test_serpapi_key_dropped_with_mock(self):
         self.assertIsNone(load(LIVE).serpapi_key)

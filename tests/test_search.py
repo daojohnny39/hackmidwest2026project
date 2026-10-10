@@ -56,6 +56,9 @@ class ParseTests(OfflineTestCase):
         result = parse_image_results(payload)
         self.assertEqual([hit.url for hit in result.hits], ["https://a.example/p"])
         self.assertIsNone(result.hits[0].thumbnail_url)
+        tunnel = {**payload, "image_results": [{"link": "https://a.example/p",
+                                                "thumbnail": "https://0f1e2d3c4b5a69.lhr.life/0f.jpg"}]}
+        self.assertIsNone(parse_image_results(tunnel).hits[0].thumbnail_url)
         self.assertEqual(result.extras, {"status": "Success", "total_results": 5, "skipped_hits": 1})
 
     def test_mock_original_urls_are_identities_only_in_mock_mode(self):

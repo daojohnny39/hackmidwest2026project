@@ -46,6 +46,9 @@ class FakeHost:
     def delete(self, record):
         self.deleted.append(record.key)
 
+    def close(self):
+        self.closed = True
+
 
 class SearchTests(OfflineTestCase):
     def setUp(self):
@@ -152,6 +155,7 @@ class SearchTests(OfflineTestCase):
 
         asyncio.run(main())
         self.assertEqual(self.host.deleted, ["k1.jpg"])
+        self.assertTrue(self.host.closed)  # the tunnel host stops its tunnel here
 
     def test_sanitize_keeps_only_allowlisted_fields(self):
         clean = sanitize(RESPONSE)

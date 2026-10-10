@@ -1,11 +1,24 @@
-"""S3 image hosting with a fake client (spec 1.2, 0.5): keys recorded before upload, cleanup, purge."""
+"""Image hosting (spec 1.2, 0.5). S3 with a fake client: keys recorded before upload, cleanup,
+purge. The tunnel with a fake ssh: images served on loopback only, then stopped."""
 
+import io
+import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from PIL import Image
 
 from pipeline.artifacts import UPLOADS_FILE, purge_run, read_uploads
 from pipeline.config import ConfigError, load_settings
-from pipeline.hosting import HostingError, S3ImageHost, delete_object, host_for, image_type
+from pipeline.hosting import (
+    HostingError, S3ImageHost, TunnelImageHost, delete_object, host_for, image_type, require_hosting, search_copy,
+)
+from pipeline.search.serpapi_backend import build_serpapi_backend
 from tests.support import OfflineTestCase
 
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 32
@@ -83,6 +96,144 @@ class HostingTests(OfflineTestCase):
         self.assertEqual(deleted, [record.key])
 
     def test_missing_bucket_is_a_config_error(self):
-        settings = load_settings(backend="mock", environ={}, dotenv_path=None)
+        settings = load_settings(backend="mock", environ={"IMAGE_HOST": "s3"}, dotenv_path=None)
         with self.assertRaisesRegex(ConfigError, "IMAGE_BUCKET"):
             host_for(settings, self.run_dir)
+
+
+TUNNEL = "https://0f1e2d3c4b5a69.lhr.life"
+# Stands in for `ssh -R ... nokey@localhost.run`: records its arguments, then prints like localhost.run (or fails).
+FAKE_SSH = """import sys, time
+with open({calls!r}, "a") as stream:
+    stream.write(" ".join(sys.argv[1:]) + "\\n")
+if {mode!r} == "fail":
+    print("nokey@localhost.run: Permission denied (publickey).", file=sys.stderr, flush=True)
+    sys.exit(255)
+print("Welcome to localhost.run! See https://localhost.run/docs/", flush=True)
+print("{name}.lhr.life tunneled with tls termination, {tunnel}", flush=True)
+time.sleep(60)
+"""
+
+
+def photo(size=(1600, 1200), fmt="JPEG", mode="RGB", orientation=None):
+    """A real image with EXIF (camera model, optional orientation) in the given format."""
+    exif = Image.Exif()
+    exif[0x0110] = "TestCam"  # Model
+    if orientation:
+        exif[0x0112] = orientation
+    output = io.BytesIO()
+    Image.new(mode, size, (200, 120, 40, 255)[:len(mode)]).save(output, fmt, exif=exif)
+    return output.getvalue()
+
+
+def local_get(host, url, timeout=5.0):
+    """GET a tunnel URL from the host's loopback server; returns (status, content type, body)."""
+    local = url.replace(TUNNEL, f"http://127.0.0.1:{host._server.server_address[1]}")
+    try:
+        with urllib.request.urlopen(local, timeout=timeout) as response:
+            return response.status, response.headers["Content-Type"], response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, None, b""
+
+
+class TunnelHostingTests(OfflineTestCase):
+    def setUp(self):
+        super().setUp()
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.calls = self.folder / "calls.txt"
+
+    def fake_ssh(self, mode="ok"):
+        body = self.folder / "ssh.py"
+        body.write_text(FAKE_SSH.format(calls=str(self.calls), mode=mode, tunnel=TUNNEL,
+                                        name=TUNNEL.removeprefix("https://").split(".")[0]))
+        script = self.folder / "ssh"
+        # A shell launcher, since a shebang line can't hold the venv's path (it has a space).
+        script.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{body}" "$@"\n')
+        script.chmod(0o755)
+        return str(script)
+
+    def host(self, mode="ok", probe=None, **options):
+        host = TunnelImageHost(ssh=self.fake_ssh(mode), **options)
+        host.probe = probe or (lambda url, timeout: local_get(host, url, timeout)[2])
+        self.addCleanup(host.close)
+        return host
+
+    def test_serves_each_image_at_a_random_path_until_deleted(self):
+        host = self.host()
+        original = photo()
+        url, record = host.upload(original)
+        other, _ = host.upload(photo(fmt="PNG", mode="RGBA"))
+        self.assertTrue(url.startswith(TUNNEL + "/") and url.endswith(".jpg") and other.endswith(".jpg"))
+        self.assertNotEqual(url, other)
+        self.assertEqual(local_get(host, url), (200, "image/jpeg", search_copy(original)))
+        self.assertEqual(local_get(host, other)[:2], (200, "image/jpeg"))
+        self.assertEqual(local_get(host, TUNNEL + "/")[0], 404)
+        self.assertEqual(local_get(host, url + "x")[0], 404)
+        host.delete(record)
+        self.assertTrue(record.deleted)
+        self.assertEqual(local_get(host, url)[0], 404)
+        # One tunnel for the whole run, pointed at the loopback server, never prompting or offering a key.
+        port = host._server.server_address[1]
+        [call] = self.calls.read_text().splitlines()
+        self.assertTrue(call.endswith(f"-R 80:127.0.0.1:{port} nokey@localhost.run"), call)
+        for option in ("BatchMode=yes", "PubkeyAuthentication=no", "StrictHostKeyChecking=accept-new"):
+            self.assertIn(f"-o {option}", call)
+
+    def test_close_stops_the_tunnel_and_server(self):
+        host = self.host()
+        url, _ = host.upload(photo())
+        process, port = host._process, host._server.server_address[1]
+        host.close()
+        self.assertIsNotNone(process.poll())
+        with self.assertRaises(OSError):
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2)
+        host.close()  # idempotent
+
+    def test_failed_start_is_a_code_and_not_retried(self):
+        host = self.host(mode="fail")
+        for _ in range(2):
+            with self.assertRaises(HostingError) as caught:
+                host.upload(photo())
+            self.assertEqual(str(caught.exception), "tunnel_error")
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+
+    def test_unreachable_tunnel_hands_out_no_url(self):
+        host = self.host(probe=lambda url, timeout: None, probe_timeout=0.2)
+        started = time.monotonic()
+        with self.assertRaises(HostingError) as caught:
+            host.upload(photo())
+        self.assertEqual(str(caught.exception), "tunnel_unreachable")
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIsNone(host._process)  # stopped
+
+    def test_search_copy_is_small_upright_jpeg_without_metadata(self):
+        # Orientation 6 means "rotate 90° clockwise to view", so 1600x1200 is shown as 1200x1600.
+        with Image.open(io.BytesIO(search_copy(photo(orientation=6)))) as copy:
+            self.assertEqual((copy.format, copy.size), ("JPEG", (600, 800)))
+            self.assertEqual(dict(copy.getexif()), {})
+        with Image.open(io.BytesIO(search_copy(photo((300, 200), fmt="PNG", mode="RGBA")))) as copy:
+            self.assertEqual((copy.format, copy.size, copy.mode), ("JPEG", (300, 200), "RGB"))  # never enlarged
+        for data in (JPEG, b"not an image"):
+            with self.assertRaises(HostingError) as caught:
+                search_copy(data)
+            self.assertEqual(str(caught.exception), "unsupported_image")
+
+    def test_require_hosting_by_image_host(self):
+        settings = load_settings(backend="mock", environ={}, dotenv_path=None)
+        self.assertEqual(settings.image_host, "tunnel")
+        with patch("pipeline.hosting.find_ssh", return_value=None):
+            with self.assertRaisesRegex(ConfigError, "ssh"):
+                require_hosting(settings)
+        with patch("pipeline.hosting.find_ssh", return_value=self.fake_ssh()):
+            host = host_for(settings, self.folder)
+        self.assertIsInstance(host, TunnelImageHost)
+        self.assertIsNone(host._process)  # nothing starts until start() or the first upload
+        self.assertFalse((self.folder / UPLOADS_FILE).exists())
+
+    def test_backend_opens_the_tunnel_first_or_fails_as_config(self):
+        settings = load_settings(backend="serpapi", environ={"SERPAPI_KEY": "k"}, dotenv_path=None)
+        capture = SimpleNamespace(capture_dir=str(self.folder))
+        with patch("pipeline.hosting.find_ssh", return_value=self.fake_ssh("fail")):
+            with self.assertRaisesRegex(ConfigError, "tunnel_error"):
+                build_serpapi_backend(settings, capture, self.folder, refresh=False)
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
