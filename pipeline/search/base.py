@@ -83,11 +83,12 @@ def status_error(status: int, headers: Mapping[str, str] | None = None, *, now: 
     """Map an HTTP error status to a BackendError, carrying Retry-After when given."""
     if status == 429:
         reason = "rate_limited"
-    elif status >= 500:
+    elif 500 <= status <= 599:
         reason = "server_error"
     else:
+        # 999 is LinkedIn's non-standard "blocked" status: like a 403, never retried.
         reason = {400: "invalid_request", 401: "unauthorized", 403: "forbidden", 404: "not_found",
-                  410: "not_found", 451: "forbidden"}.get(status, "http_error")
+                  410: "not_found", 451: "forbidden", 999: "forbidden"}.get(status, "http_error")
     retry_after = None
     for name, value in (headers or {}).items():
         if name.lower() == "retry-after":
