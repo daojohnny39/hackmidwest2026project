@@ -1,7 +1,8 @@
 """Shared offline test harness for pipeline tests.
 
 OfflineTestCase forces the mock/fake/off modes regardless of .env, clears every
-credential variable, and makes any non-loopback socket connection fail.
+credential variable, stops load_settings() from reading the repo's .env (which
+may hold real keys), and makes any non-loopback socket connection fail.
 """
 
 import ipaddress
@@ -10,6 +11,8 @@ import socket
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from pipeline.config import load_settings
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_CAPTURES = REPO_ROOT / "tests" / "fixtures" / "captures"
@@ -63,6 +66,10 @@ class OfflineTestCase(unittest.TestCase):
         env = patch.dict(os.environ, {**cleared, **OFFLINE_ENV}, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        # Callers that don't pass dotenv_path (the CLI) would otherwise read the repo's real .env.
+        dotenv = patch.dict(load_settings.__kwdefaults__, {"dotenv_path": None})
+        dotenv.start()
+        self.addCleanup(dotenv.stop)
         for name, guard in (("connect", _guarded_connect), ("connect_ex", _guarded_connect_ex)):
             patcher = patch.object(socket.socket, name, guard)
             patcher.start()
