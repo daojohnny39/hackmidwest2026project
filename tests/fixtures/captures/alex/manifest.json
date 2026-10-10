@@ -1,0 +1,15 @@
+{
+  "session_id": "mock-alex",
+  "captured_at": "2026-10-10T14:02:11Z",
+  "consent": {
+    "confirmed": true,
+    "participant": "Alex Morgan (fictional)",
+    "confirmed_at": "2026-10-10T14:01:50Z",
+    "external_processing": true
+  },
+  "images": [
+    { "image_id": "img-1", "angle": "front", "yaw": 1.5, "pitch": -2.0, "roll": 0.3, "mock_fixture": "alex-front" },
+    { "image_id": "img-2", "angle": "left", "yaw": -32.0, "pitch": 0.0, "roll": 1.1, "mock_fixture": "alex-left" },
+    { "image_id": "img-3", "angle": "right", "yaw": 30.5, "pitch": 1.2, "roll": -0.4, "mock_fixture": "alex-right" }
+  ]
+}
