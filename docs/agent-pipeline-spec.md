@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures) is built; Sections 1–5 are not. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 3 (verification), and Section 4 (summarization) are built; Sections 1, 2, and 5 are not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -727,7 +727,7 @@ class ProfilesBundle(BaseModel):
 | `name_collision` | Another candidate has a compatible name | Flags the two-Alex case |
 | `newest_update` | Latest valid `updated_at`, or null | Helps compare dated claims; a fetch timestamp is not an update |
 
-Followed links never create a new direct image match. Failed/empty searches remain in the denominator. Resolve hit URLs through `url_aliases`, and attribute mentions as in 2a. Break workplace ties lexically for deterministic scoring. The optional Jev consistency `score` is deferred; keeping one definition makes fallback comparisons meaningful.
+Followed links never create a new direct image match. Failed/empty searches remain in the denominator. Resolve hit URLs through `url_aliases`, and attribute mentions as in 2a. An image's rank-1 hit counts toward `top_hit_share` only if that image kept the page after triage. Break workplace ties lexically for deterministic scoring. The optional Jev consistency `score` is deferred; keeping one definition makes fallback comparisons meaningful.
 
 ### 3.2 Confidence
 
@@ -736,7 +736,7 @@ Followed links never create a new direct image match. Failed/empty searches rema
 - `match_<profile_id>`, a `noul`: "Does the retrieved evidence support candidate <id> as the searched participant? Treat missing or conflicting evidence as uncertainty; you have no pixels or face comparison." Its `noul` value becomes the displayed model confidence.
 - `best`, a `choice` over the candidate IDs plus `none`: "Which candidate, if any, is the searched person?" This is a cross-check.
 
-**Fallback formula (Proposal).** Use it for `fake`, `off`, or failed Jev calls. Always compute it for comparison. These weights preserve the draft's mock behavior; they are not calibrated probabilities:
+**Fallback formula (Proposal).** Use it for `fake`, `off`, or failed Jev calls. Always compute it for comparison. In `fake` mode, stage 3 still sends synthetic answers derived from the formula through the Jev adapter, so typed parsing is exercised and the call is recorded, but scoring uses the formula. These weights preserve the draft's mock behavior; they are not calibrated probabilities:
 
 ```
 z = −4 + 2·image_support + 3·top_hit_share + 1.5·(mean_link_trust / 100)
@@ -762,8 +762,8 @@ With the proposed extraction and graph rules, the formula gives these values (ro
 - Validate the complete Jev response or fall back for the whole verification stage. Do not mix partial Jev scores with fallback scores in one ranking.
 - With a valid real Jev response, if `best.probabilities["none"] >= 0.5`, accept nobody (`jev_none`). If `best.choice` differs from the highest `noul` candidate, accept nobody (`jev_disagreement`). Skip this check on the formula path.
 - Require a nonempty sourced name, direct image support, and at least one HTML account. Otherwise return `insufficient_evidence`. Snippets alone cannot establish a match.
-- Accept the top candidate only if confidence is ≥ 0.80 and the lead over the runner-up is ≥ 0.20. With one candidate, use runner-up 0. Use unrounded values. Otherwise use `below_threshold` or `too_close`. Accept at most one.
-- Keep the Jev number but flag `jev_fallback_disagree` when the absolute difference exceeds 0.4. Carry graph/grouping flags. Add `partial_search_failure` when some image searches failed, `sparse_footprint` for fewer than three accounts, and explicit stage fallback flags.
+- Accept the top candidate only if confidence is ≥ 0.80 and the lead over the runner-up is ≥ 0.20. With one candidate, use runner-up 0. Use unrounded values; the lead comparison allows only 1e-9 of float noise, so 0.85 vs 0.65 counts as 0.20. Otherwise use `below_threshold` or `too_close`. Accept at most one.
+- Keep the Jev number but flag `jev_fallback_disagree` when the absolute difference exceeds 0.4. Carry graph/grouping flags. Add `partial_search_failure` when some image searches failed, `sparse_footprint` for fewer than three accounts, and `verification_fallback` when a real Jev call failed or returned an incomplete or invalid response.
 - **Proposal:** a live run using fallback verification returns `review_required`, with no automatic match. The mock retains its accepted examples to test the flow. This prevents the synthetic rule weights from appearing to verify a real person during an outage. Johnny must confirm the live acceptance policy and thresholds.
 
 ### 3.3 Contract
@@ -808,14 +808,16 @@ class VerificationResult(BaseModel):
 
 ### 3.4 Done when (mock)
 
-- [ ] **`alex` default:** Kansas City Alex is accepted.
-- [ ] **`alex` ambiguous:** under the specified defaults, Kansas City Alex is accepted and Portland Alex is rejected. Weight changes must rerun this regression case; do not promise this for arbitrary weights.
-- [ ] **`alex` stale:** Kansas City Alex is accepted, and the archived 2021 bio doesn't become a separate candidate.
-- [ ] **`sam`:** Sam Rivera is accepted, with both name forms in one profile.
-- [ ] **`unknown`:** the result is `reason="no_candidates"`; no downstream model calls are made. With the default fake/off settings, no model calls occur anywhere. A real per-image agent would already have used its LLM to search.
-- [ ] **Jev unavailable** (simulated with an exception): the run finishes on the fallback with `method="fallback"`.
-- [ ] **Boundaries:** test 0.80, the 0.20 margin, single candidates, ties, `best=none`, conflicting `best`, malformed answers, and all-search failures. A partial search failure lowers support; it is not silently removed from X.
-- [ ] **Live fallback policy:** simulated live metadata plus failed Jev yields `review_required` and no accepted ID, with no live calls in the test.
+Built 2026-10-10 in `pipeline/stage3_verify.py`. `tests/test_stage3.py` checks these against hand-built 01/02 artifacts that follow the spec 9 matrix, because Sections 1 and 2 weren't built yet. The Section 5 end-to-end test should rerun them on real stage outputs.
+
+- [x] **`alex` default:** Kansas City Alex is accepted.
+- [x] **`alex` ambiguous:** under the specified defaults, Kansas City Alex is accepted and Portland Alex is rejected. Weight changes must rerun this regression case; do not promise this for arbitrary weights.
+- [x] **`alex` stale:** Kansas City Alex is accepted, and the archived 2021 bio doesn't become a separate candidate.
+- [x] **`sam`:** Sam Rivera is accepted, with both name forms in one profile.
+- [x] **`unknown`:** the result is `reason="no_candidates"`; no downstream model calls are made. With the default fake/off settings, no model calls occur anywhere. A real per-image agent would already have used its LLM to search.
+- [x] **Jev unavailable** (simulated with an exception): the run finishes on the fallback with `method="fallback"`.
+- [x] **Boundaries:** test 0.80, the 0.20 margin, single candidates, ties, `best=none`, conflicting `best`, malformed answers, and all-search failures. A partial search failure lowers support; it is not silently removed from X.
+- [x] **Live fallback policy:** simulated live metadata plus failed Jev yields `review_required` and no accepted ID, with no live calls in the test.
 - [ ] **Optional, real Jev:** record its answers beside the fallback. Fixture success alone does not establish live accuracy.
 
 ## 7. Section 4: Summarization
@@ -1076,9 +1078,10 @@ Section 2
 
 Section 3
 
-- [ ] Signals, fallback formula, and decision rule
-- [ ] Jev confidence call, `best` cross-check, incomplete-evidence reasons, and live fallback policy
-- [ ] Section 3 mock tests
+- [x] Signals, fallback formula, and decision rule
+- [x] Jev confidence call, `best` cross-check, incomplete-evidence reasons, and live fallback policy
+- [x] Section 3 mock tests (on hand-built 01/02 artifacts until Sections 1 and 2 land)
+- [ ] CLI wiring (`STAGE_RUNNERS[3]`), after stage 2 is wired
 
 Section 4
 
