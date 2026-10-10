@@ -1,32 +1,31 @@
-# React + TypeScript + Vite
+# Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + TypeScript + Vite app that streams from the device camera and captures photos.
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev       # http://localhost:5173
+npm run build     # type-check + production build into dist/
+npm run lint
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Camera access
+
+Camera logic lives in [`src/hooks/useCamera.ts`](src/hooks/useCamera.ts). It wraps
+`navigator.mediaDevices.getUserMedia` and exposes:
+
+| Field | |
+| --- | --- |
+| `videoRef` | Attach to a `<video autoPlay playsInline muted>` element |
+| `status` | `'idle' \| 'starting' \| 'active' \| 'error'` |
+| `error` | Human-readable reason the camera couldn't start |
+| `devices`, `activeDeviceId` | Available cameras and the one in use |
+| `start(deviceId?)`, `stop()` | Turn the camera on/off, or switch cameras |
+| `capture(type?, quality?)` | Current frame as a `Blob` (JPEG by default) |
+
+The camera is released automatically when the component using the hook unmounts.
+
+Browsers only allow camera access in a **secure context**: `localhost` works, but to
+test from a phone on your LAN the page must be served over HTTPS (e.g. add
+[`@vitejs/plugin-basic-ssl`](https://github.com/vitejs/vite-plugin-basic-ssl) and run
+`npm run dev -- --host`).

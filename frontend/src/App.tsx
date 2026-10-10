@@ -1,121 +1,92 @@
 import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+import { useCamera } from './hooks/useCamera'
+
+interface Snapshot {
+  id: string
+  url: string
+  takenAt: Date
+}
 
 function App() {
-  const [count, setCount] = useState(0)
+  const { videoRef, status, error, devices, activeDeviceId, start, stop, capture } = useCamera()
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([])
+
+  const isActive = status === 'active'
+
+  async function takeSnapshot() {
+    const blob = await capture()
+    const takenAt = new Date()
+    setSnapshots((prev) => [{ id: crypto.randomUUID(), url: URL.createObjectURL(blob), takenAt }, ...prev])
+  }
+
+  function removeSnapshot(snapshot: Snapshot) {
+    URL.revokeObjectURL(snapshot.url)
+    setSnapshots((prev) => prev.filter((s) => s.id !== snapshot.id))
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
+    <main className="app">
+      <h1>Camera</h1>
+
+      <div className="stage">
+        <video ref={videoRef} autoPlay playsInline muted />
+        {!isActive && (
+          <div className="placeholder">
+            {status === 'starting' ? 'Starting camera…' : (error ?? 'Camera is off')}
+          </div>
+        )}
+      </div>
+
+      <div className="controls">
+        {isActive ? (
+          <button type="button" onClick={stop}>
+            Stop camera
+          </button>
+        ) : (
+          <button type="button" onClick={() => start()} disabled={status === 'starting'}>
+            {status === 'error' ? 'Try again' : 'Start camera'}
+          </button>
+        )}
+
+        {devices.length > 1 && (
+          <select
+            aria-label="Camera"
+            value={activeDeviceId ?? ''}
+            onChange={(e) => start(e.target.value)}
+            disabled={status === 'starting'}
+          >
+            {!activeDeviceId && <option value="">Choose a camera</option>}
+            {devices.map((device, i) => (
+              <option key={device.deviceId} value={device.deviceId}>
+                {device.label || `Camera ${i + 1}`}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <button type="button" className="primary" onClick={takeSnapshot} disabled={!isActive}>
+          Take photo
         </button>
-      </section>
+      </div>
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
+      {snapshots.length > 0 && (
+        <ul className="snapshots">
+          {snapshots.map((snapshot) => (
+            <li key={snapshot.id}>
+              <img src={snapshot.url} alt={`Photo taken ${snapshot.takenAt.toLocaleTimeString()}`} />
+              <div className="snapshot-actions">
+                <a href={snapshot.url} download={`photo-${snapshot.takenAt.getTime()}.jpg`}>
+                  Download
+                </a>
+                <button type="button" onClick={() => removeSnapshot(snapshot)}>
+                  Delete
+                </button>
+              </div>
             </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+          ))}
+        </ul>
+      )}
+    </main>
   )
 }
 
