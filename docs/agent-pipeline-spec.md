@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Sections 1 and 5 are not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -222,6 +222,15 @@ Contract snippets omit imports and validators. Use postponed annotations, `BaseM
 
 **In:** `00_capture.json`. **Out:** `01_raw_evidence.json` (`RawEvidenceBundle`).
 
+**Built** (2026-10-10): `pipeline/platforms.py`, `scrape.py`, `search/` (`base.py`, `mock_backend.py`, `serpapi_backend.py`), `hosting.py`, `llm.py`, `stage1_collect.py` (store, collectors, merge, `run_stage1`, `STAGE_RUNNERS[1]`), and `image_agent.py`. Tests: `tests/test_platforms.py`, `test_scrape.py`, `test_search.py`, `test_stage1.py`, `test_image_agent.py`, `test_serpapi_backend.py`, `test_hosting.py`, `test_llm.py`, and the stage-1 cases in `test_cli.py`. Every mock target in 1.8 and the Section 1 column of the matrix (9) pass against the real collector. Not yet done: a live smoke-search on a consenting teammate, which needs an S3 bucket, and the optional paid agent check. These choices fill gaps in 1.1–1.7. They are implementation defaults, not decisions:
+
+- **Identity.** `normalize_url` also drops `www.`, maps `twitter.com` and the mobile hosts of known platforms to their main host, and strips trailing slashes. A redirect keeps the requested URL as the page key; `final_url` and `fetched_url` record where it landed.
+- **Provenance.** Each page keeps one `FoundVia` per image: its best route, a hit before a followed link and then the lowest rank. A depth-1 page's parent is the best-ranked depth-0 profile that links to it.
+- **Snippet records.** A failed direct hit keeps a snippet record only when the hit has a title or snippet. Otherwise only the `FetchError` remains.
+- **Agent triage.** Pages the agent fetched but didn't judge count as retained, because fetching them was its choice. `relevant=false` excludes a page, and the exclusion is noted as `img-N excluded: <note>`. An agent that returns without searching falls back (`no_search`).
+- **Bookkeeping.** `search_extras` carries only `status`, `total_results`, `skipped_hits` (unusable result links), `budget_skipped`, `fallback_reason`, and `collection_error`. `run_log.jsonl` names endpoint paths only: `/api/reverse-image` and `/fetch` for the mock, and `/search.json` and `page-fetch` for live runs. Live page URLs are evidence, so they are never logged.
+- **Live fetch.** HTML over 1 MB is truncated, not rejected. LinkedIn's non-standard 999 status counts as `forbidden`. Final URLs on login paths (`/login`, `/authwall`, `/accounts/login`, `/checkpoint`, ...) are `login_wall`. The SerpApi search gets 20 s instead of the 10 s in 1.7, because Yandex searches can take several seconds and a timed-out search may still use a credit. Page fetches keep 10 s.
+
 ### 1.1 Search backends: mock for tests, SerpApi for real runs
 
 Both backends implement the same interface. Stage code never checks which one it has.
@@ -272,6 +281,8 @@ SerpApi's Yandex engine requires an image `url`; it documents no file upload par
 Use a dedicated bucket/prefix with public listing disabled and a cleanup lifecycle rule. Signed-URL expiry does not delete the object. Prefer no versioning for these temporary objects; otherwise track and delete the uploaded version too. If hosting or search fails, return an image error and use the mock demo. Do not quietly switch to permanent public hosting.
 
 Mock mode skips hosting.
+
+Built as specified in `hosting.py`. It reads `IMAGE_BUCKET` and `AWS_REGION` from `.env`, with credentials from the standard AWS chain. `run` and `smoke-search` refuse to start a SerpApi run without them, before creating a run folder. Keys look like `hackmidwest-faces/<32 hex>.jpg`. `purge` deletes leftovers when `AWS_REGION` is set. Still unverified: whether Yandex can fetch the presigned URLs.
 
 ### 1.3 Per-image agent
 
@@ -463,18 +474,18 @@ class RawEvidenceBundle(BaseModel):
 
 Using `tests/fixtures/captures/alex`, whose images map to `alex-front`, `alex-left`, and `alex-right`, on the deterministic path:
 
-- [ ] 3 reverse-image requests return 13 hits total, with 10 unique URLs. That means exactly 10 fetches, because the shared page store prevents duplicates.
-- [ ] The 10 fetches yield 9 successful HTML responses and one 404. Canonical merging leaves 8 HTML records plus one snippet-only 404 record: 9 `PageRecord`s total.
-- [ ] There is one 404 `FetchError` for `fieldnotes.test/@alexbuilds/old-project`, and the run continues.
-- [ ] There are 5 profile pages (Alex's LinkUp, Chatter, Photogram, CodeForge, and FieldNotes), each with `found_via` filled in. `chatter.test/alexbuilds` lists both `img-1` and `img-2`.
+- [x] 3 reverse-image requests return 13 hits total, with 10 unique URLs. That means exactly 10 fetches, because the shared page store prevents duplicates.
+- [x] The 10 fetches yield 9 successful HTML responses and one 404. Canonical merging leaves 8 HTML records plus one snippet-only 404 record: 9 `PageRecord`s total.
+- [x] There is one 404 `FetchError` for `fieldnotes.test/@alexbuilds/old-project`, and the run continues.
+- [x] There are 5 profile pages (Alex's LinkUp, Chatter, Photogram, CodeForge, and FieldNotes), each with `found_via` filled in. `chatter.test/alexbuilds` lists both `img-1` and `img-2`.
 
 Other cases:
 
-- [ ] `tests/fixtures/captures/sam` (`sam-front`): following account links adds Sam's CodeForge and FieldNotes profiles at depth 1, and the private album records a 403.
-- [ ] `MOCK_SCENARIO=rate_limited`: each image retries as `Retry-After` says, then ends with a `rate_limited` error. No exception escapes.
-- [ ] `MOCK_DELAY_MS=1000`: isolate the three search calls; their intervals overlap and elapsed time is below 2.5 s on an idle local machine. Do not apply this bound to all scraping or model work.
-- [ ] `unknown` fixture: no hits and a valid bundle.
-- [ ] A stub-model test creates X distinct agents for X images and verifies isolated image tools, shared fetch deduplication, and failure fallback without external calls.
+- [x] `tests/fixtures/captures/sam` (`sam-front`): following account links adds Sam's CodeForge and FieldNotes profiles at depth 1, and the private album records a 403.
+- [x] `MOCK_SCENARIO=rate_limited`: each image retries as `Retry-After` says, then ends with a `rate_limited` error. No exception escapes.
+- [x] `MOCK_DELAY_MS=1000`: isolate the three search calls; their intervals overlap and elapsed time is below 2.5 s on an idle local machine. Do not apply this bound to all scraping or model work.
+- [x] `unknown` fixture: no hits and a valid bundle.
+- [x] A stub-model test creates X distinct agents for X images and verifies isolated image tools, shared fetch deduplication, and failure fallback without external calls.
 - [ ] Optional, costs LLM calls (`--models`, `LLM_MODE=anthropic`): on `alex`, check that the agent path retains the 5 expected profiles. Record differences instead of treating model triage as deterministic.
 
 **Live check:** record whether a consenting teammate's photo returns a page they confirm is theirs. A clear zero-hit result is valid behavior, but it does not pass retrieval-quality validation. If fresh camera images do not retrieve known accounts, demo the mock and flag the live limitation; do not retune confidence to manufacture a match.
@@ -928,7 +939,7 @@ Checked against hand-built Section 1–3 artifacts. The Section 5 end-to-end tes
 
 ### 5.1 CLI
 
-Today `run` works through stage 0 (it exits with code 3 when asked for a stage that isn't built), `stage 2 --run` rebuilds profiles from a run's saved `01_raw_evidence.json`, other `stage` numbers re-check consent and stop if not built, `smoke-search` validates config and capture and stops, and `purge` and `set-key` work. The rest are commands to implement.
+Today `run` works through every stage registered in `STAGE_RUNNERS` and exits with code 3 at the first stage that isn't. `stage N --run` re-checks consent, invalidates stage N and later outputs, and reruns stage N. `smoke-search` runs one image through deterministic stage 1 with models off, and `purge` and `set-key` work. `purge` also deletes uploaded images when `AWS_REGION` is set. The rest are commands to implement.
 
 ```bash
 # Save the SerpApi key once (hidden prompt; checked with the free Account API)
@@ -1009,7 +1020,7 @@ These are targets, not measurements. Reverse-image retrieval quality and image h
 
 ## 9. Mock test matrix
 
-Section 1 counts below assume rank-order deterministic collection, one-level account following, no retries on 403/404, and canonical merging. Failed direct hits retain search snippets. Seed/server facts are checked; Sections 2–4 are proposed acceptance targets for code still to be built. Confidence values are fallback outputs rounded for display.
+Section 1 counts below assume rank-order deterministic collection, one-level account following, no retries on 403/404, and canonical merging. Failed direct hits retain search snippets. Seed/server facts are checked, and `tests/test_stage1.py` checks the Section 1 column against the real collector; Sections 2–4 are proposed acceptance targets for code still to be built. Confidence values are fallback outputs rounded for display.
 
 | Capture | Scenario | Section 1 | Section 2 | Section 3 | Section 4 |
 |---|---|---|---|---|---|
@@ -1062,13 +1073,14 @@ Section 0
 
 Section 1
 
-- [ ] `platforms.py`: domain table, account and post URL patterns, URL normalization (including mock local URLs)
-- [ ] `scrape.py`, tested against mock pages
-- [ ] `search/mock_backend.py`
-- [ ] Deterministic `collect_for_image` and the cross-image merge; Section 1 mock tests
-- [ ] Strands per-image agent with its tools and `ImageTriage` output; stub-model topology/concurrency test
-- [ ] `hosting.py`, cleanup manifest, and `search/serpapi_backend.py` with run-local cache; consent-bearing smoke-search on one team member
-- [ ] Bound retries, deadlines, fetch destinations, and in-flight deduplication; preserve error snippets and aliases
+- [x] `platforms.py`: domain table, account and post URL patterns, URL normalization (including mock local URLs)
+- [x] `scrape.py`, tested against mock pages
+- [x] `search/mock_backend.py`
+- [x] Deterministic `collect_for_image` and the cross-image merge; Section 1 mock tests
+- [x] Strands per-image agent with its tools and `ImageTriage` output; stub-model topology/concurrency test
+- [x] `hosting.py`, cleanup manifest, and `search/serpapi_backend.py` with run-local cache; `smoke-search` command
+- [ ] Consent-bearing smoke-search on one team member (needs `IMAGE_BUCKET`; checks that Yandex can fetch presigned S3 URLs)
+- [x] Bound retries, deadlines, fetch destinations, and in-flight deduplication; preserve error snippets and aliases
 
 Section 2
 

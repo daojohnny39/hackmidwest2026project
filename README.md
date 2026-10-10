@@ -201,9 +201,10 @@ page data persists.
 
 ## Agent pipeline
 
-The pipeline in `pipeline/` follows `docs/agent-pipeline-spec.md`. Only Section 0
-(foundation) is built so far: settings, artifact contracts, the capture loader and
-consent gate, run folders, and the CLI. It needs Python 3.12 and the packages in
+The pipeline in `pipeline/` follows `docs/agent-pipeline-spec.md`; the spec's opening
+lines say which sections are built. Section 1 (search and scrape) runs one collector
+per image: a reverse-image search, then page fetches and scraping, merged into
+`runs/<run_id>/01_raw_evidence.json`. It needs Python 3.12 and the packages in
 `requirements.txt`. If your Python has no pip, [uv](https://docs.astral.sh/uv/) can
 create the environment:
 
@@ -231,11 +232,19 @@ to `run` or `stage`, since those calls are paid.
 ```
 
 Add `--mock` to search the local mock internet instead
-(no key or credits needed), or set `SEARCH_BACKEND=mock` in `.env`.
+(no key or credits needed), or set `SEARCH_BACKEND=mock` in `.env`. Start the mock
+first with `python3 -m mock_internet serve`.
 
 ```bash
 # Validate a mock capture bundle and write runs/<run_id>/00_capture.json.
 .venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 0 --mock
+
+# Search and scrape (Section 1) on the mock internet, printing hits per image.
+.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 1 --mock
+.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 1 --mock --scenario ambiguous
+
+# Re-run one stage of a saved run (later stages' outputs are deleted first).
+.venv/bin/python -m pipeline stage 1 --run runs/<run_id>
 
 # Rebuild accounts, profiles, and trust graphs (Section 2) from a run's saved evidence.
 .venv/bin/python -m pipeline stage 2 --run runs/<run_id>
@@ -253,6 +262,24 @@ send data to outside services, so both require `consent.external_processing: tru
 and SerpApi runs need real image files. The mock fixtures under `tests/fixtures/`
 require the mock backend (`--mock` or `SEARCH_BACKEND=mock`). The offline tests
 always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
+
+SerpApi's Yandex engine only takes an image URL, so a SerpApi run hosts each photo
+briefly in S3 (spec 1.2): set `IMAGE_BUCKET` (a private bucket) and `AWS_REGION` in
+`.env`, with AWS credentials from `aws configure` or `AWS_PROFILE`. Each image is
+uploaded under a random key, shared through a presigned URL valid for 10 minutes, and
+deleted after its search; `uploads.json` in the run folder tracks it until then, and
+`purge` deletes anything left over. Try one consenting teammate's photo first. It
+costs one search and never calls a model:
+
+```bash
+.venv/bin/python -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
+```
+
+With `LLM_MODE=anthropic` (or `bedrock`) and `--models`, each image gets its own
+Strands agent that decides which hits to fetch and which pages are about the
+person. Without them, stage 1 fetches every hit in rank order and follows account
+links from the profiles it finds. If an agent fails, its image falls back to that
+deterministic path.
 
 ## OpenCV setup
 
