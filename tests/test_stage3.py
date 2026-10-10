@@ -1,299 +1,65 @@
-"""Section 3 tests (spec 3.4): signals, fallback formula, Jev confidence, and the decision rule.
+"""Section 3: real Section 2 output, spec 9 targets, and verification edge cases.
 
-Sections 1 and 2 aren't built yet, so `build_case` turns a mock-seed case (hits per
-image, followed links, accounts and their links, profiles) into valid 01/02
-artifacts. The cases mirror spec 9's matrix rows; the graphs use the 2c trust table.
+Seed collection stays in memory. Jev responders exercise the real adapter without
+HTTP. Only boundary tests alter artifacts or provider answers.
 """
 
 import json
 import math
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
-from pipeline import stage3_verify
+from pipeline import stage3_verify, stage4_summarize
 from pipeline.artifacts import ArtifactError, read_artifact, write_artifact
-from pipeline.config import TRUST_TABLE, load_settings
+from pipeline.config import load_settings
 from pipeline.contracts import (
+    CandidateProfile,
+    CandidateSignals,
     CaptureArtifact,
+    FetchError,
     ProfilesBundle,
     RawEvidenceBundle,
     VerificationNotes,
+    VerificationResult,
     validate_references,
 )
 from pipeline.jev import Jev
-from pipeline.platforms import platform_for
+from pipeline.stage2_profiles import build_graphs, build_profiles
 from pipeline.stage3_verify import apply_notes, compute_signals, fallback_confidence, verify
-from tests import test_contracts as contract_fixture
+from tests.seed_evidence import collect
 from tests.support import OfflineTestCase
 
 WHEN = "2026-10-10T14:03:00Z"
 MODEL = "jev-1.13.0-test"
-
-
-def local(url):
-    return "http://127.0.0.1:8765/web/" + url.split("://", 1)[1]
-
-
-def trust(count):
-    return TRUST_TABLE[min(count, max(TRUST_TABLE))]
-
-
-def account(url, name, workplace=None, links=(), updated_at="2026-10-01", location=None):
-    return {"url": url, "name": name, "workplace": workplace, "links": list(links), "updated_at": updated_at,
-            "location": location}
-
-
-def build_case(slug, *, hits, accounts, profiles, follows=None, mentions=(), aliases=None, snippets=None,
-               search_failed=None, drop=None, flags=(), backend="mock"):
-    """Valid (RawEvidenceBundle, ProfilesBundle) for one case.
-
-    hits: image_id -> hit URLs in rank order. follows: URL -> parent profile URL it was
-    followed from (depth 1). aliases: original URL -> canonical page URL. snippets: URL ->
-    HTTP status of a failed fetch (kept as a snippet record). search_failed: image_id ->
-    (status, reason). drop: image_id -> URLs that image's triage didn't keep.
-    profiles: (name, [account URLs]) in profile ID order.
-    """
-    run_id = f"mock-{slug}-0123abcd"
-    follows, aliases, snippets = follows or {}, aliases or {}, snippets or {}
-    search_failed, drop = search_failed or {}, drop or {}
-    by_url = {spec["url"]: spec for spec in accounts}
-    mention_of = {mention["url"]: mention for mention in mentions}
-
-    found: dict[str, list[dict]] = {}  # page key -> found_via
-    reached: dict[str, list[str]] = {image_id: [] for image_id in hits}
-    for image_id, urls in hits.items():
-        for rank, url in enumerate(urls, start=1):
-            key = aliases.get(url, url)
-            found.setdefault(key, []).append({"image_id": image_id, "hit_position": rank, "depth": 0})
-            if key not in reached[image_id]:
-                reached[image_id].append(key)
-    for url, parent in follows.items():
-        direct = {via["image_id"] for via in found.get(url, []) if via["depth"] == 0}
-        for image_id in dict.fromkeys(via["image_id"] for via in found[parent] if via["depth"] == 0):
-            if image_id not in direct:
-                found.setdefault(url, []).append(
-                    {"image_id": image_id, "hit_position": None, "depth": 1, "parent_url": parent})
-                reached[image_id].append(url)
-    kept = {image_id: [url for url in urls if url not in drop.get(image_id, ())] for image_id, urls in reached.items()}
-    retained = {url for urls in kept.values() for url in urls}
-
-    pages = {}
-    for key, via in found.items():
-        kind = "profile" if key in by_url else mention_of[key]["kind"] if key in mention_of else "article"
-        links = by_url[key]["links"] if key in by_url else mention_of.get(key, {}).get("links", [])
-        snippet = key in snippets
-        pages[key] = {
-            "url": key, "source_urls": [key, *[alias for alias, target in aliases.items() if target == key]],
-            "fetched_url": local(key), "status_code": snippets.get(key, 200), "platform": platform_for(key),
-            "page_kind": kind, "title": by_url.get(key, {}).get("name") or "", "found_via": via,
-            "outbound_links": [] if snippet else [{"url": link, "label": ""} for link in links],
-            "relevant": key in retained, "extraction": "snippet" if snippet else "html",
-        }
-    images = []
-    for image_id, urls in hits.items():
-        failed = search_failed.get(image_id)
-        errors = [{"url": None, "status_code": failed[0], "reason": failed[1]}] if failed else [
-            {"url": url, "status_code": snippets[url], "reason": "not_found" if snippets[url] == 404 else "forbidden"}
-            for url in dict.fromkeys(aliases.get(u, u) for u in urls) if url in snippets]
-        images.append({
-            "image_id": image_id, "angle": "front", "backend": backend, "searched_at": WHEN,
-            "request_id": None if failed else f"mock-{image_id}", "collection_method": "deterministic",
-            "hits": [{"position": rank, "title": url, "url": url, "fetch_url": local(url), "source": url.split("/")[2]}
-                     for rank, url in enumerate(urls, start=1)],
-            "page_urls": kept[image_id], "errors": errors,
-        })
-    raw = RawEvidenceBundle.model_validate({
-        "run_id": run_id, "num_images": len(hits), "images": images, "pages": pages,
-        "url_aliases": {**{key: key for key in pages}, **{a: t for a, t in aliases.items() if t in pages}},
-    })
-
-    ids = {spec["url"]: f"a{index}" for index, spec in enumerate(accounts, start=1)}
-    attributed: dict[str, list[dict]] = {}  # account URL -> found_via of mentions about it
-    for mention in mentions:
-        for subject in mention.get("subjects", []):
-            attributed.setdefault(subject, []).extend(found[mention["url"]])
-    account_records = {}
-    for spec in accounts:
-        url = spec["url"]
-        via = found[url]
-        direct = [v for v in via + attributed.get(url, []) if v["depth"] == 0]
-        account_records[ids[url]] = {
-            "account_id": ids[url], "platform": platform_for(url), "url": url, "display_name": spec["name"],
-            "workplace": spec["workplace"], "location": spec["location"], "updated_at": spec["updated_at"],
-            "links_to": spec["links"], "depth": min(v["depth"] for v in via),
-            "image_ids": sorted({v["image_id"] for v in via + attributed.get(url, [])}),
-            "direct_image_ids": sorted({v["image_id"] for v in direct}),
-            "best_hit_position": min((v["hit_position"] for v in direct), default=None),
-            "extraction": "snippet" if url in snippets else "json_ld",
-        }
-    mention_records = [{
-        "url": mention["url"], "kind": mention["kind"],
-        "author_account_id": ids.get(mention.get("author")),
-        "subject_account_ids": [ids[subject] for subject in mention.get("subjects", [])],
-        "links_to": mention.get("links", []), "image_ids": sorted({v["image_id"] for v in found[mention["url"]]}),
-    } for mention in mentions]
-
-    profile_of = {url: f"p{index}" for index, (_, urls) in enumerate(profiles, start=1) for url in urls}
-    profile_records, graphs = [], {}
-    for index, (name, urls) in enumerate(profiles, start=1):
-        profile_id = f"p{index}"
-        profile_records.append({"profile_id": profile_id, "name": name, "account_ids": [ids[url] for url in urls],
-                                "pair_decisions": []})
-        sources: dict[str, list[str]] = {}
-        for url in urls:
-            if url in snippets:
-                continue  # snippet-only accounts contribute no edges (2c)
-            for target in by_url[url]["links"]:
-                if target != url:
-                    sources.setdefault(target, []).append(ids[url])
-        connections = []
-        for target, linked_from in sources.items():
-            owner = profile_of.get(target)
-            status = "not_collected" if owner is None else "in_profile" if owner == profile_id else "other_profile"
-            connections.append({
-                "target_url": target, "target_platform": platform_for(target), "count": len(linked_from),
-                "sources": linked_from, "trust": trust(len(linked_from)), "target_status": status,
-                "target_profile_id": owner if status == "other_profile" else None,
-            })
-        incoming = {c["target_url"]: c["trust"] for c in connections}
-        internal = sum(c["count"] for c in connections if c["target_status"] == "in_profile")
-        cross = any(c["target_status"] == "other_profile" and c["trust"] >= 95 for c in connections)
-        graphs[profile_id] = {
-            "profile_id": profile_id, "connections": connections,
-            "mean_link_trust": sum(incoming.get(url, 0) for url in urls) / len(urls),
-            "internal_link_density": internal / (len(urls) * (len(urls) - 1)) if len(urls) > 1 else 0.0,
-            "flags": ["cross_profile_link"] if cross else [],
-        }
-    grouped = ProfilesBundle.model_validate({
-        "run_id": run_id, "accounts": account_records, "mentions": mention_records,
-        "profiles": profile_records, "graphs": graphs, "jev_calls": [], "flags": list(flags),
-    })
-    validate_references(raw=raw, profiles=grouped)
-    return raw, grouped
-
-
-# The mock seed (mock_internet/seed.py): Kansas City Alex, Portland Alex, Sam, Casey.
-LINKUP, CHATTER = "https://linkup.test/in/alexbuilds", "https://chatter.test/alexbuilds"
-PHOTOGRAM, CODEFORGE = "https://photogram.test/alexbuilds", "https://codeforge.test/alexbuilds"
-FIELDNOTES = "https://fieldnotes.test/@alexbuilds"
+LINKUP = "https://linkup.test/in/alexbuilds"
 INTERVIEW = "https://riverbend-news.test/people/alex-morgan-transit"
 MIRROR = "https://syndicated.test/transit/alex-morgan"
-POST = "https://chatter.test/alexbuilds/status/101"
-ARCHIVE = "https://archive.test/speakers/alex-morgan-2021"
-OLD_PROJECT = "https://fieldnotes.test/@alexbuilds/old-project"
-SAM_LINKUP = "https://linkup.test/in/samdraws"
-
-PL_LINKUP, PL_CHATTER = "https://linkup.test/in/alexframes", "https://chatter.test/alexframes"
-PL_FIELDNOTES, PL_CODEFORGE = "https://fieldnotes.test/@alexframes", "https://codeforge.test/alexframes"
-
-ALEX_HITS = {
-    "img-1": [LINKUP, CHATTER, INTERVIEW, CODEFORGE],
-    "img-2": [PHOTOGRAM, FIELDNOTES, CHATTER, MIRROR],
-    "img-3": [INTERVIEW, CODEFORGE, POST, ARCHIVE, OLD_PROJECT],
-}
-KC, ATLAS = "Kansas City, MO", "Prairie Atlas Labs"
-ALEX_ACCOUNTS = [
-    account(LINKUP, "Alex Morgan", ATLAS, [CHATTER, CODEFORGE], location=KC),
-    account(CHATTER, "Alex M.", ATLAS, [LINKUP, FIELDNOTES], location=KC),
-    account(PHOTOGRAM, "Alex M.", "Old Mill Software", [CHATTER, FIELDNOTES], "2022-05-14", KC),
-    account(CODEFORGE, "Alex Morgan", ATLAS, location=KC),
-    account(FIELDNOTES, "Alex Morgan", ATLAS, [LINKUP, CODEFORGE], location=KC),
-]
-ALEX_MENTIONS = [
-    {"url": INTERVIEW, "kind": "article", "subjects": [LINKUP], "links": [LINKUP, SAM_LINKUP]},
-    {"url": POST, "kind": "post", "author": CHATTER, "subjects": [CHATTER], "links": [CHATTER]},
-    {"url": ARCHIVE, "kind": "article"},
-    {"url": OLD_PROJECT, "kind": "article"},
-]
-PORTLAND_ACCOUNTS = [
-    account(PL_LINKUP, "Alex Morgan", "Cedar Light Studio", [PL_CHATTER, PL_CODEFORGE], location="Portland, OR"),
-    account(PL_CHATTER, "Alex Morgan Photo", "Cedar Light Studio", [PL_LINKUP, PL_FIELDNOTES], location="Portland, OR"),
-    account(PL_FIELDNOTES, "Alex Morgan", "Cedar Light Studio", [PL_LINKUP, PL_CODEFORGE], location="Portland, OR"),
-    account(PL_CODEFORGE, "Alex Morgan", "Cedar Light Studio", location="Portland, OR"),
-]
 
 
-def alex(scenario="default", **changes):
-    hits = {image_id: list(urls) for image_id, urls in ALEX_HITS.items()}
-    accounts, profiles = list(ALEX_ACCOUNTS), [("Alex Morgan", [spec["url"] for spec in ALEX_ACCOUNTS])]
-    follows = {FIELDNOTES: CHATTER}
-    if scenario == "ambiguous":  # the photographer's pages follow Alex's on every angle
-        for urls in hits.values():
-            urls += [PL_LINKUP, PL_CHATTER, PL_FIELDNOTES]
-        follows[PL_CODEFORGE] = PL_LINKUP
-        accounts += PORTLAND_ACCOUNTS
-        profiles.append(("Alex Morgan", [spec["url"] for spec in PORTLAND_ACCOUNTS]))
-    elif scenario == "stale":  # every angle also returns the 2021 archive and the deleted post
-        for urls in hits.values():
-            urls += [ARCHIVE, OLD_PROJECT]
-    elif scenario == "duplicates":
-        for urls in hits.values():
-            urls[:] = [urls[0], *urls] + [MIRROR]
-    elif scenario in ("empty", "rate_limited", "server_error"):
-        hits = {image_id: [] for image_id in hits}
-        failed = {"rate_limited": (429, "rate_limited"), "server_error": (503, "server_error")}.get(scenario)
-        failure = {image_id: failed for image_id in hits} if failed else None
-        return build_case(f"alex-{scenario}", hits=hits, accounts=[], profiles=[], search_failed=failure)
-    options = {"follows": follows, "mentions": ALEX_MENTIONS, "aliases": {MIRROR: INTERVIEW},
-               "snippets": {OLD_PROJECT: 404}, **changes}
-    return build_case(f"alex-{scenario}", hits=hits, accounts=accounts, profiles=profiles, **options)
+def settings(mode="fake"):
+    env = {"JEV_MODE": mode, "LLM_MODE": "off", "TYPESAFE_API_KEY": "test", "OPENROUTER_API_KEY": "test"}
+    return load_settings(backend="mock", models=mode in ("typesafe", "openrouter"), environ=env, dotenv_path=None)
 
 
-def sam():
-    linkup, chatter, photogram = SAM_LINKUP, "https://chatter.test/samdraws", "https://photogram.test/samdraws"
-    codeforge, fieldnotes = "https://codeforge.test/samdraws", "https://fieldnotes.test/@samdraws"
-    private = "https://photogram.test/samdraws/private-album"
-    mosaic = "Mosaic Kite Design"
-    accounts = [
-        account(linkup, "Sam Rivera", mosaic, [chatter, codeforge], location=KC),
-        account(chatter, "Sammy Rivera", mosaic, [linkup, fieldnotes], location=KC),
-        account(photogram, "Sammy Rivera", mosaic, [chatter, fieldnotes], location=KC),
-        account(codeforge, "Sam Rivera", mosaic, location=KC),
-        account(fieldnotes, "Sam Rivera", mosaic, [linkup, codeforge], location=KC),
-    ]
-    return build_case("sam", hits={"img-1": [linkup, chatter, photogram, private]}, accounts=accounts,
-                      profiles=[("Sam Rivera", [spec["url"] for spec in accounts])],
-                      follows={codeforge: linkup, fieldnotes: chatter}, snippets={private: 403})
+def client(mode):
+    return None if mode == "off" else Jev(settings(mode))
 
 
-CASEY_LINKUP, CASEY_CHATTER = "https://linkup.test/in/caseykeys", "https://chatter.test/caseykeys"
-
-
-def casey(names=("Casey Brooks", "C. Brooks"), snippets=None, profile_name="Casey Brooks"):
-    accounts = [
-        account(CASEY_LINKUP, names[0], "Blue Finch Music School", [CASEY_CHATTER], location="Tulsa, OK"),
-        account(CASEY_CHATTER, names[1], "Blue Finch Music School", [CASEY_LINKUP], location="Tulsa, OK"),
-    ]
-    return build_case("casey", hits={"img-1": [CASEY_LINKUP, CASEY_CHATTER]}, accounts=accounts,
-                      profiles=[(profile_name, [CASEY_LINKUP, CASEY_CHATTER])], snippets=snippets)
-
-
-def unknown():
-    return build_case("unknown", hits={"img-1": []}, accounts=[], profiles=[])
-
-
-def formula(image_support, top_hit_share, trust, platforms, consistency, collision=False):
-    z = (-4 + 2 * image_support + 3 * top_hit_share + 1.5 * trust / 100 + 0.3 * min(platforms, 5)
-         + consistency - 0.5 * collision)
-    return 1 / (1 + math.exp(-z))
-
-
-def jev_settings():
-    return load_settings(backend="mock", models=True, environ={"JEV_MODE": "typesafe", "TYPESAFE_API_KEY": "x"},
-                         dotenv_path=None)
-
-
-def fake_settings():
-    return load_settings(backend="mock", environ={}, dotenv_path=None)
+def seed_case(capture="alex", scenario="default", mode="off"):
+    # collect() models seed hits but not server.fault(). Inject those terminal search errors here.
+    status = {"rate_limited": 429, "server_error": 503}.get(scenario)
+    raw = collect(capture, "empty" if status else scenario)
+    if status:
+        for image in raw.images:
+            image.request_id = None
+            image.errors = [FetchError(url=None, status_code=status, reason=scenario)]
+    return raw, build_profiles(raw, jev=client(mode))
 
 
 def reply(nouls, best, none=0.0):
-    """A raw provider response: one noul per profile and a `best` choice."""
-    probabilities = {profile_id: 0.0 for profile_id in nouls} | {"none": none}
-    if best == "none":
-        probabilities["none"] = 1.0
-    else:
-        probabilities[best] = 1.0 - none
+    probabilities = dict.fromkeys(nouls, 0.0) | {"none": none}
+    probabilities[best] = 1.0 if best == "none" else 1.0 - none
     return {
         "model": MODEL, "usage": {"input_tokens": 512, "output_tokens": 12},
         "answers": {**{f"match_{p}": {"type": "noul", "noul": value} for p, value in nouls.items()},
@@ -301,13 +67,38 @@ def reply(nouls, best, none=0.0):
     }
 
 
-def real_jev(responder, **options):
-    return Jev(jev_settings(), responder=responder, **options)
+def real_jev(responder, mode="typesafe", **options):
+    return Jev(settings(mode), responder=responder, **options)
+
+
+def rename_profiles(profiles, ids):
+    data = profiles.model_dump()
+    mapping = dict(zip((p.profile_id for p in profiles.profiles), ids))
+    for profile in data["profiles"]:
+        profile["profile_id"] = mapping[profile["profile_id"]]
+    data["graphs"] = {mapping[key]: {**graph, "profile_id": mapping[key]} for key, graph in data["graphs"].items()}
+    for graph in data["graphs"].values():
+        for connection in graph["connections"]:
+            target = connection["target_profile_id"]
+            if target is not None:
+                connection["target_profile_id"] = mapping[target]
+    return ProfilesBundle.model_validate(data)
+
+
+def remove_search(raw, image_index, *, failed):
+    data = raw.model_dump()
+    image = data["images"][image_index]
+    image.update(hits=[], page_urls=[], errors=[], request_id=None)
+    if failed:
+        image["errors"] = [{"url": None, "status_code": 429, "reason": "rate_limited"}]
+    for page in data["pages"].values():
+        page["found_via"] = [v for v in page["found_via"] if v["image_id"] != image["image_id"]]
+    data["pages"] = {key: page for key, page in data["pages"].items() if page["found_via"]}
+    data["url_aliases"] = {url: key for url, key in data["url_aliases"].items() if key in data["pages"]}
+    return RawEvidenceBundle.model_validate(data)
 
 
 class NoCallJev:
-    """Stands in for a client that must not be called."""
-
     real = True
     provider = "typesafe"
 
@@ -315,372 +106,518 @@ class NoCallJev:
         raise AssertionError("Jev must not be called")
 
 
-class Stage3TestCase(OfflineTestCase):
-    def assertConfidence(self, verdict, expected, display):
-        self.assertAlmostEqual(verdict.confidence, expected, places=12)
-        self.assertEqual(round(verdict.confidence, 2), display)
+class MockMatrixTests(OfflineTestCase):
+    def test_section2_to_section3_matrix_in_fake_and_off_modes(self):
+        rows = [
+            ("alex", "default", "accepted", [("alexbuilds", "accepted", 0.99)]),
+            ("alex", "ambiguous", "accepted", [("alexbuilds", "accepted", 0.98), ("alexframes", "rejected", 0.69)]),
+            ("alex", "stale", "accepted", [("alexbuilds", "accepted", 0.99)]),
+            ("alex", "duplicates", "accepted", [("alexbuilds", "accepted", 0.99)]),
+            ("alex", "empty", "no_candidates", []),
+            ("alex", "rate_limited", "evidence_unavailable", []),
+            ("alex", "server_error", "evidence_unavailable", []),
+            ("sam", "default", "accepted", [("samdraws", "accepted", 0.99)]),
+            ("casey", "default", "accepted", [("caseykeys", "accepted", 0.97)]),
+            ("unknown", "default", "no_candidates", []),
+        ]
+        for mode in ("fake", "off"):
+            for capture, scenario, reason, expected in rows:
+                with self.subTest(mode=mode, capture=capture, scenario=scenario):
+                    raw, profiles = seed_case(capture, scenario, mode)
+                    result = verify(raw, profiles, jev=client(mode))
+                    validate_references(raw=raw, profiles=profiles, verification=result)
+                    self.assertEqual(VerificationResult.model_validate_json(result.model_dump_json()), result)
+                    handles = {p.profile_id: {profiles.accounts[a].handle for a in p.account_ids}
+                               for p in profiles.profiles}
+                    actual = [(handles[v.profile_id], v.decision, round(v.confidence, 2)) for v in result.verdicts]
+                    self.assertEqual(actual, [({handle}, decision, confidence) for handle, decision, confidence in expected])
+                    self.assertEqual(result.reason, reason)
+                    self.assertEqual(result.accepted_profile_id, result.verdicts[0].profile_id if expected else None)
+                    self.assertTrue(all(v.method == "fallback" and v.confidence == v.fallback_confidence
+                                        for v in result.verdicts))
+                    self.assertEqual(len(result.jev_calls), int(mode == "fake" and bool(expected)))
+                    self.assertTrue(all(call.error is None for call in result.jev_calls))
+                    for verdict in result.verdicts:
+                        self.assertNotIn("partial_search_failure", verdict.flags)
+                        if mode == "fake":
+                            answer = result.jev_calls[0].answers[f"match_{verdict.profile_id}"]
+                            self.assertEqual(answer["noul"], verdict.fallback_confidence)
+                    if capture == "casey":
+                        self.assertIn("sparse_footprint", result.verdicts[0].flags)
+                    # Section 4 must preserve confidence or the exact no-match reason.
+                    final = stage4_summarize.summarize(raw, profiles, result, settings(mode)).final
+                    if expected:
+                        self.assertEqual((final.confidence, final.method), (result.verdicts[0].confidence, "fallback"))
+                    else:
+                        self.assertEqual((final.reason, final.top_candidates), (reason, []))
 
-    def verdicts(self, result):
-        return {verdict.profile_id: verdict for verdict in result.verdicts}
+    def test_empty_candidates_never_call_jev(self):
+        for capture, scenario in (("unknown", "default"), ("alex", "empty"),
+                                  ("alex", "rate_limited"), ("alex", "server_error")):
+            with self.subTest(capture=capture, scenario=scenario):
+                self.assertEqual(verify(*seed_case(capture, scenario), jev=NoCallJev()).jev_calls, [])
 
-
-class MockMatrixTests(Stage3TestCase):
-    """Spec 3.4 and the Section 3 column of the spec 9 matrix, with the default fake Jev."""
-
-    def run_case(self, case, **options):
-        raw, grouped = case
-        result = verify(raw, grouped, jev=Jev(fake_settings()), **options)
-        validate_references(raw=raw, profiles=grouped, verification=result)
-        return result
-
-    def test_alex_default_accepts_kansas_city_alex(self):
-        result = self.run_case(alex())
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
-        verdict = result.verdicts[0]
-        self.assertConfidence(verdict, formula(1, 1, 76, 5, 0.8), 0.99)
-        self.assertEqual(verdict.method, "fallback")
-        self.assertEqual(verdict.signals.newest_update, "2026-10-01")
-        self.assertFalse(verdict.signals.name_collision)
-
-    def test_matches_the_contract_fixture(self):
-        raw = RawEvidenceBundle.model_validate(contract_fixture.raw())
-        grouped = ProfilesBundle.model_validate(contract_fixture.profiles())
-        result = verify(raw, grouped)
-        self.assertEqual(result.verdicts[0].confidence, contract_fixture.CONFIDENCE)
-        self.assertEqual(result.verdicts[0].signals.model_dump(), contract_fixture.verdict()["signals"])
-
-    def test_alex_ambiguous_accepts_kansas_city_and_rejects_portland(self):
-        result = self.run_case(alex("ambiguous"))
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
-        kc, portland = result.verdicts
-        self.assertEqual((kc.profile_id, portland.profile_id), ("p1", "p2"))
-        self.assertConfidence(kc, formula(1, 1, 76, 5, 0.8, collision=True), 0.98)
-        self.assertConfidence(portland, formula(1, 0, 72.5, 4, 1.0, collision=True), 0.69)
-        self.assertEqual(portland.decision, "rejected")
-        # Retrieval alone scores the namesakes alike; the rank-1 share separates them.
-        self.assertEqual((kc.signals.image_support, portland.signals.image_support), (1.0, 1.0))
-        self.assertEqual((kc.signals.top_hit_share, portland.signals.top_hit_share), (1.0, 0.0))
-        self.assertTrue(kc.signals.name_collision and portland.signals.name_collision)
-
-    def test_alex_stale_accepts_one_candidate(self):
-        result = self.run_case(alex("stale"))
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
-        self.assertEqual(len(result.verdicts), 1)  # the archived 2021 bio is not a candidate
-        self.assertConfidence(result.verdicts[0], formula(1, 1, 76, 5, 0.8), 0.99)
-
-    def test_alex_duplicates_do_not_multiply_support(self):
-        result = self.run_case(alex("duplicates"))
-        self.assertEqual(result.reason, "accepted")
-        self.assertConfidence(result.verdicts[0], formula(1, 1, 76, 5, 0.8), 0.99)
-
-    def test_sam_accepts_both_name_forms_as_one_candidate(self):
-        raw, grouped = sam()
-        result = self.run_case((raw, grouped))
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
-        self.assertConfidence(result.verdicts[0], formula(1, 1, 76, 5, 1.0), 0.99)
-        names = {grouped.accounts[a].display_name for a in grouped.profiles[0].account_ids}
-        self.assertEqual(names, {"Sam Rivera", "Sammy Rivera"})
-
-    def test_casey_is_accepted_with_a_sparse_flag(self):
-        result = self.run_case(casey())
-        self.assertEqual(result.reason, "accepted")
-        self.assertConfidence(result.verdicts[0], formula(1, 1, 50, 2, 1.0), 0.97)
-        self.assertIn("sparse_footprint", result.verdicts[0].flags)
-
-    def test_unknown_has_no_candidates_and_calls_no_model(self):
-        raw, grouped = unknown()
-        result = verify(raw, grouped, jev=NoCallJev())
-        self.assertEqual((result.reason, result.verdicts, result.jev_calls), ("no_candidates", [], []))
-
-    def test_empty_search_has_no_candidates(self):
-        raw, grouped = alex("empty")
-        self.assertEqual(verify(raw, grouped, jev=NoCallJev()).reason, "no_candidates")
-
-    def test_failed_searches_make_evidence_unavailable(self):
-        for scenario in ("rate_limited", "server_error"):
-            with self.subTest(scenario=scenario):
-                raw, grouped = alex(scenario)
-                result = verify(raw, grouped, jev=NoCallJev())
-                self.assertEqual((result.reason, result.jev_calls), ("evidence_unavailable", []))
-
-    def test_fake_jev_exercises_typed_parsing_without_scoring(self):
-        result = self.run_case(alex("ambiguous"))
-        [call] = result.jev_calls
-        self.assertEqual((call.provider, call.error, call.model), ("fake", None, None))
-        self.assertEqual(set(call.answers), {"match_p1", "match_p2", "best"})
-        self.assertEqual(call.answers["best"]["choice"], "p1")
-        self.assertTrue(all(verdict.method == "fallback" for verdict in result.verdicts))
-
-    def test_jev_off_uses_the_formula_without_a_call(self):
-        raw, grouped = alex()
-        result = verify(raw, grouped, jev=None)
-        self.assertEqual((result.reason, result.jev_calls), ("accepted", []))
+    def test_no_accounts_after_access_error_is_evidence_unavailable(self):
+        raw = collect("alex")
+        for page in raw.pages.values():
+            if page.page_kind == "profile":
+                page.relevant = False
+        for image in raw.images:
+            image.page_urls = [url for url in image.page_urls if raw.pages[url].relevant]
+        raw = RawEvidenceBundle.model_validate(raw.model_dump())
+        # The retained deleted article has a 404; none of the remaining pages forms an account.
+        result = verify(raw, build_profiles(raw), jev=NoCallJev())
+        self.assertEqual(result.reason, "evidence_unavailable")
 
 
-class SignalTests(Stage3TestCase):
-    def test_partial_search_failure_lowers_support_but_keeps_x(self):
-        hits = {**ALEX_HITS, "img-3": []}  # img-3's search was rate limited
-        raw, grouped = build_case(
-            "alex-partial", hits=hits, accounts=ALEX_ACCOUNTS, profiles=[("Alex Morgan", [s["url"] for s in ALEX_ACCOUNTS])],
-            follows={FIELDNOTES: CHATTER}, mentions=ALEX_MENTIONS[:1], aliases={MIRROR: INTERVIEW},
-            search_failed={"img-3": (429, "rate_limited")})
-        signals = compute_signals(raw, grouped)["p1"]
-        self.assertEqual(raw.num_images, 3)
-        self.assertAlmostEqual(signals.image_support, 2 / 3)
-        self.assertAlmostEqual(signals.top_hit_share, 2 / 3)
-        result = verify(raw, grouped)
-        self.assertIn("partial_search_failure", result.verdicts[0].flags)
-
-    def test_top_hit_counts_only_when_the_image_kept_the_page(self):
-        raw, grouped = alex(drop={"img-3": [INTERVIEW]})  # img-3's rank-1 hit, dropped by its triage
-        self.assertAlmostEqual(compute_signals(raw, grouped)["p1"].top_hit_share, 2 / 3)
-
-    def test_followed_links_add_no_direct_support(self):
-        raw, grouped = alex()
-        fieldnotes = next(a for a in grouped.accounts.values() if a.url == FIELDNOTES)
-        self.assertEqual(fieldnotes.direct_image_ids, ["img-2"])  # img-1 reached it only through Chatter
-        self.assertEqual(compute_signals(raw, grouped)["p1"].image_support, 1.0)
-
-    def test_consistency_counts_missing_workplaces_against_the_profile(self):
-        self.assertEqual(stage3_verify._consistency(["Atlas", "atlas.", None, "Old Mill"]), 0.5)
-        self.assertEqual(stage3_verify._consistency([None, ""]), 0.0)
-        self.assertEqual(stage3_verify._consistency(["B Co", "A Co"]), 0.5)
-
-    def test_newest_update_ignores_invalid_dates(self):
-        newest = stage3_verify._newest
-        self.assertEqual(newest(["not a date", "2022-05-14", None]), "2022-05-14")
-        self.assertEqual(newest(["2026-10-01", "2026-10-01T09:00:00Z", "2026-10-01T05:00:00-05:00"]),
-                         "2026-10-01T05:00:00-05:00")
-        self.assertIsNone(newest([None, "soon"]))
-
-    def test_fallback_formula_matches_the_spec(self):
-        raw, grouped = alex()
-        signals = compute_signals(raw, grouped)["p1"]
-        self.assertEqual(signals.model_dump(), {
+class SignalTests(OfflineTestCase):
+    def test_real_section2_signals(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        signals = compute_signals(raw, profiles)
+        self.assertEqual(signals["p1"].model_dump(), {
             "image_support": 1.0, "top_hit_share": 1.0, "mean_link_trust": 76.0, "platform_count": 5,
-            "consistency": 0.8, "name_collision": False, "newest_update": "2026-10-01"})
-        self.assertAlmostEqual(fallback_confidence(signals), formula(1, 1, 76, 5, 0.8))
-        capped = signals.model_copy(update={"platform_count": 9})
-        self.assertAlmostEqual(fallback_confidence(capped), fallback_confidence(signals))
+            "consistency": 0.8, "name_collision": True, "newest_update": "2026-10-01"})
+        self.assertEqual(signals["p2"].model_dump(), {
+            "image_support": 1.0, "top_hit_share": 0.0, "mean_link_trust": 72.5, "platform_count": 4,
+            "consistency": 1.0, "name_collision": True, "newest_update": "2026-10-01"})
+
+    def test_failed_and_empty_searches_stay_in_the_denominator(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                raw = remove_search(collect("alex"), 2, failed=failed)
+                result = verify(raw, build_profiles(raw))
+                verdict = result.verdicts[0]
+                self.assertEqual((verdict.signals.image_support, verdict.signals.top_hit_share), (2 / 3, 2 / 3))
+                self.assertEqual("partial_search_failure" in verdict.flags, failed)
+
+    def test_support_and_platform_count_use_distinct_values(self):
+        raw, profiles = seed_case("casey")
+        for account in profiles.accounts.values():
+            account.platform = "linkedin"
+            account.direct_image_ids *= 2
+        signals = compute_signals(raw, profiles)["p1"]
+        self.assertEqual((signals.image_support, signals.platform_count), (1, 1))
+
+    def test_top_hit_must_be_rank_one_even_when_hits_are_out_of_order(self):
+        raw = collect("casey")
+        raw.images[0].hits.reverse()
+        self.assertEqual(compute_signals(raw, build_profiles(raw))["p1"].top_hit_share, 1)
+        for hit in raw.images[0].hits:
+            hit.position += 1
+        for page in raw.pages.values():
+            for via in page.found_via:
+                via.hit_position += 1
+        raw = RawEvidenceBundle.model_validate(raw.model_dump())
+        self.assertEqual(compute_signals(raw, build_profiles(raw))["p1"].top_hit_share, 0)
+
+    def test_triage_removes_only_that_images_support(self):
+        raw = collect("alex")
+        raw.images[2].page_urls.remove(INTERVIEW)
+        profiles = build_profiles(raw)
+        self.assertEqual(compute_signals(raw, profiles)["p1"].top_hit_share, 2 / 3)
+        self.assertTrue(raw.pages[INTERVIEW].relevant)
+
+    def test_rank_one_mirror_resolves_to_its_attributed_mention(self):
+        raw = collect("alex")
+        image = raw.images[1]
+        mirror = next(hit for hit in image.hits if hit.url == MIRROR)
+        old_rank = mirror.position
+        for hit in image.hits:
+            hit.position = {1: old_rank, old_rank: 1}.get(hit.position, hit.position)
+        for page in raw.pages.values():
+            for via in page.found_via:
+                if via.image_id == image.image_id and via.depth == 0:
+                    via.hit_position = {1: old_rank, old_rank: 1}.get(via.hit_position, via.hit_position)
+        raw = RawEvidenceBundle.model_validate(raw.model_dump())
+        self.assertEqual(compute_signals(raw, build_profiles(raw))["p1"].top_hit_share, 1)
+
+    def test_only_subject_attribution_carries_mention_support(self):
+        raw = collect("alex")
+        profiles = build_profiles(raw)
+        mention = next(m for m in profiles.mentions if m.url == INTERVIEW)
+        self.assertEqual([profiles.accounts[a].url for a in mention.subject_account_ids], [LINKUP])
+        raw.pages[INTERVIEW].title = "Transit interview with a designer"
+        profiles = build_profiles(raw)
+        mention = next(m for m in profiles.mentions if m.url == INTERVIEW)
+        self.assertTrue(mention.links_to)
+        self.assertEqual(mention.subject_account_ids, [])
+        self.assertEqual(compute_signals(raw, profiles)["p1"].top_hit_share, 2 / 3)
+
+    def test_followed_accounts_do_not_gain_direct_support(self):
+        raw, profiles = seed_case("sam")
+        followed = [a for a in profiles.accounts.values() if a.depth == 1]
+        self.assertEqual(len(followed), 2)
+        for account in followed:
+            self.assertEqual((account.image_ids, account.direct_image_ids, account.best_hit_position), (["img-1"], [], None))
+        split = followed[0]
+        profiles.profiles = [
+            CandidateProfile(profile_id="p1", name="Sam Rivera", pair_decisions=[],
+                             account_ids=[a for a in profiles.accounts if a != split.account_id]),
+            CandidateProfile(profile_id="p2", name=split.display_name, pair_decisions=[], account_ids=[split.account_id]),
+        ]
+        profiles.graphs = build_graphs(profiles.accounts, profiles.profiles)
+        result = verify(raw, profiles, jev=real_jev(lambda s, q: reply({"p1": 0.1, "p2": 0.95}, "p2")))
+        self.assertEqual((result.reason, result.verdicts[0].signals.image_support), ("insufficient_evidence", 0))
+
+    def test_workplaces_count_missing_values_and_normalize_case_and_punctuation(self):
+        raw, profiles = seed_case()
+        for workplaces, expected in ((["Atlas", "atlas.", None, "Old Mill", ""], 0.4),
+                                     ([None] * 5, 0), (["B Co", "A Co", None, None, None], 0.2),
+                                     (["東京研究所"] * 5, 1)):
+            with self.subTest(workplaces=workplaces):
+                for account, workplace in zip(profiles.accounts.values(), workplaces):
+                    account.workplace = workplace
+                self.assertEqual(compute_signals(raw, profiles)["p1"].consistency, expected)
+
+    def test_name_collisions_use_section2_compatibility(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        for names, expected in ((("Sam Rivera", "Sammy Rivera"), True), (("Alex M.", "Alex Morgan"), True),
+                                (("Alex", "Alex"), False), ((None, None), False),
+                                (("Alex Morgan", "Alex Morgan Photo"), False)):
+            with self.subTest(names=names):
+                for profile, name in zip(profiles.profiles, names):
+                    profile.name = name
+                self.assertEqual([s.name_collision for s in compute_signals(raw, profiles).values()], [expected] * 2)
+
+    def test_newest_update_ignores_invalid_dates_and_uses_offsets(self):
+        raw, profiles = seed_case()
+        for dates, expected in ((["not a date", "2022-05-14", None, "", "soon"], "2022-05-14"),
+                                (["2026-10-01", "2026-10-01T09:00:00Z", "2026-10-01T05:00:00-05:00", None, None],
+                                 "2026-10-01T05:00:00-05:00"), ([None] * 5, None)):
+            with self.subTest(dates=dates):
+                for account, date in zip(profiles.accounts.values(), dates):
+                    account.updated_at = date
+                self.assertEqual(compute_signals(raw, profiles)["p1"].newest_update, expected)
+
+    def test_fallback_formula_anchor_and_platform_cap(self):
+        signals = CandidateSignals(image_support=1, top_hit_share=0.5, mean_link_trust=0, platform_count=0,
+                                   consistency=0.5, name_collision=False)
+        self.assertEqual(fallback_confidence(signals), 0.5)  # spec formula gives z = 0
+        signals.platform_count = 5
+        self.assertAlmostEqual(fallback_confidence(signals), 0.8175744761936437)
+        signals.platform_count = 9
+        self.assertAlmostEqual(fallback_confidence(signals), 0.8175744761936437)
 
 
-class JevConfidenceTests(Stage3TestCase):
-    def test_valid_jev_answers_become_the_confidence(self):
-        raw, grouped = alex("ambiguous")
-        result = verify(raw, grouped, jev=real_jev(lambda s, q: reply({"p1": 0.94, "p2": 0.20}, "p1")))
-        p1, p2 = result.verdicts
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
-        self.assertEqual((p1.method, p1.confidence, p1.jev_model), ("jev", 0.94, MODEL))
-        self.assertAlmostEqual(p1.fallback_confidence, formula(1, 1, 76, 5, 0.8, collision=True))
-        self.assertEqual((p2.confidence, p2.decision), (0.20, "rejected"))
-        self.assertIn("jev_fallback_disagree", p2.flags)  # 0.20 vs 0.69
-        self.assertNotIn("jev_fallback_disagree", p1.flags)
-        self.assertEqual(result.jev_calls[0].model, MODEL)
+class JevTests(OfflineTestCase):
+    def test_valid_answers_from_either_route_supply_all_confidences(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        for mode in ("typesafe", "openrouter"):
+            with self.subTest(mode=mode):
+                result = verify(raw, profiles, jev=real_jev(lambda s, q: reply({"p1": 0.94, "p2": 0.20}, "p1"), mode))
+                self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
+                self.assertEqual([(v.method, v.confidence, v.jev_model) for v in result.verdicts],
+                                 [("jev", 0.94, MODEL), ("jev", 0.20, MODEL)])
+                self.assertEqual([round(v.fallback_confidence, 2) for v in result.verdicts], [0.98, 0.69])
+                self.assertNotIn("jev_fallback_disagree", result.verdicts[0].flags)
+                self.assertIn("jev_fallback_disagree", result.verdicts[1].flags)
+                self.assertEqual(len(result.jev_calls), 1)
 
-    def test_request_holds_every_candidate_and_x(self):
-        raw, grouped = alex("ambiguous")
-        seen = {}
+    def test_request_has_one_noul_per_candidate_and_a_best_choice(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        seen = []
 
         def responder(state, questions):
-            seen.update(state=state, questions=questions)
+            seen.append((state, questions))
             return reply({"p1": 0.9, "p2": 0.2}, "p1")
 
-        verify(raw, grouped, jev=real_jev(responder))
-        self.assertEqual(seen["state"]["num_images"], 3)
-        self.assertEqual(set(seen["state"]["candidates"]), {"p1", "p2"})
-        self.assertEqual(len(seen["state"]["candidates"]["p2"]["accounts"]), 4)
-        self.assertEqual(set(seen["questions"]), {"match_p1", "match_p2", "best"})
-        self.assertEqual(seen["questions"]["match_p1"]["type"], "noul")
-        self.assertEqual(set(seen["questions"]["best"]["criteria"]), {"p1", "p2", "none"})
-        self.assertLess(len(json.dumps(seen)), 20_000)
+        verify(raw, profiles, jev=real_jev(responder))
+        [(state, questions)] = seen
+        self.assertEqual(state["num_images"], 3)
+        self.assertEqual(set(state["candidates"]), {"p1", "p2"})
+        self.assertEqual(set(questions), {"match_p1", "match_p2", "best"})
+        self.assertEqual([questions[key]["type"] for key in ("match_p1", "match_p2", "best")], ["noul", "noul", "choice"])
+        self.assertEqual(set(questions["best"]["criteria"]), {"p1", "p2", "none"})
+        self.assertIn("untrusted", state["task"])
+        self.assertNotIn("Alex Morgan", json.dumps(questions))
+        for profile in profiles.profiles:
+            summary = state["candidates"][profile.profile_id]
+            self.assertEqual(summary["signals"], compute_signals(raw, profiles)[profile.profile_id].model_dump())
+            self.assertEqual(len(summary["accounts"]), len(profile.account_ids))
+            self.assertTrue(all("url" not in account and "text" not in account for account in summary["accounts"]))
 
-    def test_best_none_accepts_nobody(self):
-        raw, grouped = alex("ambiguous")
-        for best, none in (("none", 1.0), ("p1", 0.5)):
-            with self.subTest(best=best, none=none):
-                result = verify(raw, grouped, jev=real_jev(lambda s, q: reply({"p1": 0.95, "p2": 0.1}, best, none)))
-                self.assertEqual((result.reason, result.accepted_profile_id), ("jev_none", None))
-                self.assertTrue(all(v.decision == "rejected" for v in result.verdicts))
+    def test_maximum_normal_request_is_bounded_despite_long_scraped_fields(self):
+        raw, profiles = seed_case()
+        # Twelve singleton profiles maximize repeated candidate/question overhead.
+        template = profiles.accounts["a1"]
+        profiles.accounts = {f"a{i}": template.model_copy(update={"account_id": f"a{i}", "url": f"https://test.invalid/{i}"})
+                             for i in range(12)}
+        profiles.profiles = [CandidateProfile(profile_id=f"p{i}", name="x" * 100_000,
+                                              account_ids=[f"a{i}"], pair_decisions=[]) for i in range(12)]
+        for account in profiles.accounts.values():
+            for field in ("platform", "display_name", "handle", "role", "workplace", "location", "updated_at", "bio"):
+                setattr(account, field, "x" * 100_000)
+            account.links_to = []
+        profiles.graphs = build_graphs(profiles.accounts, profiles.profiles)
+        state, questions = stage3_verify.jev_request(raw, profiles, compute_signals(raw, profiles))
+        size = len(json.dumps({"state": state, "questions": questions}).encode())
+        self.assertLess(size, 24_000)
+        self.assertEqual(len(state["candidates"]), 12)
 
-    def test_best_disagreeing_with_the_top_noul_accepts_nobody(self):
-        raw, grouped = alex("ambiguous")
-        result = verify(raw, grouped, jev=real_jev(lambda s, q: reply({"p1": 0.95, "p2": 0.1}, "p2")))
-        self.assertEqual((result.reason, result.accepted_profile_id), ("jev_disagreement", None))
+    def test_oversized_request_falls_back_before_contacting_provider(self):
+        raw, profiles = seed_case()
+        profiles = rename_profiles(profiles, ["p" + "界" * 10_000])
+        result = verify(raw, profiles, jev=NoCallJev())
+        self.assertEqual((result.reason, result.jev_calls[0].error), ("accepted", "input_too_large"))
+        self.assertIn("verification_fallback", result.verdicts[0].flags)
+        self.assertEqual(result.verdicts[0].method, "fallback")
 
-    def test_jev_outage_falls_back_for_the_whole_stage(self):
+    def test_fake_answers_are_parsed_and_recorded_but_never_used_to_score(self):
+        raw, profiles = seed_case(scenario="ambiguous", mode="fake")
+        fake = reply({"p1": 0.05, "p2": 0.99}, "p2")["answers"]
+        with patch.object(stage3_verify, "fake_answers", return_value=fake):
+            result = verify(raw, profiles, jev=client("fake"))
+        [call] = result.jev_calls
+        self.assertEqual((call.provider, call.error, call.model), ("fake", None, None))
+        self.assertEqual(call.answers["best"]["choice"], "p2")
+        self.assertEqual((result.accepted_profile_id, round(result.verdicts[0].confidence, 2)), ("p1", 0.98))
+        self.assertTrue(all(v.method == "fallback" and "verification_fallback" not in v.flags for v in result.verdicts))
+
+    def test_malformed_answers_fall_back_for_the_whole_stage(self):
+        bad_responses = []
+        for value in (True, -0.1, 1.1, float("nan"), float("inf"), "0.9"):
+            bad_responses.append(reply({"p1": value, "p2": 0.2}, "p1"))
+        for mutation in (
+            lambda a: a.pop("match_p2"),
+            lambda a: a.update(extra={"type": "noul", "noul": 0.5}),
+            lambda a: a["match_p2"].update(type="score"),
+            lambda a: a["best"].update(choice="foreign"),
+            lambda a: a["best"].pop("confidence"),
+            lambda a: a["best"]["probabilities"].update(p2=-0.1),
+            lambda a: a["best"]["probabilities"].update(foreign=0.0),
+            lambda a: a["best"]["probabilities"].update(p1=0.1),
+        ):
+            response = reply({"p1": 0.9, "p2": 0.2}, "p1")
+            mutation(response["answers"])
+            bad_responses.append(response)
+        raw, profiles = seed_case(scenario="ambiguous")
+        for index, response in enumerate(bad_responses):
+            with self.subTest(response=index):
+                result = verify(raw, profiles, jev=real_jev(lambda s, q: response))
+                self.assertEqual((result.reason, result.jev_calls[0].error), ("accepted", "invalid_response"))
+                self.assertEqual(result.jev_calls[0].answers, {})
+                for verdict in result.verdicts:
+                    self.assertEqual((verdict.method, verdict.confidence, verdict.jev_model),
+                                     ("fallback", verdict.fallback_confidence, None))
+                    self.assertIn("verification_fallback", verdict.flags)
+
+    def test_jev_failure_and_grouping_flags_are_carried_to_every_verdict(self):
         def outage(state, questions):
             raise ConnectionError("down")
 
-        raw, grouped = alex()
-        result = verify(raw, grouped, jev=real_jev(outage))
-        verdict = result.verdicts[0]
-        self.assertEqual((result.reason, verdict.method), ("accepted", "fallback"))
-        self.assertEqual(verdict.confidence, verdict.fallback_confidence)
-        self.assertIn("verification_fallback", verdict.flags)
+        raw = collect("alex", "ambiguous")
+        profiles = build_profiles(raw, jev=real_jev(outage))
+        self.assertIn("grouping_fallback", profiles.flags)
+        profiles.flags.append("accounts_truncated")
+        profiles.graphs["p2"].flags.append("cross_profile_link")
+        result = verify(raw, profiles, jev=real_jev(outage))
         self.assertEqual(result.jev_calls[0].error, "connection_error")
+        for verdict in result.verdicts:
+            self.assertTrue({"grouping_fallback", "accounts_truncated", "verification_fallback"} <= set(verdict.flags))
+        self.assertIn("cross_profile_link", result.verdicts[1].flags)
 
-    def test_malformed_answers_fall_back_without_mixing_scores(self):
-        missing = reply({"p1": 0.9, "p2": 0.2}, "p1")
-        del missing["answers"]["match_p2"]
-        out_of_range = reply({"p1": 1.5, "p2": 0.2}, "p1")
-        foreign_choice = reply({"p1": 0.9, "p2": 0.2}, "p1")
-        foreign_choice["answers"]["best"]["choice"] = "p9"
-        raw, grouped = alex("ambiguous")
-        for label, response in (("missing", missing), ("range", out_of_range), ("choice", foreign_choice)):
-            with self.subTest(label):
-                result = verify(raw, grouped, jev=real_jev(lambda s, q, r=response: r))
-                self.assertEqual({v.method for v in result.verdicts}, {"fallback"})
-                self.assertEqual(result.jev_calls[0].error, "invalid_response")
-                self.assertEqual(result.reason, "accepted")
+    def test_disagreement_flag_requires_more_than_point_four(self):
+        for confidence, flagged in ((0.9, False), (0.9001, True)):
+            with self.subTest(confidence=confidence), patch.object(stage3_verify, "fallback_confidence", return_value=0.5):
+                result = verify(*seed_case("casey"), jev=real_jev(lambda s, q: reply({"p1": confidence}, "p1")))
+                self.assertEqual("jev_fallback_disagree" in result.verdicts[0].flags, flagged)
 
 
-class DecisionRuleTests(Stage3TestCase):
-    def decide(self, case, nouls, best=None):
-        raw, grouped = case
-        best = best or max(nouls, key=nouls.get)
-        return verify(raw, grouped, jev=real_jev(lambda s, q: reply(nouls, best)))
+class DecisionTests(OfflineTestCase):
+    def decide(self, case, nouls, best=None, none=0.0, live=False):
+        best = best if best is not None else max(nouls, key=nouls.get)
+        result = verify(*case, jev=real_jev(lambda s, q: reply(nouls, best, none)), live=live)
+        self.assertEqual(VerificationResult.model_validate_json(result.model_dump_json()), result)
+        return result
 
-    def test_confidence_threshold_is_inclusive_at_0_80(self):
-        self.assertEqual(self.decide(casey(), {"p1": 0.80}).reason, "accepted")
-        self.assertEqual(self.decide(casey(), {"p1": 0.7999}).reason, "below_threshold")
+    def test_confidence_threshold_uses_unrounded_values_without_tolerance(self):
+        for value, reason in ((0.8, "accepted"), (math.nextafter(0.8, 0), "below_threshold"),
+                              (0.796, "below_threshold")):
+            with self.subTest(confidence=value):
+                self.assertEqual(self.decide(seed_case("casey"), {"p1": value}).reason, reason)
 
-    def test_single_candidate_leads_a_runner_up_of_zero(self):
-        result = self.decide(casey(), {"p1": 0.81})
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
+    def test_lead_has_only_the_spec_float_tolerance(self):
+        for runner_up, reason in ((0.65, "accepted"), (0.6500000005, "accepted"),
+                                  (0.650000002, "too_close"), (0.654, "too_close")):
+            with self.subTest(runner_up=runner_up):
+                self.assertEqual(self.decide(seed_case(scenario="ambiguous"), {"p1": 0.85, "p2": runner_up}).reason, reason)
 
-    def test_lead_threshold_is_inclusive_at_0_20(self):
-        self.assertEqual(self.decide(alex("ambiguous"), {"p1": 0.85, "p2": 0.65}).reason, "accepted")
-        self.assertEqual(self.decide(alex("ambiguous"), {"p1": 0.85, "p2": 0.66}).reason, "too_close")
+    def test_ties_accept_neither_candidate_whichever_one_best_selects(self):
+        for best in ("p1", "p2"):
+            result = self.decide(seed_case(scenario="ambiguous"), {"p1": 0.9, "p2": 0.9}, best)
+            self.assertEqual((result.reason, result.accepted_profile_id), ("too_close", None))
+            self.assertEqual([v.profile_id for v in result.verdicts], ["p1", "p2"])
 
-    def test_thresholds_use_unrounded_values(self):
-        self.assertEqual(self.decide(casey(), {"p1": 0.796}).reason, "below_threshold")  # displays as 0.80
+    def test_none_and_disagreement_precede_evidence_and_threshold_checks(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        profiles.profiles[0].name = None
+        for best, none, reason in (("none", 1.0, "jev_none"), ("p1", 0.5, "jev_none"),
+                                   ("p2", 0.0, "jev_disagreement"), ("p1", 0.499, "insufficient_evidence")):
+            with self.subTest(best=best, none=none):
+                result = self.decide((raw, profiles), {"p1": 0.4, "p2": 0.2}, best, none)
+                self.assertEqual((result.reason, result.accepted_profile_id), (reason, None))
 
-    def test_a_tie_is_too_close(self):
-        result = self.decide(alex("ambiguous"), {"p1": 0.9, "p2": 0.9}, best="p2")
-        self.assertEqual((result.reason, [v.profile_id for v in result.verdicts]), ("too_close", ["p1", "p2"]))
+    def test_best_none_below_half_is_disagreement_per_the_spec_order(self):
+        response = reply({"p1": 0.95, "p2": 0.1}, "none")
+        response["answers"]["best"]["probabilities"] = {"p1": 0.3, "p2": 0.3, "none": 0.4}
+        result = verify(*seed_case(scenario="ambiguous"), jev=real_jev(lambda s, q: response))
+        self.assertEqual(result.reason, "jev_disagreement")
 
     def test_snippets_alone_cannot_match(self):
-        raw, grouped = casey(snippets={CASEY_LINKUP: 403, CASEY_CHATTER: 403})
-        result = verify(raw, grouped)
-        self.assertGreater(result.verdicts[0].confidence, 0.8)
+        raw = collect("casey")
+        for page in raw.pages.values():
+            page.extraction, page.status_code = "snippet", 403
+            page.json_ld, page.outbound_links = [], []
+        profiles = build_profiles(raw)
+        scores = {p.profile_id: 0.95 if i == 0 else 0.1 for i, p in enumerate(profiles.profiles)}
+        result = self.decide((raw, profiles), scores)
         self.assertEqual((result.reason, result.accepted_profile_id), ("insufficient_evidence", None))
 
-    def test_unnamed_candidate_is_insufficient(self):
-        result = verify(*casey(names=(None, None), profile_name=None))
-        self.assertEqual(result.reason, "insufficient_evidence")
+    def test_name_must_be_nonempty_and_sourced(self):
+        raw, profiles = seed_case("casey")
+        for name in (None, " ", "Somebody Else"):
+            with self.subTest(name=name):
+                profiles.profiles[0].name = name
+                self.assertEqual(self.decide((raw, profiles), {"p1": 0.95}).reason, "insufficient_evidence")
 
-    def test_candidate_without_direct_image_support_is_insufficient(self):
-        other = "https://codeforge.test/jordanwater"
-        accounts = [account(CASEY_LINKUP, "Casey Brooks", links=[CASEY_CHATTER, other]),
-                    account(CASEY_CHATTER, "C. Brooks", links=[CASEY_LINKUP]),
-                    account(other, "Jordan Lee")]
-        case = build_case("follow-only", hits={"img-1": [CASEY_LINKUP, CASEY_CHATTER]}, accounts=accounts,
-                          follows={other: CASEY_LINKUP},
-                          profiles=[("Casey Brooks", [CASEY_LINKUP, CASEY_CHATTER]), ("Jordan Lee", [other])])
-        result = self.decide(case, {"p1": 0.3, "p2": 0.95})
-        self.assertEqual(result.verdicts[0].signals.image_support, 0.0)
-        self.assertEqual(result.reason, "insufficient_evidence")
+    def test_unicode_sourced_name_reaches_section4(self):
+        raw, profiles = seed_case("casey")
+        profiles.profiles[0].name = "李 明"
+        profiles.accounts[profiles.profiles[0].account_ids[0]].display_name = "李 明"
+        result = verify(raw, profiles)
+        self.assertEqual(result.reason, "accepted")
+        final = stage4_summarize.summarize(raw, profiles, result, settings()).final
+        self.assertEqual(final.name.value, "李 明")
 
-    def test_grouping_and_graph_flags_carry_to_verdicts(self):
-        raw, grouped = alex()
-        grouped = grouped.model_copy(update={"flags": ["grouping_fallback"]})
-        self.assertIn("grouping_fallback", verify(raw, grouped).verdicts[0].flags)
+    def test_unusual_ids_sort_stably_and_keep_exact_question_keys(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        for ids in (("p10", "p2"), ("²", "match_best/東京")):
+            with self.subTest(ids=ids):
+                renamed = rename_profiles(profiles, ids)
+                result = self.decide((raw, renamed), dict.fromkeys(ids, 0.9), best=ids[1])
+                self.assertEqual(result.reason, "too_close")
+                self.assertEqual([v.profile_id for v in result.verdicts], sorted(ids))
+                self.assertEqual(set(result.jev_calls[0].answers), {*(f"match_{p}" for p in ids), "best"})
 
+    def test_reserved_none_id_is_rejected_before_the_request(self):
+        raw, profiles = seed_case("casey")
+        with self.assertRaisesRegex(ArtifactError, "reserved"):
+            verify(raw, rename_profiles(profiles, ["none"]), jev=NoCallJev())
 
-class LivePolicyTests(Stage3TestCase):
-    def test_live_fallback_requires_review(self):
+    def test_live_fallback_always_requires_review_when_candidates_exist(self):
         def outage(state, questions):
             raise TimeoutError
 
-        raw, grouped = alex()
-        for jev in (real_jev(outage), Jev(fake_settings()), None):
-            with self.subTest(provider=getattr(jev, "provider", "off")):
-                result = verify(raw, grouped, jev=jev, live=True)
-                self.assertEqual((result.reason, result.accepted_profile_id), ("review_required", None))
-                self.assertEqual(result.verdicts[0].decision, "rejected")
-
-    def test_live_run_with_valid_jev_can_accept(self):
-        raw, grouped = alex()
-        result = verify(raw, grouped, jev=real_jev(lambda s, q: reply({"p1": 0.93}, "p1")), live=True)
-        self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
-
-    def test_live_run_without_candidates_keeps_its_reason(self):
-        raw, grouped = alex("rate_limited")
-        self.assertEqual(verify(raw, grouped, live=True).reason, "evidence_unavailable")
+        for jev in (real_jev(outage), client("fake"), None):
+            for name in ("Casey Brooks", None):
+                with self.subTest(provider=getattr(jev, "provider", "off"), name=name):
+                    raw, profiles = seed_case("casey")
+                    profiles.profiles[0].name = name
+                    result = verify(raw, profiles, jev=jev, live=True)
+                    self.assertEqual((result.reason, result.accepted_profile_id), ("review_required", None))
+                    self.assertTrue(all(v.decision == "rejected" for v in result.verdicts))
+        self.assertEqual(verify(*seed_case("alex", "rate_limited"), live=True).reason, "evidence_unavailable")
+        self.assertEqual(self.decide(seed_case("casey"), {"p1": 0.93}, live=True).reason, "accepted")
 
 
-class NotesTests(Stage3TestCase):
-    def test_notes_replace_rationales_only(self):
-        raw, grouped = alex("ambiguous")
-        result = verify(raw, grouped)
-        noted = apply_notes(result, VerificationNotes(rationales={"p2": "A namesake photographer in Portland."}))
-        self.assertEqual(self.verdicts(noted)["p2"].rationale, "A namesake photographer in Portland.")
-        self.assertEqual(self.verdicts(noted)["p1"].rationale, result.verdicts[0].rationale)
-        strip = lambda r: [v.model_dump(exclude={"rationale"}) for v in r.verdicts]
-        self.assertEqual(strip(noted), strip(result))
+class NotesTests(OfflineTestCase):
+    def test_notes_change_only_rationales(self):
+        result = verify(*seed_case(scenario="ambiguous"))
+        noted = apply_notes(result, VerificationNotes(rationales={"p2": "  A namesake photographer in Portland.  "}))
+        self.assertEqual(noted.verdicts[1].rationale, "A namesake photographer in Portland.")
+        expected = result.model_dump()
+        expected["verdicts"][1]["rationale"] = "A namesake photographer in Portland."
+        self.assertEqual(noted.model_dump(), expected)
+        self.assertNotEqual(result.verdicts[1].rationale, noted.verdicts[1].rationale)
 
     def test_bad_notes_are_rejected(self):
-        result = verify(*alex())
+        result = verify(*seed_case())
         for rationales in ({"p9": "Unknown."}, {"p1": "One. Two."}, {"p1": "  "}, {"p1": "x" * 301}):
             with self.subTest(rationales=rationales), self.assertRaises(ValueError):
                 apply_notes(result, VerificationNotes(rationales=rationales))
 
-    def test_code_rationale_describes_the_signals(self):
-        rationale = verify(*alex("ambiguous")).verdicts[1].rationale
-        self.assertIn("Found by 3 of 3 images and the top result for 0", rationale)
-        self.assertIn("compatible name", rationale)
 
-
-class StageRunnerTests(Stage3TestCase):
-    def write_run(self, case, backend="mock"):
-        raw, grouped = case
+class StageRunnerTests(OfflineTestCase):
+    def write_run(self, backend="mock"):
+        raw, profiles = seed_case()
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
         run_dir = Path(root.name) / raw.run_id
         run_dir.mkdir()
-        session = raw.run_id.rsplit("-", 1)[0]
+        for image in raw.images:
+            image.backend = backend
         images = [{"image_id": image.image_id, "angle": image.angle,
                    **({"file": f"{image.image_id}.jpg"} if backend == "serpapi" else {"mock_fixture": "alex-front"})}
                   for image in raw.images]
         capture = CaptureArtifact.model_validate({
             "run_id": raw.run_id, "capture_dir": "captures/x", "backend": backend, "scenario": "default",
             "llm_mode": "off", "jev_mode": "fake",
-            "capture": {"session_id": session, "captured_at": WHEN, "images": images,
+            "capture": {"session_id": raw.run_id.rsplit("-", 1)[0], "captured_at": WHEN, "images": images,
                         "consent": {"confirmed": True, "participant": "Fictional", "confirmed_at": WHEN,
                                     "external_processing": True}},
         })
-        for stage, artifact in ((0, capture), (1, raw), (2, grouped)):
+        for stage, artifact in ((0, capture), (1, raw), (2, profiles)):
             write_artifact(run_dir, stage, artifact)
         return run_dir
 
-    def test_runner_writes_the_verification_artifact(self):
-        run_dir = self.write_run(alex())
-        view = stage3_verify.run(run_dir, fake_settings(), False)
+    def test_runner_writes_a_valid_verification_artifact_and_report(self):
+        run_dir = self.write_run()
+        view = stage3_verify.run(run_dir, settings(), False)
         result = read_artifact(run_dir, 3)
         self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
         self.assertIn("Verification: accepted p1", view)
-        self.assertIn("p1  Alex Morgan   99% fallback  accepted", view)
+        self.assertIn("99% fallback", view)
+        self.assertIn("uncalibrated", view)
 
-    def test_live_policy_follows_the_recorded_backend(self):
-        run_dir = self.write_run(alex(backend="serpapi"), backend="serpapi")
-        result = stage3_verify.run_stage(run_dir, fake_settings())  # replay settings are mock
-        self.assertEqual(result.reason, "review_required")
+    def test_live_policy_uses_recorded_backend_with_mock_replay_settings(self):
+        for mode in ("fake", "off"):
+            with self.subTest(mode=mode):
+                result = stage3_verify.run_stage(self.write_run("serpapi"), settings(mode))
+                self.assertEqual((result.reason, result.accepted_profile_id), ("review_required", None))
 
-    def test_real_jev_calls_are_logged_under_stage_3(self):
-        run_dir = self.write_run(alex())
-        jev = Jev(jev_settings(), run_dir=run_dir, stage=3, responder=lambda s, q: reply({"p1": 0.9}, "p1"))
-        raw, grouped = read_artifact(run_dir, 1), read_artifact(run_dir, 2)
-        verify(raw, grouped, jev=jev)
+    def test_rerun_invalidates_old_outputs_even_if_a_prerequisite_is_missing(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                run_dir = self.write_run()
+                stage3_verify.run(run_dir, settings())
+                final = stage4_summarize.summarize(
+                    read_artifact(run_dir, 1), read_artifact(run_dir, 2), read_artifact(run_dir, 3), settings()).final
+                write_artifact(run_dir, 4, final)
+                if missing:
+                    (run_dir / "02_profiles.json").unlink()
+                    with self.assertRaises(ArtifactError):
+                        stage3_verify.run(run_dir, settings())
+                else:
+                    stage3_verify.run(run_dir, settings())
+                self.assertEqual((run_dir / "03_verification.json").exists(), not missing)
+                self.assertFalse((run_dir / "04_final.json").exists())
+
+    def test_real_jev_calls_log_only_metadata_under_stage3(self):
+        run_dir = self.write_run()
+        jev = real_jev(lambda s, q: reply({"p1": 0.9}, "p1"), run_dir=run_dir, stage=3)
+        result = verify(read_artifact(run_dir, 1), read_artifact(run_dir, 2), jev=jev)
         [line] = (run_dir / "run_log.jsonl").read_text().splitlines()
         event = json.loads(line)
         self.assertEqual((event["stage"], event["status"], event["model"]), (3, "ok", MODEL))
+        self.assertNotIn("Alex", line)
+        self.assertIn("90% jev (fallback 99%)", stage3_verify.report(result))
 
-    def test_missing_prerequisite_is_an_artifact_error(self):
-        run_dir = self.write_run(alex())
+    def test_missing_or_mismatched_prerequisites_are_artifact_errors(self):
+        run_dir = self.write_run()
+        raw = read_artifact(run_dir, 1)
+        raw.images[0].backend = "serpapi"
+        write_artifact(run_dir, 1, raw)
+        with self.assertRaisesRegex(ArtifactError, "backend|run uses"):
+            stage3_verify.run_stage(run_dir, settings())
         (run_dir / "02_profiles.json").unlink()
         with self.assertRaises(ArtifactError):
-            stage3_verify.run_stage(run_dir, fake_settings())
+            stage3_verify.run_stage(run_dir, settings())
 
-    def test_report_for_no_candidates(self):
-        view = stage3_verify.report(verify(*unknown()))
-        self.assertIn("no accepted candidate (no_candidates)", view)
+    def test_verify_rejects_mismatched_run_ids_before_a_call(self):
+        raw, profiles = seed_case()
+        profiles.run_id = "other-0123abcd"
+        with self.assertRaisesRegex(ValueError, "run_id differs"):
+            verify(raw, profiles, jev=NoCallJev())
+
+    def test_no_candidates_report_keeps_the_reason(self):
+        self.assertIn("no accepted candidate (no_candidates)", stage3_verify.report(verify(*seed_case("unknown"))))

@@ -821,7 +821,14 @@ class VerificationResult(BaseModel):
 
 ### 3.4 Done when (mock)
 
-Built 2026-10-10 in `pipeline/stage3_verify.py`. `tests/test_stage3.py` checks these against hand-built 01/02 artifacts that follow the spec 9 matrix, because Sections 1 and 2 weren't built yet. The Section 5 end-to-end test should rerun them on real stage outputs.
+Built 2026-10-10 in `pipeline/stage3_verify.py` and revised after a GPT-6 Astra review. `tests/test_stage3.py` checks these on real Section 2 output built from the seed (`tests/seed_evidence.py`), in fake and off modes. The outage rows inject terminal search errors because the seed helper doesn't model server faults. Choices the spec left open:
+
+- A `best` answer that picks any of the tied top-noul candidates passes the cross-check; the tie then fails as `too_close`.
+- A live run on the formula returns `review_required` before any other check.
+- Dates without a timezone count as UTC for `newest_update`.
+- The profile name may come from a snippet account if another account in the profile has HTML evidence.
+- Jev's question text names candidates only by ID, never by scraped name. The state caps text fields, and a request over 24,000 bytes of JSON falls back without a call.
+- Profile ID `none` is refused, because it is Jev's no-match option.
 
 - [x] **`alex` default:** Kansas City Alex is accepted.
 - [x] **`alex` ambiguous:** under the specified defaults, Kansas City Alex is accepted and Portland Alex is rejected. Weight changes must rerun this regression case; do not promise this for arbitrary weights.
