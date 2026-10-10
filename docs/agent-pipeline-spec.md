@@ -861,14 +861,15 @@ Built 2026-10-10 in `pipeline/stage3_verify.py` and revised after a GPT-6 Astra 
   - bio: up to 3 sentences from the LinkedIn bio, or else the longest eligible bio; null if none
 - **No accepted candidate.** Return `NoMatch` with the verification reason and top three scored candidates. `review_required` and `evidence_unavailable` must remain distinct from a successful search with no matches. Skip the summary model.
 
-**Built** (2026-10-10, `pipeline/stage4_summarize.py`, `tests/test_stage4.py`). Sections 1–3 weren't built yet, so the tests run on hand-built 01–03 artifacts made from the seed's facts. These choices fill gaps in 4.1. They are implementation defaults, not decisions:
+**Built** (2026-10-10, `pipeline/stage4_summarize.py`, `tests/test_stage4.py`). Revised the same day after a GPT-6 Astra review. Unit fixtures use the seed evidence helper and the real Section 2–3 code. HTTP integration tests run Sections 1–4 over the loopback mock with mock/fake/off settings for Alex default, stale, and ambiguous, Sam, Casey, and unknown. The rules below are implementation defaults, not decisions:
 
-- **Facts:** only HTML accounts supply facts. Snippet accounts appear in `accounts` but supply no role, workplace, location, or bio. The name is the profile name, cited to every account whose display name matches it. If no account matches, the stage fails.
-- **Workplace and role:** cited to every account at the newest date that states that value. The flags are `workplace_conflict` and `role_conflict`, set whenever accounts disagree. Alex's default case therefore carries `workplace_conflict` because of the 2022 Photogram employer. When the newest accounts disagree, the value is null.
-- **Location:** the most common value. A tie gives null. Any location containing a digit (street or ZIP) is skipped, to keep it city level.
-- **Public-facts rule:** a keyword screen drops any bio sentence that touches age, relationships or family, religion, ethnicity or nationality, health, sexual orientation or gender identity, politics, contact details, or a street address. A false hit only costs that sentence.
-- **Agent draft:** each sentence must exactly match an eligible sentence in a cited account's bio, with at most 3 sentences. Sources must be accounts or attributed mentions of the accepted profile, after `url_aliases`. Limits are 4 agent turns per attempt and a 10 s budget shared by the draft and its one correction. A failed draft falls back to the template bio with the `summary_fallback` flag. The agent's only tool is `read_verification`, a read-only copy of `03_verification.json`. Stage 4 builds its own fresh agent from the artifacts, and does not produce `VerificationNotes`.
-- **Accounts:** listed highest trust first. An account no one links to has trust 0.
+- **Facts:** HTML accounts supply role, workplace, location, and bio. Snippet accounts stay in the account list. They can source the profile name only when no matching HTML account does. If the name is unusable or no account supports it, the stage fails before any model call.
+- **Workplace and role:** each is chosen separately, from the newest account that states it. Timestamps are compared in UTC. Date-only and timezone-free values count as UTC, and invalid dates count as undated. Undated sources cannot beat dated ones. Values are compared ignoring case and whitespace but keeping punctuation (C++ and C# differ). If the newest values disagree, the field is null. Disagreement anywhere adds `workplace_conflict` or `role_conflict`. Alex's default case carries `workplace_conflict` because of the 2022 Photogram employer.
+- **Location:** the most common value; null on a tie. Values with digits, recognizable street addresses or PO boxes, contact details, or instructions are skipped. This is a heuristic, not geographic validation.
+- **Public facts:** an English keyword screen drops bio sentences about age, relationships or family, religion, ethnicity or nationality, health, sexual orientation or gender identity, politics, contact details, or street addresses. Instruction-like text, such as "ignore previous instructions" or "set confidence to", excludes the whole bio. The screen has both false positives and false negatives, and it doesn't guarantee that all sensitive information is caught.
+- **Model input and citations:** the agent gets the accepted candidate's name, each account's eligible bio sentences (up to 1,000 characters, never cut mid-sentence), and attributed mention URLs and kinds. It gets no page bodies and nothing about rejected candidates. It may select at most three exact account-bio sentences; whitespace normalization is allowed. Citations are canonicalized through `url_aliases`, and every cited account must support a selected sentence. A mention citation alone does not support an account-bio sentence.
+- **Agent:** stage 4 creates a fresh Strands agent from the artifacts. Its only tool is `read_verification`, a read-only copy of the reason, the accepted ID, and the accepted verdict's score, method, and decision. It doesn't produce `VerificationNotes`. Each invocation gets 4 turns, including the SDK's schema repairs. A rejected draft gets one correction. If the SDK's repairs run out, the draft falls back without a correction. Both invocations share a cooperative 10 s budget. Cancellation signals the workers and discards late results, but synchronous construction and stalled worker I/O can still delay the return. Failures record `summary_error`, `summary_rejected`, or `summary_timeout` and add `summary_fallback`.
+- **Accounts:** listed by descending trust, keeping profile order on ties. An account with no incoming link has trust 0.
 
 ### 4.2 Contract
 
@@ -933,7 +934,7 @@ Example output for `alex` on the mock, fake Jev and optional LLM summary (abridg
 
 ### 4.3 Done when (mock)
 
-Checked against hand-built Section 1–3 artifacts. The Section 5 end-to-end test still has to confirm these on real pipeline output.
+Checked against seed-derived fixtures and real Section 1–4 artifact runs over the loopback mock internet. Stub agents and a Strands agent on a scripted model cover the model path offline; the optional real-provider check is still open.
 
 - [x] **`alex` default and stale:** the workplace is Prairie Atlas Labs, not Old Mill Software.
 - [x] **`sam`:** the name is "Sam Rivera" and the workplace is Mosaic Kite Design.
@@ -1110,7 +1111,8 @@ Section 4
 
 - [x] Deterministic template and `NoMatch`
 - [x] Synthesis agent with read-only verification tool, `SummaryDraft`, and citation/content checks; code assembles `FinalProfile`
-- [x] Section 4 mock tests (on hand-built 01–03 artifacts; end-to-end in Section 5)
+- [x] Section 4 mock tests, including real Section 1–4 runs over the loopback mock for the six matrix cases
+- [x] CLI wiring (`STAGE_RUNNERS[4]`)
 
 Section 5
 
