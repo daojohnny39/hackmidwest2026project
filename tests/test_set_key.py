@@ -3,10 +3,14 @@
 The prompt and SerpApi are patched; nothing leaves the machine.
 """
 
+import fnmatch
+import getpass
 import io
+import logging
 import os
 import stat
 import tempfile
+import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -61,6 +65,47 @@ class SetEnvValueTests(EnvFileCase):
         self.assertEqual(stat.S_IMODE(self.env_file.stat().st_mode), 0o600)
         self.assertEqual(sorted(path.name for path in self.folder.iterdir()), [".env"])
 
+    def test_existing_readable_file_becomes_private(self):
+        # POSIX filesystems only; on /mnt/c Windows ACLs apply instead.
+        self.env_file.write_text("JEV_MODE=fake\n")
+        self.env_file.chmod(0o644)
+        set_env_value(self.env_file, "SERPAPI_KEY", KEY)
+        self.assertEqual(stat.S_IMODE(self.env_file.stat().st_mode), 0o600)
+
+    def test_failed_replace_keeps_old_file_and_temp_name_is_gitignored(self):
+        self.env_file.write_text("SERPAPI_KEY=old\n")
+        with patch("pipeline.config.os.replace", side_effect=OSError("disk full")) as replace:
+            with self.assertRaises(OSError):
+                set_env_value(self.env_file, "SERPAPI_KEY", KEY)
+        temp = Path(replace.call_args.args[0])
+        self.assertTrue(fnmatch.fnmatch(temp.name, ".env.*"), temp.name)  # .gitignore ignores `.env.*`
+        self.assertFalse(temp.exists())
+        self.assertEqual(self.env_file.read_text(), "SERPAPI_KEY=old\n")
+
+    def test_dotenv_syntax_beyond_simple_lines(self):
+        cases = (
+            # A quoted key is the same variable; python-dotenv would let it win.
+            ("SERPAPI_KEY=old\n'SERPAPI_KEY'=stale\n", f"SERPAPI_KEY={KEY}\n"),
+            # Lines inside another quoted value are not assignments.
+            ('IMAGE_BUCKET="keep\nSERPAPI_KEY=not-an-assignment\nend"\nSERPAPI_KEY=old\n',
+             f'IMAGE_BUCKET="keep\nSERPAPI_KEY=not-an-assignment\nend"\nSERPAPI_KEY={KEY}\n'),
+            # CRLF files keep CRLF, including appended lines.
+            ("SERPAPI_KEY=old # note\r\nJEV_MODE=fake\r\n", f"SERPAPI_KEY={KEY}\r\nJEV_MODE=fake\r\n"),
+            ("JEV_MODE=fake\r\n", f"JEV_MODE=fake\r\nSERPAPI_KEY={KEY}\r\n"),
+        )
+        for before, after in cases:
+            with self.subTest(before=before):
+                self.env_file.write_bytes(before.encode())
+                set_env_value(self.env_file, "SERPAPI_KEY", KEY)
+                self.assertEqual(self.env_file.read_bytes().decode(), after)
+                self.assertEqual(dotenv_values(self.env_file, interpolate=False)["SERPAPI_KEY"], KEY)
+
+    def test_unparseable_lines_are_kept(self):
+        self.env_file.write_text("not an assignment\nSERPAPI_KEY=old\n")
+        with self.assertLogs("dotenv.main", level="WARNING"):  # python-dotenv names the line number only
+            set_env_value(self.env_file, "SERPAPI_KEY", KEY)
+        self.assertEqual(self.env_file.read_text(), f"not an assignment\nSERPAPI_KEY={KEY}\n")
+
     def test_rejects_unsafe_values_without_echoing_them(self):
         for value in ("", "has space", "quote\"d", "hash#tag", "two\nlines", "a=b"):
             with self.subTest(value=value):
@@ -84,7 +129,7 @@ class SetKeyCommandTests(EnvFileCase):
     def set_key(self, *argv, entered=KEY, quota=QUOTA):
         """Run set-key with a patched prompt and Account API; return (code, out, err, check mock)."""
         prompt = patch.object(cli.getpass, "getpass",
-                              side_effect=entered if isinstance(entered, BaseException) else None,
+                              side_effect=entered if isinstance(entered, BaseException) or callable(entered) else None,
                               return_value=entered)
         check = patch.object(cli, "account_quota",
                              side_effect=quota if isinstance(quota, BaseException) else None,
@@ -146,6 +191,17 @@ class SetKeyCommandTests(EnvFileCase):
                 self.assertIn("Cancelled", err)
                 self.assertFalse(self.env_file.exists())
 
+    def test_refuses_when_input_cannot_be_hidden(self):
+        def visible_fallback(prompt):
+            # What getpass does when it can't turn off echo: warn, then read visibly.
+            warnings.warn("Can not control echo on the terminal.", getpass.GetPassWarning)
+            return KEY
+        code, _, err, checked = self.set_key("serpapi", entered=visible_fallback)
+        self.assertEqual(code, REFUSED)
+        self.assertIn("can't hide", err)
+        checked.assert_not_called()
+        self.assertFalse(self.env_file.exists())
+
     def test_warns_when_an_exported_key_would_win(self):
         os.environ["SERPAPI_KEY"] = "exported-key"
         code, out, _, _ = self.set_key("serpapi")
@@ -191,6 +247,16 @@ class AccountQuotaTests(OfflineTestCase):
                 with self.assertRaises(AccountCheckFailed) as caught:
                     account_quota(KEY)
                 self.assertNotIn(KEY, str(caught.exception))
+
+    def test_request_url_is_not_logged(self):
+        def logging_get(url, params, timeout):
+            # httpx logs every request URL, query string included, at INFO.
+            logging.getLogger("httpx").info("HTTP Request: GET %s?api_key=%s", url, params["api_key"])
+            return httpx.Response(200, json=QUOTA, request=httpx.Request("GET", url))
+        with patch("pipeline.serpapi_account.httpx.get", side_effect=logging_get):
+            with self.assertNoLogs("httpx", level="DEBUG"):
+                self.assertEqual(account_quota(KEY), QUOTA)
+        self.assertFalse(logging.getLogger("httpx").disabled)
 
     def test_describe_quota(self):
         self.assertEqual(describe_quota(QUOTA), "Free Plan, 250 searches left (250 per month), limit 50 per hour")

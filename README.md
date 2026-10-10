@@ -239,8 +239,8 @@ Every run needs a capture folder whose `manifest.json` records the participant's
 consent (spec 0.4). SerpApi search (the default) and `--models` (paid model calls)
 send data to outside services, so both require `consent.external_processing: true`,
 and SerpApi runs need real image files. The mock fixtures under `tests/fixtures/`
-only run with `--mock`. The offline tests always force the mock. `runs/`,
-`captures/`, and `.env` are gitignored.
+require the mock backend (`--mock` or `SEARCH_BACKEND=mock`). The offline tests
+always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
 
 ## OpenCV setup
 

@@ -3,10 +3,13 @@
 The Account API is free and doesn't count toward the monthly quota
 (https://serpapi.com/account-api). Its response echoes the key and the account
 email, so only the quota fields below are kept. The request URL carries the key,
-so errors report the failure type, never the exception text.
+so errors report the failure type, never the exception text, and httpx's request
+log is silenced for the call.
 """
 
 from __future__ import annotations
+
+import logging
 
 import httpx
 
@@ -25,10 +28,15 @@ class AccountCheckFailed(Exception):
 
 def account_quota(api_key: str) -> dict:
     """Return the allowlisted quota fields for this key."""
+    logger = logging.getLogger("httpx")  # logs "HTTP Request: GET <url with api_key>" at INFO
+    was_disabled = logger.disabled
     try:
+        logger.disabled = True
         response = httpx.get(ACCOUNT_URL, params={"api_key": api_key}, timeout=TIMEOUT_S)
     except httpx.HTTPError as exc:
         raise AccountCheckFailed(type(exc).__name__) from None
+    finally:
+        logger.disabled = was_disabled
     if response.status_code in (401, 403):
         raise KeyRejected(f"HTTP {response.status_code}")
     if response.status_code != 200:

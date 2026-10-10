@@ -177,6 +177,10 @@ class ScenarioTests(ConfigTestCase):
     def test_cli_scenario_overrides_env(self):
         self.assertEqual(load({"MOCK_SCENARIO": "stale"}, scenario="ambiguous").mock_scenario, "ambiguous")
 
+    def test_invalid_env_scenario_is_ignored_when_overridden(self):
+        self.assertEqual(load({"MOCK_SCENARIO": "typo"}, scenario="stale").mock_scenario, "stale")
+        self.assertEqual(load({**LIVE, "MOCK_SCENARIO": "typo"}, backend="serpapi").mock_scenario, "default")
+
     def test_unknown_scenarios(self):
         self.assertConfigError("MOCK_SCENARIO", {"MOCK_SCENARIO": "chaos"})
         self.assertConfigError("unknown scenario", scenario="chaos")

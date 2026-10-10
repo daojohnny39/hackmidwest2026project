@@ -9,6 +9,7 @@ message. No model or AWS SDK is imported here.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import tempfile
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import dotenv_values
+from dotenv.parser import parse_stream
 
 from mock_internet.client import MockInternetClient
 
@@ -116,13 +118,18 @@ def load_settings(
             "MOCK_INTERNET_URL must be an HTTP loopback origin with a valid port, e.g. http://127.0.0.1:8765"
         ) from None
 
-    env_scenario = _choice(env, "MOCK_SCENARIO", MOCK_SCENARIOS, "default")
     if scenario is not None:
         if live:
             raise ConfigError("--scenario applies to mock search only; add --mock to use it")
         if scenario not in MOCK_SCENARIOS:
             raise ConfigError(f"unknown scenario {scenario!r}; expected one of {', '.join(MOCK_SCENARIOS)}")
-    mock_scenario = "default" if live else scenario or env_scenario
+    # MOCK_SCENARIO is validated only when it's used, so a CLI scenario or SerpApi search overrides a bad one.
+    if live:
+        mock_scenario = "default"
+    elif scenario is not None:
+        mock_scenario = scenario
+    else:
+        mock_scenario = _choice(env, "MOCK_SCENARIO", MOCK_SCENARIOS, "default")
 
     delay = _delay(env.get("MOCK_DELAY_MS", "0"))
 
@@ -214,11 +221,13 @@ def _delay(raw: str) -> int:
 
 
 def set_env_value(path: Path, name: str, value: str, *, template: Path | None = None) -> None:
-    """Set NAME=value in a .env file, keeping its other lines.
+    """Set NAME=value in a .env file, keeping the rest of the file byte for byte.
 
-    A missing file starts from `template` (normally .env.example). Earlier copies of
-    the variable are replaced in place and later duplicates dropped, since python-dotenv
-    would let a later line win. The file is replaced atomically with mode 0600.
+    A missing file starts from `template` (normally .env.example). python-dotenv's own
+    parser finds the assignments, so quoted keys, multi-line values, comments, and CRLF
+    line endings survive. The first assignment of NAME is replaced and later ones are
+    dropped, since python-dotenv would let a later one win. The result is parsed back
+    before the file is replaced atomically.
     """
     if name not in ENV_VARS:
         raise ValueError(f"{name} is not a pipeline setting")
@@ -226,29 +235,39 @@ def set_env_value(path: Path, name: str, value: str, *, template: Path | None = 
         # Never echo the value: it is usually a secret.
         raise ValueError(f"{name} may contain only letters, digits, '.', '_' and '-'")
 
-    if path.exists():
-        text = path.read_text(encoding="utf-8")
-    elif template is not None and template.exists():
-        text = template.read_text(encoding="utf-8")
-    else:
-        text = ""
-    assignment = re.compile(rf"\s*(export\s+)?{re.escape(name)}\s*=")
-    lines, placed = [], False
-    for line in text.splitlines():
-        if assignment.match(line):
-            if placed:
-                continue
-            line, placed = f"{name}={value}", True
-        lines.append(line)
+    text = ""
+    for source in (path, template):
+        if source is not None and source.exists():
+            with open(source, encoding="utf-8", newline="") as stream:
+                text = stream.read()
+            break
+    newline = "\r\n" if "\r\n" in text else "\n"
+    parts, placed = [], False
+    for binding in parse_stream(io.StringIO(text)):
+        original = binding.original.string
+        if binding.key != name:
+            parts.append(original)
+        elif not placed:
+            ending = original[len(original.rstrip("\r\n")):]  # keep the line's own LF or CRLF
+            parts.append(f"{name}={value}{ending}")
+            placed = True
     if not placed:
-        lines.append(f"{name}={value}")
+        if parts and not parts[-1].endswith("\n"):
+            parts.append(newline)
+        parts.append(f"{name}={value}{newline}")
+    updated = "".join(parts)
+    if dotenv_values(stream=io.StringIO(updated), interpolate=False).get(name) != value:
+        raise ValueError(f"couldn't update {name} in {path.name} safely; edit it by hand")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    # mkstemp creates the file with mode 0600, so the key is never world-readable.
-    handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    # mkstemp asks for mode 0600, which protects the key on Linux filesystems. On a Windows
+    # drive (/mnt/c) Linux modes aren't enforced and the file inherits the folder's Windows
+    # ACLs. The temp name matches .gitignore's `.env.*`, so a crash can't leave an
+    # unignored copy of the key.
+    handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.set-key-", suffix=".tmp")
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(lines) + "\n")
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
+            stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp, path)

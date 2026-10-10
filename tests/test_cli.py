@@ -195,10 +195,21 @@ class CliTests(OfflineTestCase):
         self.assertEqual(code, REFUSED)  # mock fixtures can't be searched on SerpApi
 
     def test_module_entry_point(self):
-        """The exact 0.6 command, as a subprocess with the offline environment."""
+        """The 0.6 command in a subprocess. Patches don't cross processes, so the child starts
+        the offline harness itself: no repo .env, loopback-only sockets."""
+        bootstrap = (
+            "import runpy\n"
+            "from tests.support import OfflineTestCase\n"
+            "case = OfflineTestCase()\n"
+            "case.setUp()\n"
+            "try:\n"
+            "    runpy.run_module('pipeline', run_name='__main__')\n"
+            "finally:\n"
+            "    case.doCleanups()\n"
+        )
         result = subprocess.run(
-            [sys.executable, "-m", "pipeline", "run", "--capture", "tests/fixtures/captures/alex", "--until", "0",
-             "--runs-dir", str(self.runs)],
+            [sys.executable, "-c", bootstrap, "run", "--capture", "tests/fixtures/captures/alex", "--until", "0",
+             "--mock", "--runs-dir", str(self.runs)],
             cwd=REPO_ROOT, env=dict(os.environ), capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, OK, result.stderr)

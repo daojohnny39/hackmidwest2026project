@@ -109,7 +109,7 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 
 `config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `serpapi`, which requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. `IMAGE_BUCKET` is checked by the hosting step rather than at startup, because hosting (1.2) isn't decided. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
 
-`python -m pipeline set-key {serpapi,typesafe,openrouter,anthropic}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`, and the file is replaced atomically with mode 0600. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. `--no-check` skips the check.
+`python -m pipeline set-key {serpapi,typesafe,openrouter,anthropic}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`. python-dotenv's parser locates the assignment, so quoted keys, multi-line values, comments, and CRLF endings survive. The file is replaced atomically, through a temp file named `.env.*`, so a crash can't leave an unignored copy. The command requests mode 0600, which protects the key on filesystems that enforce POSIX permissions. On `/mnt/c` those modes aren't enforced, and `.env` inherits the folder's Windows ACLs, so protect the repo folder there. If the terminal can't hide input, the command refuses before reading anything. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. `--no-check` skips the check.
 
 The Anthropic model ID above is documented. The existing Haiku alternative, `claude-haiku-4-5-20251001`, is also documented; access still needs a smoke check. Never reuse an Anthropic API ID as a Bedrock ID. See [Claude model IDs](https://platform.claude.com/docs/en/models/overview) and [Haiku 4.5](https://platform.claude.com/docs/en/models/haiku-4-5/overview).
 
@@ -208,7 +208,7 @@ Contract snippets omit imports and validators. Use postponed annotations, `BaseM
 
 ### 0.6 Done when
 
-- [x] `python3 -m pipeline run --capture tests/fixtures/captures/alex --until 0` validates the manifest and writes `00_capture.json`.
+- [x] `python3 -m pipeline run --capture tests/fixtures/captures/alex --until 0 --mock` validates the manifest and writes `00_capture.json`.
 - [x] The same command refuses a manifest with `"confirmed": false`, or with no `consent` block.
 - [x] Full artifacts for each stage round-trip through `contracts.py`; snippets marked abridged are illustrative only.
 - [x] Missing external consent, duplicate IDs, escaping paths, and mock fixture IDs in live mode fail before any call. `purge` remains available after consent withdrawal.
@@ -974,7 +974,7 @@ As it runs, `run` prints each of the diagram's views in turn:
 
 `python3 -m unittest discover -s tests -v` is the normal offline suite. Future pipeline tests start their own mock server on a free port, following `tests/test_mock_internet.py`, with mock/fake/off modes forced regardless of `.env`. Patch or reject external connections and model constructors. Tests may inspect synthetic SQLite entity IDs in assertions; the pipeline never receives those IDs.
 
-Keep optional provider smoke checks outside normal discovery and require an explicit SerpApi backend and `--models`, as the CLI does. Unit tests inject 429s, timeouts, malformed SDK answers, failed cleanup, and invalid citations without paid calls. Do not write brittle tests for model wording or exact live probabilities.
+Keep optional provider smoke checks outside normal discovery. `smoke-search` forces SerpApi and requires external-processing consent; only paid-model smoke checks require `--models`. Unit tests inject 429s, timeouts, malformed SDK answers, failed cleanup, and invalid citations without paid calls. Do not write brittle tests for model wording or exact live probabilities.
 
 Review validation, 2026-10-10: the database persistence test passed. The HTTP suite could not start because the review sandbox blocks sockets (`PermissionError`); it was not rerun successfully here. Direct calls to the existing search handler against the seed in memory confirmed the counts below. Those checks do not replace HTTP integration tests or test the unbuilt pipeline.
 
