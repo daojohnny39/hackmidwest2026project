@@ -52,8 +52,9 @@ def build_model(settings: Settings, *, max_tokens: int = DEFAULT_MAX_TOKENS) -> 
             model_id=settings.llm_model,
             region_name=settings.aws_region,
             max_tokens=max_tokens,
+            # botocore's max_attempts counts retries only, like Anthropic's max_retries.
             boto_client_config=Config(read_timeout=CLIENT_TIMEOUT_S, connect_timeout=10,
-                                      retries={"max_attempts": CLIENT_RETRIES + 1, "mode": "standard"}),
+                                      retries={"max_attempts": CLIENT_RETRIES, "mode": "standard"}),
         )
 
     raise ConfigError(f"LLM_MODE={settings.llm_mode!r} is not supported")

@@ -4,7 +4,7 @@ import os
 from unittest.mock import patch
 
 from pipeline.config import ConfigError, load_settings
-from pipeline.llm import build_model
+from pipeline.llm import CLIENT_RETRIES, CLIENT_TIMEOUT_S, build_model
 from tests.support import OfflineTestCase
 
 
@@ -26,6 +26,10 @@ class BuildModelTests(OfflineTestCase):
             model = build_model(settings(LLM_MODE="bedrock", AWS_REGION="us-east-1", LLM_MODEL="bedrock-model-id"))
         self.assertEqual(type(model).__name__, "BedrockModel")
         self.assertEqual(model.get_config()["model_id"], "bedrock-model-id")
+        # Same budget as the Anthropic client: one try plus CLIENT_RETRIES retries.
+        client_config = model.client.meta.config
+        self.assertEqual(client_config.retries["total_max_attempts"], CLIENT_RETRIES + 1)
+        self.assertEqual(client_config.read_timeout, CLIENT_TIMEOUT_S)
 
     def test_refuses_without_a_real_mode(self):
         with self.assertRaisesRegex(ConfigError, "deterministic"):
