@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+agents.md
 data/*.sqlite3*
 
 # Real captures, run artifacts, per-run caches, and traces (spec 0.5). Anchored
