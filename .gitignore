@@ -1,3 +1,11 @@
 .venv/
 __pycache__/
 agents.md
+
+# Downloaded MediaPipe model bundles and incomplete downloads.
+/models/*.task
+/models/*.task.part
+
+# Local checkpoint photos and generated analysis results.
+/photos/
+/checkpoints/

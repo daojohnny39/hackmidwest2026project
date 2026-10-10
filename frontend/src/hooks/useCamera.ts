@@ -49,8 +49,13 @@ export function useCamera(): UseCamera {
 
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return
-    const all = await navigator.mediaDevices.enumerateDevices()
-    setDevices(all.filter((d) => d.kind === 'videoinput'))
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices()
+      setDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId))
+    } catch {
+      // Camera enumeration can be restricted independently of an active stream.
+      // Keep the preview working even when camera switching is unavailable.
+    }
   }, [])
 
   const releaseStream = useCallback(() => {
@@ -71,6 +76,7 @@ export function useCamera(): UseCamera {
       const request = ++requestRef.current
       releaseStream()
       setError(null)
+      setActiveDeviceId(undefined)
 
       if (!navigator.mediaDevices?.getUserMedia) {
         setError(
@@ -96,24 +102,35 @@ export function useCamera(): UseCamera {
         }
 
         streamRef.current = stream
-        if (videoRef.current) videoRef.current.srcObject = stream
+        const video = videoRef.current
+        if (!video) throw new Error('The camera preview is unavailable.')
+        video.srcObject = stream
+        video.muted = true
+        video.playsInline = true
 
         const [track] = stream.getVideoTracks()
         setActiveDeviceId(track?.getSettings().deviceId)
         track?.addEventListener('ended', () => {
           // Fires when the camera is unplugged or revoked, not when we stop it ourselves.
           if (streamRef.current !== stream) return
+          requestRef.current++
           releaseStream()
           setActiveDeviceId(undefined)
           setError('The camera disconnected.')
           setStatus('error')
         })
 
+        // Wait for playback before allowing a capture. Autoplay timing differs
+        // between browsers, especially Safari on mobile devices.
+        await video.play()
+        if (request !== requestRef.current) return
         setStatus('active')
         // Device labels only become visible once permission has been granted.
         await refreshDevices()
       } catch (err) {
         if (request !== requestRef.current) return
+        releaseStream()
+        setActiveDeviceId(undefined)
         setError(describeError(err))
         setStatus('error')
       }
@@ -125,14 +142,19 @@ export function useCamera(): UseCamera {
     (type = 'image/jpeg', quality = 0.92) =>
       new Promise<Blob>((resolve, reject) => {
         const video = videoRef.current
-        if (!video || !streamRef.current || video.videoWidth === 0) {
+        if (!video || !streamRef.current || video.videoWidth === 0 || video.readyState < 2) {
           reject(new Error('Camera is not active.'))
           return
         }
         const canvas = document.createElement('canvas')
         canvas.width = video.videoWidth
         canvas.height = video.videoHeight
-        canvas.getContext('2d')?.drawImage(video, 0, 0)
+        const context = canvas.getContext('2d')
+        if (!context) {
+          reject(new Error('This browser could not capture the camera frame.'))
+          return
+        }
+        context.drawImage(video, 0, 0)
         canvas.toBlob(
           (blob) => (blob ? resolve(blob) : reject(new Error('Could not encode frame.'))),
           type,
@@ -147,12 +169,12 @@ export function useCamera(): UseCamera {
     if (!media?.enumerateDevices) return
     let cancelled = false
     media.enumerateDevices().then((all) => {
-      if (!cancelled) setDevices(all.filter((d) => d.kind === 'videoinput'))
-    })
-    media.addEventListener('devicechange', refreshDevices)
+      if (!cancelled) setDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId))
+    }).catch(() => { /* Device labels may be unavailable until access is granted. */ })
+    media.addEventListener?.('devicechange', refreshDevices)
     return () => {
       cancelled = true
-      media.removeEventListener('devicechange', refreshDevices)
+      media.removeEventListener?.('devicechange', refreshDevices)
     }
   }, [refreshDevices])
 

@@ -54,6 +54,21 @@ h1 {
   font-weight: 600;
 }
 
+.intro {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.error {
+  color: light-dark(#b42318, #fca5a5);
+}
+
+.analysis-status p {
+  margin: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
 .stage {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -126,7 +141,7 @@ button.primary {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -148,11 +163,12 @@ button.primary {
 
 .snapshot-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .snapshot-actions > * {
-  flex: 1;
+  flex: 1 1 40%;
   text-align: center;
   padding: 6px 10px;
   font-size: 14px;
