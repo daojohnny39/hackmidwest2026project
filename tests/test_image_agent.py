@@ -36,8 +36,9 @@ def tool_results(messages):
 class ScriptedModel(Model):
     """Search, fetch every hit, follow depth-0 profiles, then judge every fetched page."""
 
-    def __init__(self, *, exclude=(), bad_triage=False, crash=False, sneak_url=None):
+    def __init__(self, *, exclude=(), bad_triage=False, crash=False, sneak_url=None, skip_search=False):
         self.exclude, self.bad_triage, self.crash, self.sneak_url = set(exclude), bad_triage, crash, sneak_url
+        self.skip_search = skip_search
         self.phase = 0
         self.hit_urls: list[str] = []
         self.fetched: dict[str, dict] = {}
@@ -64,6 +65,8 @@ class ScriptedModel(Model):
             if self.sneak_url and result.get("error", "").startswith("not allowed"):
                 self.sneak_result = result
         self.phase += 1
+        if self.skip_search:
+            return [("ImageTriage", {"judgments": []})]
         if self.phase == 1:
             return [("reverse_image_search", {})]
         if self.phase == 2:
@@ -139,12 +142,12 @@ class ImageAgentTests(MockServerTestCase):
         self.assertNotIn("img-1", {via.image_id for via in bundle.pages[other_image_hit].found_via})
 
     def test_failures_fall_back_without_repeating_the_search(self):
-        models = [ScriptedModel(), ScriptedModel(bad_triage=True), ScriptedModel(crash=True)]
+        models = [ScriptedModel(skip_search=True), ScriptedModel(bad_triage=True), ScriptedModel(crash=True)]
         bundle, _ = self.collect(models)
         methods = {image.image_id: image.collection_method for image in bundle.images}
-        self.assertEqual(methods, {"img-1": "agent", "img-2": "fallback", "img-3": "fallback"})
-        self.assertEqual(bundle.images[1].search_extras["fallback_reason"], "invalid_output")
-        self.assertEqual(bundle.images[2].search_extras["fallback_reason"], "agent_error")
+        self.assertEqual(methods, {"img-1": "fallback", "img-2": "fallback", "img-3": "fallback"})
+        reasons = [image.search_extras["fallback_reason"] for image in bundle.images]
+        self.assertEqual(reasons, ["no_search", "invalid_output", "agent_error"])
         # Deterministic triage over stored results still gives the full default evidence.
         self.assertEqual(self.mock_count("/api/reverse-image"), 3)
         self.assertEqual(len(bundle.pages), 9)

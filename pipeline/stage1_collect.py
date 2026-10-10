@@ -141,6 +141,10 @@ class NotAllowed(Exception):
     """The URL is neither this image's search hit nor a permitted depth-1 account link."""
 
 
+class _AgentSkippedSearch(Exception):
+    reason = "no_search"  # the agent returned a triage without ever running its search
+
+
 class ImageCollector:
     """Search and fetch state for one image. The agent's tools and the deterministic path both use it."""
 
@@ -285,6 +289,8 @@ async def collect_image(collector: ImageCollector, *, agent: AgentRunner | None,
         if agent is not None:
             try:
                 triage = await asyncio.wait_for(agent(collector), timeout=max(remaining(), 0))
+                if collector.outcome is None:
+                    raise _AgentSkippedSearch()
             except Exception as failure:  # timeouts, model errors, invalid structured output
                 collector.method = "fallback"
                 collector.fallback_reason = getattr(failure, "reason", None) or (
