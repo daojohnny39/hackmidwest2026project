@@ -769,7 +769,7 @@ With the proposed extraction and graph rules, the formula gives these values (ro
 
 `top_hit_share` is the signal that separates the two Alexes. The ambiguous scenario returns the photographer's pages for all three angles, so `image_support` alone scores them almost the same.
 
-**Decision rule (Proposal; evaluate in this order):**
+**Decision rule (evaluate in this order).** Johnny decided the 0.80/0.20 thresholds and the live review policy on 2026-10-10 (`../brain/decisions.md`); the rest of the rule is Proposal.
 
 - If there are no candidates, use `no_candidates` when collection completed without errors but found no candidate accounts. Use `evidence_unavailable` if collection failed or yielded no usable accounts after access errors. Do not call Jev or the synthesis model for an empty candidate list.
 - Validate the complete Jev response or fall back for the whole verification stage. Do not mix partial Jev scores with fallback scores in one ranking.
@@ -777,7 +777,7 @@ With the proposed extraction and graph rules, the formula gives these values (ro
 - Require a nonempty sourced name, direct image support, and at least one HTML account. Otherwise return `insufficient_evidence`. Snippets alone cannot establish a match.
 - Accept the top candidate only if confidence is ≥ 0.80 and the lead over the runner-up is ≥ 0.20. With one candidate, use runner-up 0. Use unrounded values; the lead comparison allows only 1e-9 of float noise, so 0.85 vs 0.65 counts as 0.20. Otherwise use `below_threshold` or `too_close`. Accept at most one.
 - Keep the Jev number but flag `jev_fallback_disagree` when the absolute difference exceeds 0.4. Carry graph/grouping flags. Add `partial_search_failure` when some image searches failed, `sparse_footprint` for fewer than three accounts, and `verification_fallback` when a real Jev call failed or returned an incomplete or invalid response.
-- **Proposal:** a live run using fallback verification returns `review_required`, with no automatic match. The mock retains its accepted examples to test the flow. This prevents the synthetic rule weights from appearing to verify a real person during an outage. Johnny must confirm the live acceptance policy and thresholds.
+- **Decided (Johnny, 2026-10-10):** a live run using fallback verification returns `review_required`, with no automatic match. The mock retains its accepted examples to test the flow. This prevents the synthetic rule weights from appearing to verify a real person during an outage.
 
 ### 3.3 Contract
 
@@ -1059,7 +1059,7 @@ Every default in this table is a **Proposal**, not a recorded team decision.
 | Which agent runs verification and summary | One synthesis agent after the per-image agents | Johnny |
 | Image hosting for Yandex | Private S3 bucket, 10-minute presigned URL, delete in `finally`; verify Yandex can fetch it | Johnny |
 | Trust formula | Table: 0 → 0, 1 → 50, 2 → 95, 3+ → 99 | Johnny |
-| Trust → confidence and live acceptance | Jev `noul` plus `best` cross-check; mock formula in 3.2; live fallback returns `review_required`. Validate thresholds on consented cases. | Johnny |
+| Trust → confidence and live acceptance | **Decided 2026-10-10:** accept at ≥ 0.80 with a ≥ 0.20 lead, and live fallback returns `review_required`. Still proposals: the Jev `noul` plus `best` mechanism and the uncalibrated formula weights in 3.2. | Johnny |
 | Strands model | Start with Anthropic `claude-sonnet-5-5`; Haiku `claude-haiku-4-5-20251001` is a documented alternative. Use Bedrock only with confirmed model access and its own ID. One provider first. | Johnny |
 | Consent and retention | External-processing consent; per-run cache; delete after demo/withdrawal; capture owner clears originals and other runs | Johnny and capture teammates |
 | Summary wording | Select sourced bio sentences for the MVP; defer free-form prose until factual support can be checked | Johnny |
