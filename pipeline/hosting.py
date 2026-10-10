@@ -95,15 +95,27 @@ def delete_object(record: UploadRecord, *, client) -> None:
 
 
 def remote_deleter(region: str | None):
-    """A purge callback that deletes one UploadRecord, or None when no region is configured."""
+    """A purge callback that deletes one UploadRecord, or None when no region is configured.
+    The S3 client is created on first use, so a run with nothing uploaded never loads boto3."""
     if not region:
         return None
-    client = s3_client(region)
-    return lambda record: delete_object(record, client=client)
+    clients = []
+
+    def delete(record: UploadRecord) -> None:
+        if not clients:
+            clients.append(s3_client(region))
+        delete_object(record, client=clients[0])
+
+    return delete
 
 
-def host_for(settings, run_dir: Path) -> S3ImageHost:
+def require_hosting(settings) -> None:
+    """Fail before any upload when image hosting isn't configured."""
     if not settings.image_bucket or not settings.aws_region:
         raise ConfigError("SerpApi search hosts each image briefly in S3 so Yandex can fetch it; "
                           "set IMAGE_BUCKET and AWS_REGION (and AWS credentials) in .env, or pass --mock")
+
+
+def host_for(settings, run_dir: Path) -> S3ImageHost:
+    require_hosting(settings)
     return S3ImageHost(bucket=settings.image_bucket, region=settings.aws_region, run_dir=run_dir)

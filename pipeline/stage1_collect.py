@@ -514,6 +514,11 @@ def run_stage1(run_dir: Path, settings: Settings, *, refresh: bool = False, back
     return bundle
 
 
+def run(run_dir: Path, settings: Settings, refresh: bool) -> str:
+    """CLI stage runner (STAGE_RUNNERS[1]): collect, write 01_raw_evidence.json, return the hits view."""
+    return format_hits(run_stage1(run_dir, settings, refresh=refresh))
+
+
 def format_hits(bundle: RawEvidenceBundle) -> str:
     """The diagram's first view: hits per image, then the pages kept."""
     lines = ["Hits per image:"]

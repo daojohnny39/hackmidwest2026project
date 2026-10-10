@@ -1,4 +1,4 @@
-"""End-to-end CLI checks for Section 0 (spec 0.6), run against temp folders."""
+"""End-to-end CLI checks (spec 0.6, 5.1), run against temp folders and a per-class mock internet."""
 
 import io
 import json
@@ -12,17 +12,22 @@ from pathlib import Path
 
 from PIL import Image
 
-from pipeline.__main__ import BAD_CONFIG, NOT_BUILT, OK, REFUSED, main
-from pipeline.artifacts import read_artifact
-from tests.support import FIXTURE_CAPTURES, REPO_ROOT, OfflineTestCase
+from unittest.mock import patch
+
+from pipeline.__main__ import BAD_CONFIG, NOT_BUILT, OK, REFUSED, STAGE_RUNNERS, main
+from pipeline.artifacts import UPLOADS_FILE, read_artifact, write_uploads
+from pipeline.contracts import UploadRecord, UploadsManifest
+from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase
 
 ALEX = FIXTURE_CAPTURES / "alex"
 SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
+HOSTING_ENV = {"IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
 
 
-class CliTests(OfflineTestCase):
+class CliTests(MockServerTestCase):
     def setUp(self):
         super().setUp()
+        os.environ["MOCK_INTERNET_URL"] = self.mock_url  # stage 1 searches this class's mock server
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.tmp = Path(folder.name)
@@ -70,11 +75,40 @@ class CliTests(OfflineTestCase):
         self.assertEqual(log[0]["stage"], 0)
 
     def test_full_run_stops_after_built_stages(self):
-        code, _, err = self.cli("run", "--capture", str(ALEX))
-        self.assertEqual(code, NOT_BUILT)
-        self.assertIn("Stage 1", err)
+        code, out, err = self.cli("run", "--capture", str(ALEX))
+        missing = next((number for number in range(1, 5) if number not in STAGE_RUNNERS), None)
+        self.assertEqual(code, OK if missing is None else NOT_BUILT)
+        if missing is not None:
+            self.assertIn(f"Stage {missing}", err)
         [run_dir] = self.run_dirs()
         self.assertTrue((run_dir / "00_capture.json").exists())
+        self.assertTrue((run_dir / "01_raw_evidence.json").exists())
+        self.assertIn("Stage 1 done.", out)
+
+    def test_until_1_collects_evidence_and_prints_hits(self):
+        code, out, _ = self.cli("run", "--capture", str(ALEX), "--until", "1")
+        self.assertEqual(code, OK)
+        [run_dir] = self.run_dirs()
+        bundle = read_artifact(run_dir, 1)
+        self.assertEqual((bundle.num_images, len(bundle.pages)), (3, 9))
+        self.assertIn("img-1 (front): 4 hits", out)
+        self.assertFalse((run_dir / "02_profiles.json").exists())
+
+    def test_stage_1_rerun_invalidates_later_outputs(self):
+        self.assertEqual(self.cli("run", "--capture", str(ALEX), "--until", "2")[0], OK)
+        [run_dir] = self.run_dirs()
+        self.assertTrue((run_dir / "02_profiles.json").exists())
+        code, out, _ = self.cli("stage", "1", "--run", str(run_dir))
+        self.assertEqual(code, OK)
+        self.assertTrue((run_dir / "01_raw_evidence.json").exists())
+        self.assertFalse((run_dir / "02_profiles.json").exists())
+
+    def test_serpapi_run_needs_hosting_before_creating_a_run(self):
+        os.environ.update(SERPAPI_ENV)
+        code, _, err = self.cli("run", "--capture", str(self.real_image_capture()), "--until", "1")
+        self.assertEqual(code, BAD_CONFIG)
+        self.assertIn("IMAGE_BUCKET", err)
+        self.assertEqual(self.run_dirs(), [])
 
     def test_scenario_is_recorded(self):
         code, _, _ = self.cli("run", "--capture", str(ALEX), "--until", "0", "--scenario", "ambiguous")
@@ -164,7 +198,7 @@ class CliTests(OfflineTestCase):
         capture = self.capture_copy()
         self.assertEqual(self.cli("run", "--capture", str(capture), "--until", "0")[0], OK)
         [run_dir] = self.run_dirs()
-        self.assertEqual(self.cli("stage", "1", "--run", str(run_dir))[0], NOT_BUILT)
+        self.assertEqual(self.cli("stage", "1", "--run", str(run_dir))[0], OK)
 
         manifest = json.loads((capture / "manifest.json").read_text())
         manifest["consent"]["confirmed"] = False
@@ -191,8 +225,52 @@ class CliTests(OfflineTestCase):
         self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; the key is missing
         self.assertIn("SERPAPI_KEY", err)
         os.environ.update(SERPAPI_KEY="test-serpapi-key")
+        code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
+        self.assertEqual(code, BAD_CONFIG)  # image hosting isn't configured
+        self.assertIn("IMAGE_BUCKET", err)
+        os.environ.update(HOSTING_ENV)
         code, _, _ = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
         self.assertEqual(code, REFUSED)  # mock fixtures can't be searched on SerpApi
+
+    def test_smoke_search_runs_one_image_without_models(self):
+        from tests.test_stage1 import FakeBackend, page_html, yandex
+
+        os.environ.update({**SERPAPI_ENV, **HOSTING_ENV})
+        capture = self.real_image_capture()
+        url = "https://example.com/pat"
+        backend = FakeBackend({"img-1": yandex(url)}, {url: page_html(title="Pat")})
+        with patch("pipeline.stage1_collect.make_backend", return_value=backend) as make_backend:
+            code, out, _ = self.cli("smoke-search", "--capture", str(capture), "--image-id", "img-1")
+        self.assertEqual(code, OK)
+        self.assertEqual(make_backend.call_args.kwargs, {"refresh": False})
+        [run_dir] = self.run_dirs()
+        artifact, bundle = read_artifact(run_dir, 0), read_artifact(run_dir, 1)
+        self.assertEqual(([image.image_id for image in artifact.capture.images], artifact.llm_mode), (["img-1"], "off"))
+        self.assertEqual((bundle.num_images, bundle.images[0].collection_method), (1, "deterministic"))
+        self.assertEqual(backend.released, ["img-1"])
+        self.assertIn("purge --run", out)
+
+    def test_purge_deletes_uploaded_images(self):
+        self.assertEqual(self.cli("run", "--capture", str(ALEX), "--until", "0")[0], OK)
+        [run_dir] = self.run_dirs()
+        record = UploadRecord(bucket="test-bucket", key="hackmidwest-faces/abc.jpg")
+        write_uploads(run_dir, UploadsManifest(run_id=run_dir.name, objects=[record]))
+        deleted = []
+        os.environ.update(AWS_REGION="us-east-1")
+        with patch("pipeline.__main__.remote_deleter", return_value=deleted.append) as deleter:
+            code, _, _ = self.cli("purge", "--run", str(run_dir))
+        self.assertEqual(code, OK)
+        self.assertEqual(deleter.call_args.args, ("us-east-1",))
+        self.assertEqual([item.key for item in deleted], [record.key])
+        self.assertFalse(run_dir.exists())
+
+    def test_purge_keeps_the_cleanup_record_without_a_region(self):
+        self.assertEqual(self.cli("run", "--capture", str(ALEX), "--until", "0")[0], OK)
+        [run_dir] = self.run_dirs()
+        write_uploads(run_dir, UploadsManifest(run_id=run_dir.name, objects=[UploadRecord(bucket="b", key="k.jpg")]))
+        code, _, _ = self.cli("purge", "--run", str(run_dir))
+        self.assertEqual(code, REFUSED)
+        self.assertEqual([path.name for path in run_dir.iterdir()], [UPLOADS_FILE])
 
     def test_module_entry_point(self):
         """The 0.6 command in a subprocess. Patches don't cross processes, so the child starts

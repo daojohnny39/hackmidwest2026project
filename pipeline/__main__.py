@@ -11,6 +11,7 @@ Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import getpass
 import os
 import sys
@@ -25,8 +26,9 @@ from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_c
 from pipeline.config import REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings, set_env_value
 from pipeline.contracts import CaptureArtifact
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected, check_typesafe_key
+from pipeline.hosting import remote_deleter, require_hosting
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
-from pipeline import stage2_profiles
+from pipeline import stage1_collect, stage2_profiles
 
 STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3: "verification", 4: "summary"}
 
@@ -35,6 +37,7 @@ STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3:
 # raise ArtifactError, CaptureError or ConfigError. Each section adds its entry here.
 StageRunner = Callable[[Path, Settings, bool], str]
 STAGE_RUNNERS: dict[int, StageRunner] = {}
+STAGE_RUNNERS[1] = stage1_collect.run
 STAGE_RUNNERS[2] = stage2_profiles.run
 DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
@@ -86,6 +89,8 @@ def settings_for(args: argparse.Namespace, *, backend: str | None = None, scenar
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         settings = settings_for(args, backend="mock" if args.mock else None, scenario=args.scenario)
+        if settings.live and args.until >= 1:
+            require_hosting(settings)  # before the run folder exists, let alone an upload
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
@@ -158,8 +163,11 @@ def cmd_stage(args: argparse.Namespace) -> int:
 
 
 def cmd_smoke_search(args: argparse.Namespace) -> int:
+    """One live reverse search on one image (spec 1.1): a stage-0 bundle with only that image,
+    then deterministic stage 1. Never calls a model, so it costs one SerpApi search."""
     try:
-        settings_for(args, backend="serpapi")
+        settings = settings_for(args, backend="serpapi")
+        require_hosting(settings)
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
@@ -168,15 +176,37 @@ def cmd_smoke_search(args: argparse.Namespace) -> int:
         return fail(f"Refused (consent): {exc}", REFUSED)
     except CaptureError as exc:
         return fail(f"Refused (capture): {exc}", REFUSED)
-    if args.image_id not in {image.image_id for image in loaded.bundle.images}:
+    image = next((image for image in loaded.bundle.images if image.image_id == args.image_id), None)
+    if image is None:
         return fail(f"Refused (capture): no image {args.image_id!r} in this capture.", REFUSED)
-    return not_built(1)
+
+    settings = dataclasses.replace(settings, llm_mode="off", llm_model=None)
+    bundle = loaded.bundle.model_copy(update={"images": [image]})
+    try:
+        run_id, run_dir = create_run(args.runs_dir, bundle.session_id)
+    except ArtifactError as exc:
+        return fail(f"Refused (run): {exc}", REFUSED)
+    write_artifact(run_dir, 0, CaptureArtifact(
+        run_id=run_id, capture=bundle, capture_dir=str(loaded.capture_dir), backend="serpapi", scenario="default",
+        llm_mode="off", jev_mode=settings.jev_mode, jev_model=settings.jev_model))
+    log_event(run_dir, stage=0, backend="serpapi", status="ok", code="smoke_search")
+    print(f"Smoke search {run_id}: {image.image_id} ({image.angle}) from {loaded.capture_dir}")
+    code = run_stages(run_dir, settings, range(1, 2), refresh=args.refresh)
+    if code == OK:
+        print("Ask the participant which hits, if any, are really theirs; record that in the brain notes.")
+        print(f"Delete this run's data when done: python3 -m pipeline purge --run {run_dir}")
+    return code
 
 
 def cmd_purge(args: argparse.Namespace) -> int:
     try:
+        # Purge needs no consent or search key; AWS_REGION only matters if images were uploaded.
+        region = load_settings(backend="mock", models=True).aws_region
+    except ConfigError:
+        region = None
+    try:
         report = purge_run(args.runs_dir, args.run, include_capture=args.include_capture,
-                           captures_dir=args.captures_dir)
+                           captures_dir=args.captures_dir, delete_remote=remote_deleter(region))
     except ArtifactError as exc:
         return fail(f"Refused (run): {exc}", REFUSED)
     for message in report.messages:
