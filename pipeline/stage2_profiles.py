@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pipeline.artifacts import invalidate_from, read_artifact, write_artifact
+from pipeline.artifacts import ArtifactError, invalidate_from, read_artifact, write_artifact
 from pipeline.config import TRUST_TABLE, Settings
 from pipeline.contracts import (
     Account,
@@ -706,13 +706,19 @@ def run_stage2(
     """
     capture = read_artifact(run_dir, 0)
     raw = read_artifact(run_dir, 1)
-    validate_references(capture=capture, raw=raw)
+    try:
+        validate_references(capture=capture, raw=raw)
+    except ValueError as exc:
+        raise ArtifactError(f"01_raw_evidence.json doesn't match this run's 00_capture.json: {exc}") from None
     if jev is None and settings.jev_mode != "off":
         jev = Jev(settings, run_dir=run_dir, stage=2)
     if llm_extract is None and settings.llm_mode != "off" and settings.models:
         llm_extract = strands_extractor(settings)
     bundle = build_profiles(raw, jev=jev, trust_for=settings.trust_for, llm_extract=llm_extract)
-    validate_references(raw=raw, profiles=bundle)
+    try:
+        validate_references(raw=raw, profiles=bundle)
+    except ValueError as exc:
+        raise ArtifactError(f"refusing to write 02_profiles.json: {exc}") from None
     invalidate_from(run_dir, 2)
     write_artifact(run_dir, 2, bundle)
     return bundle
@@ -765,6 +771,11 @@ def format_graphs(bundle: ProfilesBundle) -> list[str]:
         if graph.flags:
             lines.append(f"  flags: {', '.join(graph.flags)}")
     return lines
+
+
+def run(run_dir: Path, settings: Settings, refresh: bool = False) -> str:
+    """The CLI's STAGE_RUNNERS[2] entry: run the stage and return its console view."""
+    return report(run_stage2(run_dir, settings))
 
 
 def report(bundle: ProfilesBundle) -> str:

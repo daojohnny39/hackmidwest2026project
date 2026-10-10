@@ -5,10 +5,13 @@ mock seed the way Section 1's deterministic collector does. Real-Jev behavior ru
 through an injected responder, so no test reaches a provider.
 """
 
+import io
 import json
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from pipeline.__main__ import OK, REFUSED, main
 from pipeline.artifacts import create_run, read_artifact, write_artifact
 from pipeline.capture import load_capture
 from pipeline.config import load_settings
@@ -511,6 +514,36 @@ class StageRunTests(OfflineTestCase):
             bundle = run_stage2(run_dir, settings("off"))
             self.assertFalse((run_dir / "run_log.jsonl").exists())
         self.assertEqual((len(bundle.profiles), bundle.jev_calls), (1, []))
+
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli_stage_2_replays_saved_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            self.assertEqual(self.cli("run", "--capture", str(FIXTURE_CAPTURES / "sam"), "--mock", "--until", "0",
+                                      "--runs-dir", str(runs))[0], OK)
+            [run_dir] = list(runs.iterdir())
+            code, _, err = self.cli("stage", "2", "--run", str(run_dir), "--runs-dir", str(runs))
+            self.assertEqual(code, REFUSED)
+            self.assertIn("01_raw_evidence.json", err)
+
+            write_artifact(run_dir, 1, collect("sam", run_id=run_dir.name))
+            code, out, _ = self.cli("stage", "2", "--run", str(run_dir), "--runs-dir", str(runs))
+            self.assertEqual(code, OK)
+            self.assertIn("profile p1: Sam Rivera { LinkedIn: Sam Rivera, X: Sammy Rivera", out)
+            self.assertIn("Stage 2 done.", out)
+            self.assertEqual(len(read_artifact(run_dir, 2).profiles), 1)
+
+            # Evidence from another capture doesn't match this run's images.
+            write_artifact(run_dir, 1, collect("alex", run_id=run_dir.name))
+            code, _, err = self.cli("stage", "2", "--run", str(run_dir), "--runs-dir", str(runs))
+            self.assertEqual(code, REFUSED)
+            self.assertIn("doesn't match", err)
+            self.assertFalse((run_dir / "02_profiles.json").exists())
 
     def test_report_shows_the_three_views(self):
         text = report(profiles_for("alex", "ambiguous"))

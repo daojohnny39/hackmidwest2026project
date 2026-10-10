@@ -14,6 +14,7 @@ import argparse
 import getpass
 import os
 import sys
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_c
 from pipeline.config import REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings, set_env_value
 from pipeline.contracts import CaptureArtifact
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
+from pipeline import stage2_profiles
 
 STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3: "verification", 4: "summary"}
 
@@ -32,6 +34,7 @@ STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3:
 # raise ArtifactError, CaptureError or ConfigError. Each section adds its entry here.
 StageRunner = Callable[[Path, Settings, bool], str]
 STAGE_RUNNERS: dict[int, StageRunner] = {}
+STAGE_RUNNERS[2] = stage2_profiles.run
 DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
@@ -184,7 +187,13 @@ def cmd_purge(args: argparse.Namespace) -> int:
 def cmd_set_key(args: argparse.Namespace) -> int:
     name, service = SECRET_ENV[args.service], SERVICE_NAMES[args.service]
     try:
-        value = getpass.getpass(f"Paste your {service} API key (input is hidden), then press Enter: ").strip()
+        # getpass falls back to visible input with only a warning; refuse instead, before anything is read.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            value = getpass.getpass(f"Paste your {service} API key (input is hidden), then press Enter: ").strip()
+    except getpass.GetPassWarning:
+        return fail("This terminal can't hide what you type, so set-key won't read the key here. "
+                    "Run it from an interactive terminal; nothing was saved.", REFUSED)
     except (EOFError, KeyboardInterrupt):
         print()
         return fail("Cancelled; nothing was saved.", REFUSED)
