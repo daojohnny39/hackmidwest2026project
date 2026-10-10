@@ -14,16 +14,24 @@ import argparse
 import getpass
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
-from pipeline.artifacts import ArtifactError, create_run, log_event, purge_run, read_artifact, resolve_run_dir, write_artifact
+from pipeline.artifacts import (
+    ArtifactError, create_run, invalidate_from, log_event, purge_run, read_artifact, resolve_run_dir, write_artifact,
+)
 from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_consent
 from pipeline.config import REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings, set_env_value
 from pipeline.contracts import CaptureArtifact
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 
-LAST_BUILT_STAGE = 0
 STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3: "verification", 4: "summary"}
+
+# Stage number -> runner(run_dir, settings, refresh) -> console view text. A runner
+# reads its prerequisites from the run folder and writes its own artifact; it may
+# raise ArtifactError, CaptureError or ConfigError. Each section adds its entry here.
+StageRunner = Callable[[Path, Settings, bool], str]
+STAGE_RUNNERS: dict[int, StageRunner] = {}
 DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
@@ -40,6 +48,26 @@ def fail(message: str, code: int) -> int:
 
 def not_built(stage: int) -> int:
     return fail(f"Stage {stage} ({STAGE_NAMES[stage]}) is not built yet.", NOT_BUILT)
+
+
+def run_stages(run_dir: Path, settings: Settings, stages: range, *, refresh: bool) -> int:
+    """Run each stage in order, printing its view; stop at the first one not built or failing."""
+    for number in stages:
+        runner = STAGE_RUNNERS.get(number)
+        if runner is None:
+            return not_built(number)
+        try:
+            view = runner(run_dir, settings, refresh)
+        except ConfigError as exc:
+            return fail(f"Configuration error (stage {number}): {exc}", BAD_CONFIG)
+        except ConsentError as exc:
+            return fail(f"Refused (consent, stage {number}): {exc}", REFUSED)
+        except (ArtifactError, CaptureError) as exc:
+            return fail(f"Refused (stage {number}): {exc}", REFUSED)
+        if view:
+            print(view)
+        print(f"Stage {number} done.")
+    return OK
 
 
 def settings_for(args: argparse.Namespace, *, backend: str | None = None, scenario: str | None = None) -> Settings:
@@ -91,10 +119,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         source = image.mock_fixture if image.mock_fixture else image.file
         print(f"  {image.image_id}: {image.angle} ({source})")
     print("Stage 0 done: wrote 00_capture.json")
-
-    if args.until > LAST_BUILT_STAGE:
-        return not_built(LAST_BUILT_STAGE + 1)
-    return OK
+    return run_stages(run_dir, settings, range(1, args.until + 1), refresh=args.refresh)
 
 
 def cmd_stage(args: argparse.Namespace) -> int:
@@ -110,7 +135,20 @@ def cmd_stage(args: argparse.Namespace) -> int:
         return fail(f"Refused (consent): {exc}", REFUSED)
     except CaptureError as exc:
         return fail(f"Refused (capture): {exc}", REFUSED)
-    return not_built(args.number)
+    if args.number not in STAGE_RUNNERS:
+        return not_built(args.number)
+    try:
+        # Stage 1 keeps the run's search backend and mock scenario. Stages 2-4 only read saved
+        # evidence, so they load search settings as mock and need no SerpApi key; they read the
+        # run's backend from 00_capture.json. Model modes come from .env behind --models.
+        if args.number == 1 and artifact.backend == "serpapi":
+            settings = settings_for(args, backend="serpapi")
+        else:
+            settings = settings_for(args, backend="mock", scenario=artifact.scenario if artifact.backend == "mock" else None)
+    except ConfigError as exc:
+        return fail(f"Configuration error: {exc}", BAD_CONFIG)
+    invalidate_from(run_dir, args.number)
+    return run_stages(run_dir, settings, range(args.number, args.number + 1), refresh=args.refresh)
 
 
 def cmd_smoke_search(args: argparse.Namespace) -> int:
