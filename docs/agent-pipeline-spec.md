@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 3 (verification), and Section 4 (summarization) are built; Sections 1, 2, and 5 are not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Sections 1 and 5 are not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -693,16 +693,18 @@ class ProfilesBundle(BaseModel):
 
 ### 2e. Done when (mock)
 
-- [ ] **Diagram parity** (unit test with hand-built accounts): if LinkedIn links to Facebook and GitHub, and Instagram links to Facebook and Twitter, the result is Facebook 2/95, GitHub 1/50, Twitter 1/50.
-- [ ] **`alex`, default:** 5 accounts, with the display names printed in 2a, and one profile "Alex Morgan" containing all 5. LinkedIn, X, GitHub, and Blog each have 2 connections (trust 95); Instagram has 0. `mean_link_trust` = 76.
-- [ ] **`alex`, ambiguous:** two profiles named Alex Morgan, one Kansas City and one Portland.
+- [x] **Diagram parity** (unit test with hand-built accounts): if LinkedIn links to Facebook and GitHub, and Instagram links to Facebook and Twitter, the result is Facebook 2/95, GitHub 1/50, Twitter 1/50.
+- [x] **`alex`, default:** 5 accounts, with the display names printed in 2a, and one profile "Alex Morgan" containing all 5. LinkedIn, X, GitHub, and Blog each have 2 connections (trust 95); Instagram has 0. `mean_link_trust` = 76.
+- [x] **`alex`, ambiguous:** two profiles named Alex Morgan, one Kansas City and one Portland.
   - Kansas City is `alexbuilds`, with 5 accounts.
   - Portland is `alexframes`: LinkUp, Chatter, and FieldNotes, plus CodeForge at depth 1.
   - No pair across the two profiles is merged.
-- [ ] **`sam`:** one profile containing both "Sam Rivera" (LinkUp, CodeForge, FieldNotes) and "Sammy Rivera" (Chatter, Photogram). This is the alias case.
-- [ ] **`casey`:** one profile with 2 accounts, each with 1 connection (trust 50).
-- [ ] **Counts:** Alex and Sam have density 0.4. Portland Alex has four accounts with incoming counts LinkUp 2, Chatter 1, CodeForge 2, FieldNotes 1; mean trust 72.5 and density 0.5. Casey's names are "Casey Brooks" and "C. Brooks"; density 1.0. Duplicate HTML/`sameAs` links do not double these counts.
-- [ ] **Interview link:** the Riverbend interview links to Sam's LinkUp page, but Sam doesn't appear in Alex's run, because articles aren't followed.
+- [x] **`sam`:** one profile containing both "Sam Rivera" (LinkUp, CodeForge, FieldNotes) and "Sammy Rivera" (Chatter, Photogram). This is the alias case.
+- [x] **`casey`:** one profile with 2 accounts, each with 1 connection (trust 50).
+- [x] **Counts:** Alex and Sam have density 0.4. Portland Alex has four accounts with incoming counts LinkUp 2, Chatter 1, CodeForge 2, FieldNotes 1; mean trust 72.5 and density 0.5. Casey's names are "Casey Brooks" and "C. Brooks"; density 1.0. Duplicate HTML/`sameAs` links do not double these counts.
+- [x] **Interview link:** the Riverbend interview links to Sam's LinkUp page, but Sam doesn't appear in Alex's run, because articles aren't followed.
+Checked 2026-10-10 in `tests/test_stage2.py` against `tests/seed_evidence.py`, which builds `01_raw_evidence.json` bundles from the mock seed the way the deterministic collector (1.3) does. Rerun these targets through the real Section 1 collector once it lands.
+
 - [ ] **Optional real-Jev check** (`--models`, selected real `JEV_MODE`): record pair answers for the two-Alex and alias cases. Confirm plausible grouping and schema handling; do not assert deterministic provider probabilities. Validate thresholds separately on consenting teammates, including no-match cases.
 
 ## 6. Section 3: Verification and confidence
@@ -926,7 +928,7 @@ Checked against hand-built Section 1–3 artifacts. The Section 5 end-to-end tes
 
 ### 5.1 CLI
 
-Today `run` works through stage 0 (it exits with code 3 when asked for a stage that isn't built), `stage` re-checks consent and stops, `smoke-search` validates config and capture and stops, and `purge` and `set-key` work. The rest are commands to implement.
+Today `run` works through stage 0 (it exits with code 3 when asked for a stage that isn't built), `stage 2 --run` rebuilds profiles from a run's saved `01_raw_evidence.json`, other `stage` numbers re-check consent and stop if not built, `smoke-search` validates config and capture and stops, and `purge` and `set-key` work. The rest are commands to implement.
 
 ```bash
 # Save the SerpApi key once (hidden prompt; checked with the free Account API)
@@ -1070,11 +1072,12 @@ Section 1
 
 Section 2
 
-- [ ] Account and mention extraction
-- [ ] `jev.py`: fake/off first, then the route matching Johnny's key; validate typed answers and record `JevCall`
-- [ ] Grouping: supported mutual links, bounded Jev pair questions, component conflict guard
-- [ ] Graph and trust table; diagram parity test
-- [ ] Section 2 mock tests; separately record real Jev answers and validate live thresholds
+- [x] Account and mention extraction
+- [x] `jev.py`: fake/off first, then the route matching Johnny's key; validate typed answers and record `JevCall` (both routes built and tested offline; no real Jev call yet)
+- [x] Grouping: supported mutual links, bounded Jev pair questions, component conflict guard
+- [x] Graph and trust table; diagram parity test
+- [x] Section 2 mock tests
+- [ ] Record real Jev answers and validate live thresholds
 
 Section 3
 
