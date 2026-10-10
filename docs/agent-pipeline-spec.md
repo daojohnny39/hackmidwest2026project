@@ -716,7 +716,7 @@ class ProfilesBundle(BaseModel):
 - [x] **Interview link:** the Riverbend interview links to Sam's LinkUp page, but Sam doesn't appear in Alex's run, because articles aren't followed.
 Checked 2026-10-10 in `tests/test_stage2.py` against `tests/seed_evidence.py`, which builds `01_raw_evidence.json` bundles from the mock seed the way the deterministic collector (1.3) does. Rerun these targets through the real Section 1 collector once it lands.
 
-- [ ] **Optional real-Jev check** (`--models`, selected real `JEV_MODE`): record pair answers for the two-Alex and alias cases. Confirm plausible grouping and schema handling; do not assert deterministic provider probabilities. Validate thresholds separately on consenting teammates, including no-match cases.
+- [x] **Optional real-Jev check** (`--models`, selected real `JEV_MODE`): record pair answers for the two-Alex and alias cases. Confirm plausible grouping and schema handling; do not assert deterministic provider probabilities. Validate thresholds separately on consenting teammates, including no-match cases. Recorded 2026-10-10 on the mock with TypeSafe `jev-1.13.0` (four calls, about 1.1 s each, 1.6–2.9K input tokens): groupings matched the fallback rules for `alex` default and ambiguous, `sam`, and `casey` (Casey needed no call). Pairs within one person scored 0.75–0.95, so every asked pair cleared 0.70. Jev scored 0.90 for two pairs that the rules reject but that join anyway through a mutual link ("Alex Morgan Photo" with the same handle), and 0.75–0.81 for Kansas City accounts beside the stale 2022 Photogram page. The 20 Kansas City × Portland pairs, which the conflict guard never asks, scored 0.07–0.18 when probed directly, so Jev also separates the namesakes. Thresholds on consenting teammates remain open.
 
 ## 6. Section 3: Verification and confidence
 
@@ -1096,7 +1096,8 @@ Section 2
 - [x] Grouping: supported mutual links, bounded Jev pair questions, component conflict guard
 - [x] Graph and trust table; diagram parity test
 - [x] Section 2 mock tests
-- [ ] Record real Jev answers and validate live thresholds
+- [x] Record real Jev answers on the mock cases (2e)
+- [ ] Validate live grouping thresholds on consenting teammates
 
 Section 3
 
