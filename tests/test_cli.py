@@ -14,10 +14,12 @@ from PIL import Image
 
 from unittest.mock import patch
 
-from pipeline.__main__ import BAD_CONFIG, NOT_BUILT, OK, REFUSED, STAGE_RUNNERS, main
+from pipeline.__main__ import BAD_CONFIG, NOT_BUILT, OK, REFUSED, STAGE_NAMES, STAGE_RUNNERS, main
 from pipeline.artifacts import UPLOADS_FILE, read_artifact, write_uploads
+from pipeline.config import ConfigError
 from pipeline.contracts import UploadRecord, UploadsManifest
-from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase
+from pipeline.trace import TRACE_FILE
+from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase, read_trace
 
 ALEX = FIXTURE_CAPTURES / "alex"
 SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
@@ -73,6 +75,41 @@ class CliTests(MockServerTestCase):
         self.assertIn("Stage 0 done", out)
         log = [json.loads(line) for line in (run_dir / "run_log.jsonl").read_text().splitlines()]
         self.assertEqual(log[0]["stage"], 0)
+
+    def test_run_writes_a_trace_for_every_stage(self):
+        code, out, _ = self.cli("run", "--capture", str(ALEX))
+        self.assertEqual(code, OK)
+        [run_dir] = self.run_dirs()
+        self.assertIn(f"trace: {run_dir / TRACE_FILE}", out)
+        lines = read_trace(run_dir)
+        stages = [(line["stage"], line["event"]) for line in lines if line["event"] in ("stage_start", "stage_end")]
+        self.assertEqual(stages, [(number, event) for number in range(5) for event in ("stage_start", "stage_end")])
+        starts = [line for line in lines if line["event"] == "stage_start"]
+        self.assertEqual([line["name"] for line in starts], [STAGE_NAMES[number] for number in range(5)])
+        self.assertEqual(starts[0]["command"], "run")
+        self.assertEqual(starts[1]["settings"]["search_backend"], "mock")
+        self.assertTrue(all(line["outcome"] == "ok" for line in lines if line["event"] == "stage_end"))
+        self.assertEqual(sorted(line["image"] for line in lines if line["event"] == "search"), ["img-1", "img-2", "img-3"])
+        self.assertTrue(any(line["event"] == "page_fetch" and line["url"].startswith("https://") for line in lines))
+
+    def test_trace_records_the_error_that_stopped_a_stage(self):
+        self.assertEqual(self.cli("run", "--capture", str(ALEX), "--until", "1")[0], OK)
+        [run_dir] = self.run_dirs()
+
+        def broken(run_dir, settings, refresh):
+            try:
+                {}["jev"]
+            except KeyError:
+                raise ConfigError("Jev is misconfigured") from None
+
+        with patch.dict(STAGE_RUNNERS, {2: broken}):
+            code, _, err = self.cli("stage", "2", "--run", str(run_dir))
+        self.assertEqual(code, BAD_CONFIG)
+        self.assertIn("Jev is misconfigured", err)
+        [end] = [line for line in read_trace(run_dir) if line["event"] == "stage_end" and line["stage"] == 2]
+        self.assertEqual((end["level"], end["outcome"]), ("error", "error"))
+        self.assertEqual([(item["type"], item["message"]) for item in end["error"]["chain"]],
+                         [("pipeline.config.ConfigError", "Jev is misconfigured"), ("KeyError", "'jev'")])
 
     def test_full_run_stops_after_built_stages(self):
         code, out, err = self.cli("run", "--capture", str(ALEX))

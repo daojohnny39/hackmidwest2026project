@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
+from pipeline import trace
 from pipeline.artifacts import ArtifactError, invalidate_from, log_event, read_artifact, write_artifact
 from pipeline.config import Settings
 from pipeline.contracts import (
@@ -399,8 +400,10 @@ AgentFactory = Callable[[str, list[Callable]], Any]
 def strands_agent(system_prompt: str, tools: list[Callable], model: Any) -> Any:
     from strands import Agent, tool
 
-    return Agent(model=model, tools=[tool(function) for function in tools], system_prompt=system_prompt,
-                 callback_handler=None, retry_strategy=None)
+    agent = Agent(model=model, tools=[tool(function) for function in tools], system_prompt=system_prompt,
+                  callback_handler=None, retry_strategy=None, name="summary-writer")
+    trace.watch_agent(agent)
+    return agent
 
 
 def strands_agent_factory(settings: Settings) -> AgentFactory:
@@ -436,7 +439,8 @@ async def agent_bio(accepted: Accepted, factory: AgentFactory, *,
 
         agent = factory(SYSTEM_PROMPT, [read_verification_tool(accepted.verification)])
         prompt = json.dumps(summary_input(accepted), ensure_ascii=False)
-    except Exception:
+    except Exception as exc:
+        trace.error("summary_agent_failed", exc, code="summary_error")
         return None, "summary_error"
     cancel_signal = threading.Event()
 
@@ -463,9 +467,11 @@ async def agent_bio(accepted: Accepted, factory: AgentFactory, *,
         except asyncio.CancelledError:
             cancel_work()
             raise
-        except StructuredOutputException:
+        except StructuredOutputException as exc:
+            trace.error("summary_agent_failed", exc, code="summary_rejected")
             return None, "summary_rejected"  # Strands already attempted schema repair within the turn cap
-        except Exception:  # provider, transport, or SDK failure: no retry
+        except Exception as exc:  # provider, transport, or SDK failure: no retry
+            trace.error("summary_agent_failed", exc, code="summary_error")
             return None, "summary_error"
         # wait_for can return a late result if the provider suppresses task cancellation.
         if time.monotonic() >= deadline:
@@ -483,6 +489,7 @@ async def agent_bio(accepted: Accepted, factory: AgentFactory, *,
             bio, problems = check_draft(draft, accepted)
             if not problems:
                 return bio, None
+        trace.event("summary_draft_rejected", attempt=attempt + 1, problems=problems)
         if attempt == 0:
             prompt = ("Your SummaryDraft was rejected:\n- " + "\n- ".join(problems) +
                       "\nReturn a corrected SummaryDraft, or set bio to null.")
@@ -556,6 +563,7 @@ def summarize(raw: RawEvidenceBundle, profiles: ProfilesBundle, verification: Ve
             bio, bio_method = drafted, "agent"
         else:
             flags.append(SUMMARY_FALLBACK)
+            trace.error("summary_fallback", code=fallback, detail="used the template bio")
 
     final = FinalProfile(
         run_id=verification.run_id,

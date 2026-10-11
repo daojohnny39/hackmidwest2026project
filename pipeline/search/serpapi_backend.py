@@ -30,6 +30,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 import httpcore
 import httpx
 
+from pipeline import trace
 from pipeline.config import ConfigError, Settings
 from pipeline.contracts import CaptureArtifact, CaptureImage, FetchedPage, UploadRecord
 from pipeline.platforms import normalize_url
@@ -195,9 +196,12 @@ class SerpApiBackend:
         if cache is not None and not self.refresh and cache.is_file():
             try:
                 self.cache_hits.add(image.image_id)
-                return json.loads(cache.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                payload = json.loads(cache.read_text(encoding="utf-8"))
+                trace.event("search_cache_hit", image=image.image_id)
+                return payload
+            except (OSError, ValueError) as exc:
                 self.cache_hits.discard(image.image_id)
+                trace.error("search_cache_unreadable", exc, image=image.image_id)
         url = await self._hosted_url(image, data)
         params = {"engine": ENGINE, "url": url, "tab": TAB, "api_key": self.api_key}
         try:
@@ -207,6 +211,8 @@ class SerpApiBackend:
         except httpx.HTTPError:  # never show the exception: its text can include the request URL and key
             raise BackendError("connection_error") from None
         if response.status_code != 200:
+            trace.error("serpapi_http_error", image=image.image_id, status=response.status_code,
+                        body=response.text[:2000])
             raise status_error(response.status_code, response.headers)
         try:
             payload = response.json()
@@ -238,16 +244,17 @@ class SerpApiBackend:
             return
         try:
             await asyncio.to_thread(self.host.delete, hosted[1])
-        except Exception:
-            pass  # uploads.json still lists it as not deleted; `purge` retries the deletion
+        except Exception as exc:
+            # uploads.json still lists it as not deleted; `purge` retries the deletion
+            trace.error("image_release_failed", exc, image=image.image_id)
 
     async def aclose(self) -> None:
         for image_id in list(self._hosted):
             hosted = self._hosted.pop(image_id)
             try:
                 await asyncio.to_thread(self.host.delete, hosted[1])
-            except Exception:
-                pass
+            except Exception as exc:
+                trace.error("image_release_failed", exc, image=image_id)
         close = getattr(self.host, "close", None)
         if close is not None:
             await asyncio.to_thread(close)

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
 from unittest.mock import patch
 
 from pipeline import artifacts
@@ -282,6 +283,13 @@ class LogTests(ArtifactTestCase):
         self.assertEqual(event["usage"]["input_tokens"], 120)
         self.assertEqual(event["usage"]["output_tokens"], 4)
         self.assertIn("https://bucket.s3.amazonaws.com/k?", event["code"])
+
+    def test_scrub_is_linear_on_long_runs(self):
+        # The trace scrubs page text and prompts; a long hex or base64 run once took ~1 s per 5,000 characters.
+        started = time.monotonic()
+        text = artifacts.scrub({"note": "ab" * 25_000 + " api_key=SERPKEY123"})["note"]
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertTrue(text.endswith(" api_key=[REDACTED]"))
 
 
 class UploadsTests(ArtifactTestCase):

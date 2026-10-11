@@ -19,7 +19,8 @@ from pipeline.hosting import (
     HostingError, S3ImageHost, TunnelImageHost, delete_object, host_for, image_type, require_hosting, search_copy,
 )
 from pipeline.search.serpapi_backend import build_serpapi_backend
-from tests.support import OfflineTestCase
+from pipeline.trace import TRACE_FILE, tracing
+from tests.support import OfflineTestCase, read_trace
 
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 32
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
@@ -205,6 +206,20 @@ class TunnelHostingTests(OfflineTestCase):
         self.assertEqual(str(caught.exception), "tunnel_unreachable")
         self.assertLess(time.monotonic() - started, 10)
         self.assertIsNone(host._process)  # stopped
+
+    def test_trace_keeps_ssh_output_of_a_failed_tunnel_without_its_url(self):
+        traces = self.folder / "traces"
+        traces.mkdir()
+        with tracing(traces, 1):
+            # One at a time: each fake ssh rewrites the same script.
+            for mode, options in (("fail", {}), ("ok", {"probe": lambda url, timeout: None, "probe_timeout": 0.2})):
+                with self.assertRaises(HostingError):
+                    self.host(mode, **options).upload(photo())
+        refused, unreachable = [line for line in read_trace(traces) if line["event"] == "tunnel_failed"]
+        self.assertIn("nokey@localhost.run: Permission denied (publickey).", refused["ssh_output"])
+        self.assertIn("[REDACTED].lhr.life tunneled with tls termination, https://[REDACTED].lhr.life",
+                      unreachable["ssh_output"])
+        self.assertNotIn(TUNNEL.removeprefix("https://"), (traces / TRACE_FILE).read_text())
 
     def test_search_copy_is_small_upright_jpeg_without_metadata(self):
         # Orientation 6 means "rotate 90° clockwise to view", so 1600x1200 is shown as 1200x1600.

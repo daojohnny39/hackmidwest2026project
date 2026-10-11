@@ -41,7 +41,7 @@ Each section reads the artifacts named in its **In** line and writes its **Out**
 - **Code holds the data; models make judgments.** Tools store evidence and provenance. The LLM may extract supported fields, triage URLs, and write a sourced bio. Code sets IDs, graph values, confidence, and acceptance. Treat page text as untrusted data, never as tool instructions.
 - **Every model step has a fallback.** Tests run without an LLM or Jev. Runtime failures use the rules and template below and record the fallback. A mock demonstration is not proof of live retrieval or identity accuracy.
 - **Keep data out of git.** Add `runs/` and `captures/` to `.gitignore` before collecting real data; they are not ignored today. Existing rules cover `.env`, bytecode, and `data/*.sqlite3*`. Keep real photos, pages, prompts, responses, caches, and traces under those ignored roots. Commit only synthetic fixtures and blank key placeholders.
-- **Limit retention.** Delete hosted images in `finally`, including failed searches. Purge run data and caches after the demo or consent withdrawal. Selected evidence leaves the machine when models are enabled. Deleting our copies cannot promise deletion from provider logs or caches; explain that during consent. Disable prompt/content tracing and redact keys and signed URLs from logs.
+- **Limit retention.** Delete hosted images in `finally`, including failed searches. Purge run data and caches after the demo or consent withdrawal. Selected evidence leaves the machine when models are enabled. Deleting our copies cannot promise deletion from provider logs or caches; explain that during consent. Keep prompt/content tracing local: `trace.jsonl` lives in the run folder and is never exported (no telemetry exporter). Redact keys and signed URLs from logs and traces.
 - **Public, professional facts only.** The final profile contains name, role, workplace, city-level location, a short bio, and account links. Nothing is inferred about age, ethnicity, religion, health, relationships, or home address.
 
 ## 3. Section 0: Foundation
@@ -60,6 +60,7 @@ Project Directory/
     contracts.py              Pydantic models for every artifact in this spec
     capture.py                load and validate a capture bundle; consent gate
     artifacts.py              read/write runs/<run_id>/NN_*.json and run_log.jsonl
+    trace.py                  per-run debug trace: runs/<run_id>/trace.jsonl
     serpapi_account.py        SerpApi Account API: free key check and quota for `set-key`
     aws_credentials.py        `set-key aws`: free STS key check, save to ~/.aws/credentials
     platforms.py              domain → platform, account-URL patterns, URL normalization
@@ -201,6 +202,7 @@ Each run gets a folder `runs/<run_id>/` containing:
 - `03_verification.json`
 - `04_final.json`
 - `run_log.jsonl`: stage, backend, endpoint path without query, status, latency, retry count, and fallback/error code. Jev also records returned model and usage. No raw prompts, evidence, authorization headers, or signed URLs.
+- `trace.jsonl` (`trace.py`): the debug record, appended by every stage the CLI runs. It holds each stage's start and end (settings, duration, outcome, and the exception if the stage raised one), every search and page fetch with its URL, and each Strands agent's prompts, messages (text, reasoning, tool calls and results, structured output), model and tool calls, and usage. It also holds Jev requests, answers, and HTTP error bodies, and every error a stage turned into a fallback or a code, with its exception chain. That chain includes causes hidden by `raise ... from None`. Library log records at INFO and above are kept too. The trace holds evidence, so it stays in the run folder and `purge` deletes it. Every value goes through the `run_log.jsonl` scrubber, which redacts keys, tokens, signatures, URL query strings, and tunnel URLs.
 - `cache/serpapi/`: sanitized successful responses for this run only, keyed by image hash plus engine and tab. Redact submitted image URLs and embedded signed URLs. `--refresh` bypasses this local cache; it does not force a new provider search.
 - `uploads.json` (`UploadsManifest`): bucket, random object key, optional version ID, and deletion status. Record each key before upload so crash cleanup can retry. Never store presigned URLs here.
 
@@ -230,7 +232,7 @@ Contract snippets omit imports and validators. Use postponed annotations, `BaseM
 - **Provenance.** Each page keeps one `FoundVia` per image: its best route, a hit before a followed link and then the lowest rank. A depth-1 page's parent is the best-ranked depth-0 profile that links to it.
 - **Snippet records.** A failed direct hit keeps a snippet record only when the hit has a title or snippet. Otherwise only the `FetchError` remains.
 - **Agent triage.** Pages the agent fetched but didn't judge count as retained, because fetching them was its choice. `relevant=false` excludes a page, and the exclusion is noted as `img-N excluded: <note>`. An agent that returns without searching falls back (`no_search`).
-- **Bookkeeping.** `search_extras` carries only `status`, `total_results`, `skipped_hits` (unusable result links), `budget_skipped`, `fallback_reason`, and `collection_error`. `run_log.jsonl` names endpoint paths only: `/api/reverse-image` and `/fetch` for the mock, and `/search.json` and `page-fetch` for live runs. Live page URLs are evidence, so they are never logged.
+- **Bookkeeping.** `search_extras` carries only `status`, `total_results`, `skipped_hits` (unusable result links), `budget_skipped`, `fallback_reason`, and `collection_error`. `run_log.jsonl` names endpoint paths only: `/api/reverse-image` and `/fetch` for the mock, and `/search.json` and `page-fetch` for live runs. Live page URLs are evidence, so `run_log.jsonl` never names them; only `trace.jsonl`, which holds evidence like the artifacts, does.
 - **Live fetch.** HTML over 1 MB is truncated, not rejected. LinkedIn's non-standard 999 status counts as `forbidden`. Final URLs on login paths (`/login`, `/authwall`, `/accounts/login`, `/checkpoint`, ...) are `login_wall`. The SerpApi search gets 20 s instead of the 10 s in 1.7, because Yandex searches can take several seconds and a timed-out search may still use a credit. Page fetches keep 10 s.
 
 ### 1.1 Search backends: mock for tests, SerpApi for real runs
@@ -596,7 +598,7 @@ Normalize case and punctuation. First names must match, be an initial, or use an
 
 In `fake` mode, `jev.py` returns rule results as synthetic 0.95/0.05 answers to exercise typed parsing. Label them `method="rule"` and `provider="fake"`; they are not measured model probabilities. `off` uses the rules directly. Fallback failures leave pairs unmerged unless rules support them.
 
-Keep every grouping request's normalized answers in `ProfilesBundle.jev_calls`; keep verification calls in `VerificationResult.jev_calls`. Store metadata only in `run_log.jsonl`.
+Keep every grouping request's normalized answers in `ProfilesBundle.jev_calls`; keep verification calls in `VerificationResult.jev_calls`. Store metadata only in `run_log.jsonl`; `trace.jsonl` keeps each request and its answers for debugging.
 
 ### 2c. Connection graph and trust
 

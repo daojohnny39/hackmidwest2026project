@@ -9,7 +9,8 @@ ImageTriage; code builds the evidence from the page store plus those judgments.
 
 Structured output gets one correction: a second invalid ImageTriage cancels the
 agent, and the caller falls back to deterministic triage over the stored results.
-Strands is imported lazily, so offline runs never load it.
+Strands is imported lazily, so offline runs never load it. trace.watch_agent records
+each agent's whole conversation in the run's trace.jsonl.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from pipeline import trace
 from pipeline.contracts import ImageTriage
 from pipeline.platforms import account_handle, normalize_url, platform_for
 from pipeline.stage1_collect import AgentRunner, ImageCollector, NotAllowed, Request
@@ -157,6 +159,7 @@ async def run_image_agent(collector: ImageCollector, model: Model) -> ImageTriag
     agent = Agent(model=model, tools=build_tools(collector), system_prompt=SYSTEM_PROMPT, callback_handler=None,
                   name=f"collector-{collector.image_id}")
     agent.add_hook(bound_corrections, AfterToolCallEvent)
+    trace.watch_agent(agent)
     prompt = (f"Collect the public pages for image {collector.image_id} (facial angle: {collector.image.angle}). "
               f"You may fetch at most {collector.budget} pages.")
     try:

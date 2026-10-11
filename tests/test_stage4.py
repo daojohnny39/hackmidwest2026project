@@ -32,8 +32,9 @@ from pipeline import stage3_verify, stage4_summarize as stage4
 from pipeline.jev import Jev
 from pipeline.stage1_collect import run_stage1
 from pipeline.stage2_profiles import build_graphs, build_profiles, run_stage2
+from pipeline.trace import tracing
 from tests.seed_evidence import collect
-from tests.support import FIXTURE_CAPTURES, MockServerTestCase, OfflineTestCase
+from tests.support import FIXTURE_CAPTURES, MockServerTestCase, OfflineTestCase, read_trace
 
 NOW = datetime(2026, 10, 10, 14, 5, tzinfo=timezone.utc)
 SEARCHED = "2026-10-10T14:03:00Z"
@@ -606,6 +607,23 @@ class AgentTests(Stage4TestCase):
         bad = draft(tail, LINKUP)
         outcome = self.run_agent(StubAgent(bad, bad), artifacts)
         self.assertEqual(outcome.fallback, "summary_rejected")
+
+    def test_trace_records_why_the_agent_bio_was_not_used(self):
+        tail = "I mentor map makers."
+        artifacts = alex_case(edit=lambda facts: facts[LINKUP].update(bio="Long " * 250 + ". " + tail))
+        bad = draft(tail, LINKUP)
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with tracing(folder, 4):
+            self.run_agent(StubAgent(bad, bad), artifacts)
+            self.run_agent(StubAgent(RuntimeError("provider down")))
+        lines = [line for line in read_trace(folder) if line["level"] == "warning" or "summary" in line["event"]]
+        self.assertEqual([(line["event"], line.get("attempt") or line.get("code")) for line in lines], [
+            ("summary_draft_rejected", 1), ("summary_draft_rejected", 2), ("summary_fallback", "summary_rejected"),
+            ("summary_agent_failed", "summary_error"), ("summary_fallback", "summary_error"),
+        ])
+        self.assertTrue(lines[0]["problems"])
+        self.assertEqual(lines[3]["error"]["chain"][0], {**lines[3]["error"]["chain"][0], "type": "RuntimeError",
+                                                         "message": "provider down"})
 
     def test_agent_may_omit_the_bio(self):
         outcome = self.run_agent(StubAgent(SummaryDraft()))

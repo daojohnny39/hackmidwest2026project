@@ -34,10 +34,12 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from pipeline import trace
 from pipeline.artifacts import read_uploads, write_uploads
 from pipeline.config import ConfigError
 from pipeline.contracts import UploadRecord, UploadsManifest
@@ -51,6 +53,7 @@ TUNNEL_PROBE_SECONDS = 25.0
 TUNNEL_SERVER = "nokey@localhost.run"
 TUNNEL_URL = re.compile(r"https://[a-z0-9-]+\.lhr\.life")
 TUNNEL_LABEL = "localhost-run-tunnel"  # UploadRecord.bucket for tunnel-hosted images; never written to uploads.json
+TUNNEL_TRACE_LINES = 20
 # A 270 KB photo took 10-13 s through the tunnel and Yandex gave up on it; an 800 px copy is about 60 KB.
 SEARCH_IMAGE_MAX_SIDE = 800
 SEARCH_IMAGE_QUALITY = 85
@@ -233,11 +236,13 @@ class TunnelImageHost:
 
         # localhost.run prints a banner, then "<name>.lhr.life tunneled with tls termination, https://<name>.lhr.life".
         found: dict[str, str] = {}
+        output: deque[str] = deque(maxlen=TUNNEL_TRACE_LINES)  # ssh's last lines, traced if the tunnel fails
         ready = threading.Event()
 
         def read_log(stream) -> None:
             try:
                 for line in stream:  # keep draining so ssh never blocks on a full pipe
+                    output.append(line.rstrip())
                     match = TUNNEL_URL.search(line)
                     if match and "url" not in found:
                         found["url"] = match.group(0)
@@ -249,6 +254,8 @@ class TunnelImageHost:
         self._reader = threading.Thread(target=read_log, args=(self._process.stdout,), name="tunnel-log", daemon=True)
         self._reader.start()
         if not ready.wait(self.start_timeout) or "url" not in found or self._process.poll() is not None:
+            trace.error("tunnel_failed", reason="localhost.run gave no tunnel URL", ssh_exit=self._process.poll(),
+                        ssh_output=list(output))
             raise HostingError("tunnel_error")
 
         # The tunnel's DNS name can take a few seconds to resolve; check a throwaway file end to end.
@@ -259,11 +266,14 @@ class TunnelImageHost:
             deadline = time.monotonic() + self.probe_timeout
             while self.probe(found["url"] + token, 5.0) != body:
                 if time.monotonic() >= deadline or self._process.poll() is not None:
+                    trace.error("tunnel_failed", reason="a test file didn't come back through the tunnel",
+                                ssh_exit=self._process.poll(), ssh_output=list(output))
                     raise HostingError("tunnel_unreachable")
                 time.sleep(1.0)
         finally:
             with self._files_lock:
                 self._files.pop(token, None)
+        trace.event("tunnel_open")
         return found["url"]
 
 

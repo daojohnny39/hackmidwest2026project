@@ -304,6 +304,33 @@ person. Without them, stage 1 fetches every hit in rank order and follows accoun
 links from the profiles it finds. If an agent fails, its image falls back to that
 deterministic path.
 
+### Debugging a run
+
+Every stage appends to `runs/<run_id>/trace.jsonl`, one JSON object per line. It
+records:
+
+- each stage's start, end, settings, and duration
+- every search and page fetch, with its URL and timing
+- each Strands agent's prompts, reasoning, tool calls and results, structured output,
+  and token usage
+- every Jev request and answer
+- every error the pipeline handled or fell back from, with the exception that caused
+  it and the file and line where it was raised
+
+Log lines from Strands, httpx, and the model SDKs are kept too. Keys, tokens, and
+hosted image URLs are redacted. The trace holds evidence (page text, names,
+prompts), so it stays in the gitignored run folder and `purge` deletes it.
+`run_log.jsonl` is the metadata-only summary.
+
+```bash
+# Errors and fallbacks, with their root causes
+jq -c 'select(.level != "info") | {stage, event, agent, image, url, reason, code, cause: .error.chain[-1]}
+       | with_entries(select(.value != null))' runs/<run_id>/trace.jsonl
+
+# One image agent's whole conversation
+jq -c 'select(.agent == "collector-img-1")' runs/<run_id>/trace.jsonl
+```
+
 ## OpenCV setup
 
 Run from the project root using Python 3.13:

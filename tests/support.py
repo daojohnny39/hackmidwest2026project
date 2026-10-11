@@ -7,6 +7,7 @@ socket connection fail.
 """
 
 import ipaddress
+import json
 import os
 import socket
 import tempfile
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 from mock_internet.server import create_server
 from pipeline.config import load_settings
+from pipeline.trace import TRACE_FILE
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_CAPTURES = REPO_ROOT / "tests" / "fixtures" / "captures"
@@ -35,6 +37,11 @@ OFFLINE_ENV = {"SEARCH_BACKEND": "mock", "JEV_MODE": "fake", "LLM_MODE": "off",
 
 class ExternalNetworkBlocked(RuntimeError):
     pass
+
+
+def read_trace(folder: Path) -> list[dict]:
+    """The parsed lines of folder/trace.jsonl."""
+    return [json.loads(line) for line in (Path(folder) / TRACE_FILE).read_text().splitlines()]
 
 
 def _is_loopback(address):

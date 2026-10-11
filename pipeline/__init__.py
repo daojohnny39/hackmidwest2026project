@@ -4,3 +4,8 @@ The build spec is docs/agent-pipeline-spec.md. Search defaults to SerpApi (key f
 `python -m pipeline set-key serpapi`); `--mock` uses the local mock internet instead.
 Jev and the LLM default to fake/off, and `--models` is required for real model calls.
 """
+
+import logging
+
+# trace.py logs under "pipeline"; outside trace.tracing() its records go nowhere, not to stderr.
+logging.getLogger("pipeline").addHandler(logging.NullHandler())

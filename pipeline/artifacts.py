@@ -1,5 +1,7 @@
 """Run folders: runs/<run_id>/NN_*.json artifacts, run_log.jsonl, uploads.json, and purge.
 
+trace.py writes the run's debug trace (trace.jsonl) through scrub() below.
+
 Every artifact is validated through contracts.ARTIFACT_ADAPTERS on both write and
 read, so a stage never consumes another run's or a malformed output. Writes are
 atomic. Logs are sanitized defensively even though callers never pass prompts,
@@ -38,11 +40,15 @@ _SECRET_PATTERNS = [
      rf"\1{REDACTED}"),
     (re.compile(r"""(?i)\b(bearer\s+)[^\s"',;}]+"""), rf"\1{REDACTED}"),
     # name=value or "name": "value" where the name ends in a secret-like word
-    # (api_key, key, access_token, X-Amz-Signature, X-Amz-Credential, X-Amz-Security-Token, Signature, ...)
-    (re.compile(r"""(?i)([\w-]*(?:key|keyid|token|secret|password|passwd|signature|credential|sig)["']?\s*[=:]\s*["']?)"""
-                r"""[^\s"'&#,;}]+"""), rf"\1{REDACTED}"),
+    # (api_key, key, access_token, X-Amz-Signature, X-Amz-Credential, X-Amz-Security-Token, Signature, ...).
+    # The lookbehind starts names only where a run of name characters starts, which matches the same
+    # text but keeps long runs (hex IDs, base64) linear instead of quadratic.
+    (re.compile(r"""(?i)(?<![\w-])([\w-]*(?:key|keyid|token|secret|password|passwd|signature|credential|sig)"""
+                r"""["']?\s*[=:]\s*["']?)[^\s"'&#,;}]+"""), rf"\1{REDACTED}"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"), REDACTED),
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), REDACTED),
+    # Image tunnel hosts and paths (hosting.py): hosted URLs are never logged
+    (re.compile(r"(?i)(?<![a-z0-9-])[a-z0-9-]+\.lhr\.life(?:/[^\s\"']*)?"), f"{REDACTED}.lhr.life"),
     # Any remaining URL query string, e.g. the rest of a presigned URL
     (re.compile(r"""(?i)\b([a-z][a-z0-9+.-]*://[^\s?#"']*)\?[^\s#"']*"""), rf"\1?{REDACTED}"),
 ]
@@ -177,11 +183,12 @@ def _scrub_text(text: str) -> str:
     return text
 
 
-def _scrub(value, key: str | None = None):
+def scrub(value, key: str | None = None):
+    """Redact secrets in a JSON-like value: secret-named keys, keys and tokens in text, URL query strings."""
     if isinstance(value, dict):
-        return {_scrub_text(str(k)): _scrub(v, str(k)) for k, v in value.items()}
+        return {_scrub_text(str(k)): scrub(v, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_scrub(item, key) for item in value]
+        return [scrub(item, key) for item in value]
     if key is not None and _SENSITIVE_KEY.search(key):
         return REDACTED
     if value is None or isinstance(value, (bool, int, float)):
@@ -212,7 +219,7 @@ def log_event(run_dir: Path, *, stage: int | str, backend: str | None = None, en
         "usage": usage,
     }
     event = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
-    event.update(_scrub({name: value for name, value in fields.items() if value is not None}))
+    event.update(scrub({name: value for name, value in fields.items() if value is not None}))
     line = json.dumps(event, ensure_ascii=False) + "\n"
     with _log_lock, open(Path(run_dir) / LOG_FILE, "a", encoding="utf-8") as handle:
         handle.write(line)

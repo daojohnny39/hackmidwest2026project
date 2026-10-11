@@ -7,6 +7,9 @@ with hidden input and saves it to .env; SerpApi and TypeSafe keys are checked fi
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 2 bad configuration or usage, 3 stopped because a requested stage isn't built yet.
+
+Each stage of a run appends to runs/<run_id>/trace.jsonl (trace.py): agent reasoning,
+searches, fetches, model and Jev calls, and the cause of every error.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pipeline.contracts import CaptureArtifact
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected, check_typesafe_key
 from pipeline.hosting import remote_deleter, require_hosting
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
+from pipeline.trace import TRACE_FILE, tracing
 from pipeline import stage1_collect, stage2_profiles, stage3_verify, stage4_summarize
 
 STAGE_NAMES = {0: "capture", 1: "search and scrape", 2: "profiles and graph", 3: "verification", 4: "summary"}
@@ -64,13 +68,15 @@ def not_built(stage: int) -> int:
 
 
 def run_stages(run_dir: Path, settings: Settings, stages: range, *, refresh: bool) -> int:
-    """Run each stage in order, printing its view; stop at the first one not built or failing."""
+    """Run each stage in order, printing its view; stop at the first one not built or failing.
+    Each stage writes its trace to run_dir/trace.jsonl, including any exception that stops it."""
     for number in stages:
         runner = STAGE_RUNNERS.get(number)
         if runner is None:
             return not_built(number)
         try:
-            view = runner(run_dir, settings, refresh)
+            with tracing(run_dir, number, name=STAGE_NAMES[number], settings=settings.describe(), refresh=refresh):
+                view = runner(run_dir, settings, refresh)
         except ConfigError as exc:
             return fail(f"Configuration error (stage {number}): {exc}", BAD_CONFIG)
         except ConsentError as exc:
@@ -122,11 +128,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         llm_model=settings.llm_model,
         jev_model=settings.jev_model,
     )
-    write_artifact(run_dir, 0, artifact)
-    log_event(run_dir, stage=0, backend=settings.search_backend, status="ok")
+    with tracing(run_dir, 0, name=STAGE_NAMES[0], command="run", settings=settings.describe(), until=args.until,
+                 capture_dir=str(loaded.capture_dir), images=[image.model_dump(mode="json") for image in bundle.images],
+                 warnings=loaded.warnings):
+        write_artifact(run_dir, 0, artifact)
+        log_event(run_dir, stage=0, backend=settings.search_backend, status="ok")
 
     print(f"Run {run_id}")
     print(f"  folder: {run_dir}")
+    print(f"  trace: {run_dir / TRACE_FILE}")
     print(f"  participant: {bundle.consent.participant} (consent confirmed {bundle.consent.confirmed_at.isoformat()})")
     print(f"  search: {settings.search_backend}, scenario {settings.mock_scenario}; "
           f"jev: {settings.jev_mode}; llm: {settings.llm_mode}")
@@ -190,11 +200,14 @@ def cmd_smoke_search(args: argparse.Namespace) -> int:
         run_id, run_dir = create_run(args.runs_dir, bundle.session_id)
     except ArtifactError as exc:
         return fail(f"Refused (run): {exc}", REFUSED)
-    write_artifact(run_dir, 0, CaptureArtifact(
-        run_id=run_id, capture=bundle, capture_dir=str(loaded.capture_dir), backend="serpapi", scenario="default",
-        llm_mode="off", jev_mode=settings.jev_mode, jev_model=settings.jev_model))
-    log_event(run_dir, stage=0, backend="serpapi", status="ok", code="smoke_search")
+    with tracing(run_dir, 0, name=STAGE_NAMES[0], command="smoke-search", settings=settings.describe(),
+                 capture_dir=str(loaded.capture_dir), images=[image.model_dump(mode="json")]):
+        write_artifact(run_dir, 0, CaptureArtifact(
+            run_id=run_id, capture=bundle, capture_dir=str(loaded.capture_dir), backend="serpapi", scenario="default",
+            llm_mode="off", jev_mode=settings.jev_mode, jev_model=settings.jev_model))
+        log_event(run_dir, stage=0, backend="serpapi", status="ok", code="smoke_search")
     print(f"Smoke search {run_id}: {image.image_id} ({image.angle}) from {loaded.capture_dir}")
+    print(f"  trace: {run_dir / TRACE_FILE}")
     code = run_stages(run_dir, settings, range(1, 2), refresh=args.refresh)
     if code == OK:
         print("Ask the participant which hits, if any, are really theirs; record that in the brain notes.")
