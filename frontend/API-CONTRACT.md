@@ -12,9 +12,10 @@ Content-Type: multipart/form-data; boundary=<browser generated>
 | Part | Type | Frontend draft rule |
 | --- | --- | --- |
 | `image` | Original JPEG/PNG file | Exactly one selected reference, nonempty, at most 5 MiB; no landmarks/overlay. |
-| `name` | String | Required after trimming, at most 120 characters. |
-| `username` | String | Optional, at most 100 characters; omitted if blank. |
-| `context` | String | Optional public context, at most 500 characters; omitted if blank. |
+| `firstName` | String | Optional, at most 120 characters; omitted if blank after trimming. |
+| `lastName` | String | Optional, at most 120 characters; omitted if blank after trimming. |
+| `city` | String | Optional, at most 120 characters; omitted if blank after trimming. |
+| `age` | Integer string | Optional, nonnegative whole number; omitted if blank. |
 | `authorized` | String `"true"` | Required explicit subject authorization; server must validate independently. |
 
 These field/file limits are frontend defaults for review, not claims about an existing server. Validate MIME **and actual decoded image content** on the server. Camera consent is separate from search authorization and from consent to external processing. Before live upload, provide accurate disclosures about recipient services, retention and deletion, and collect any required additional permission. Do not infer external-processing consent from the existing local-camera checkbox.
