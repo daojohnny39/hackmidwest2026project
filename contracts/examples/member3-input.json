@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "requestId": "request-example-001",
+  "captureId": "capture-example-001",
+  "candidates": [
+    {
+      "id": "candidate-001",
+      "sourceId": "source-001",
+      "imageUrl": "https://example.com/images/alex-example.jpg",
+      "sourceUrl": "https://example.com/people/alex-example",
+      "pageTitle": "Alex Example",
+      "description": "A page mentioning Alex Example.",
+      "subject": {
+        "name": "Alex Example",
+        "usernames": [],
+        "context": "A ceramic artist based in Example City."
+      },
+      "profileMetadata": {},
+      "image": {
+        "status": "available",
+        "assetId": "0123456789abcdef0123456789abcdef"
+      }
+    }
+  ]
+}

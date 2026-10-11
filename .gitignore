@@ -18,3 +18,16 @@ data/*.sqlite3*
 
 # Face photos for the Rekognition gallery and its local index (face_gallery.py).
 /gallery/
+# Downloaded MediaPipe model bundles and incomplete downloads.
+/models/*.task
+/models/*.task.part
+
+# Local checkpoint photos and generated analysis results.
+/photos/
+/checkpoints/
+
+# Private backend assets and local credentials.
+/.facetrace-data/
+.env
+.env.*
+!.env.example

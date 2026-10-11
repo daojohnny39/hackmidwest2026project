@@ -12,7 +12,7 @@ export interface UseCamera {
   /** The deviceId of the camera currently streaming, if any. */
   activeDeviceId: string | undefined
   /** Start the camera, optionally a specific device. Restarts if already running. */
-  start: (deviceId?: string) => Promise<void>
+  start: (deviceId?: string) => Promise<boolean>
   stop: () => void
   /** Grab the current frame as an image. Rejects if the camera isn't active. */
   capture: (type?: string, quality?: number) => Promise<Blob>
@@ -35,7 +35,7 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : 'Could not start the camera.'
 }
 
-export function useCamera(): UseCamera {
+export function useCamera(onDisconnected?: (message: string) => void): UseCamera {
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   // Bumped on every start/stop so a slow getUserMedia call that's been superseded
@@ -49,11 +49,17 @@ export function useCamera(): UseCamera {
 
   const refreshDevices = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return
-    const all = await navigator.mediaDevices.enumerateDevices()
-    setDevices(all.filter((d) => d.kind === 'videoinput'))
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices()
+      if (streamRef.current) setDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId))
+    } catch {
+      // A device-list failure must not interrupt an already working camera.
+    }
   }, [])
 
   const releaseStream = useCallback(() => {
+    // Reset playback before detaching an ended stream so WebKit can play a retake.
+    videoRef.current?.pause()
     streamRef.current?.getTracks().forEach((track) => track.stop())
     streamRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
@@ -63,6 +69,8 @@ export function useCamera(): UseCamera {
     requestRef.current++
     releaseStream()
     setActiveDeviceId(undefined)
+    setDevices([])
+    setError(null)
     setStatus('idle')
   }, [releaseStream])
 
@@ -71,6 +79,7 @@ export function useCamera(): UseCamera {
       const request = ++requestRef.current
       releaseStream()
       setError(null)
+      setActiveDeviceId(undefined)
 
       if (!navigator.mediaDevices?.getUserMedia) {
         setError(
@@ -79,7 +88,7 @@ export function useCamera(): UseCamera {
             : 'Camera access requires HTTPS or localhost.',
         )
         setStatus('error')
-        return
+        return false
       }
 
       setStatus('starting')
@@ -88,51 +97,66 @@ export function useCamera(): UseCamera {
           audio: false,
           video: deviceId
             ? { deviceId: { exact: deviceId } }
-            : { facingMode: { ideal: 'environment' } },
+            : { facingMode: { ideal: 'user' } },
         })
         if (request !== requestRef.current) {
           stream.getTracks().forEach((track) => track.stop())
-          return
+          return false
         }
 
         streamRef.current = stream
-        if (videoRef.current) videoRef.current.srcObject = stream
+        const video = videoRef.current
+        if (!video) throw new Error('The camera preview is unavailable.')
+        video.srcObject = stream
+        video.muted = true
+        video.playsInline = true
 
         const [track] = stream.getVideoTracks()
         setActiveDeviceId(track?.getSettings().deviceId)
         track?.addEventListener('ended', () => {
           // Fires when the camera is unplugged or revoked, not when we stop it ourselves.
           if (streamRef.current !== stream) return
+          requestRef.current++
           releaseStream()
           setActiveDeviceId(undefined)
           setError('The camera disconnected.')
           setStatus('error')
+          // Invalidate pending capture synchronously, before React renders the error.
+          onDisconnected?.('The camera disconnected.')
         })
 
+        await video.play()
+        if (request !== requestRef.current) return false
         setStatus('active')
         // Device labels only become visible once permission has been granted.
-        await refreshDevices()
+        void refreshDevices()
+        return request === requestRef.current
       } catch (err) {
-        if (request !== requestRef.current) return
+        if (request !== requestRef.current) return false
+        releaseStream()
+        setActiveDeviceId(undefined)
         setError(describeError(err))
         setStatus('error')
+        return false
       }
     },
-    [releaseStream, refreshDevices],
+    [releaseStream, refreshDevices, onDisconnected],
   )
 
   const capture = useCallback(
     (type = 'image/jpeg', quality = 0.92) =>
       new Promise<Blob>((resolve, reject) => {
         const video = videoRef.current
-        if (!video || !streamRef.current || video.videoWidth === 0) {
+        if (!video || !streamRef.current || video.videoWidth === 0 || video.readyState < 2) {
           reject(new Error('Camera is not active.'))
           return
         }
         const canvas = document.createElement('canvas')
         canvas.width = video.videoWidth
         canvas.height = video.videoHeight
-        canvas.getContext('2d')?.drawImage(video, 0, 0)
+        const context = canvas.getContext('2d')
+        if (!context) { reject(new Error('Could not prepare a photo.')); return }
+        context.drawImage(video, 0, 0)
         canvas.toBlob(
           (blob) => (blob ? resolve(blob) : reject(new Error('Could not encode frame.'))),
           type,
@@ -145,14 +169,11 @@ export function useCamera(): UseCamera {
   useEffect(() => {
     const media = navigator.mediaDevices
     if (!media?.enumerateDevices) return
-    let cancelled = false
-    media.enumerateDevices().then((all) => {
-      if (!cancelled) setDevices(all.filter((d) => d.kind === 'videoinput'))
-    })
-    media.addEventListener('devicechange', refreshDevices)
+    // Only inspect devices after the participant starts a camera session.
+    const onDeviceChange = () => { if (streamRef.current) void refreshDevices() }
+    media.addEventListener?.('devicechange', onDeviceChange)
     return () => {
-      cancelled = true
-      media.removeEventListener('devicechange', refreshDevices)
+      media.removeEventListener?.('devicechange', onDeviceChange)
     }
   }, [refreshDevices])
 

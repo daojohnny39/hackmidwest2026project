@@ -16,7 +16,8 @@ from pipeline.jev import (
     Jev, JevAnswerError, KeyCheckFailed, KeyRejected, check_questions, check_typesafe_key, choice, noul, score,
     validate_answers,
 )
-from tests.support import OfflineTestCase
+from pipeline.trace import tracing
+from tests.support import OfflineTestCase, read_trace
 
 QUESTIONS = {
     "same_a1_a2": noul("Do accounts a1 and a2 belong to the same real person?",
@@ -158,6 +159,28 @@ class JevClientTests(OfflineTestCase):
         self.assertEqual((event["stage"], event["backend"], event["status"], event["model"]), (2, "jev:typesafe", "ok", "jev-1"))
         self.assertNotIn("Alex Morgan", line)
         self.assertNotIn("ts-test-key", line)
+
+    def test_trace_keeps_requests_answers_and_failure_details(self):
+        bad = {**GOOD, "best": {**GOOD["best"], "choice": "p9"}}
+        refused = httpx.MockTransport(lambda request: httpx.Response(400, json={"error": "unknown field 'fit'"}))
+        with tempfile.TemporaryDirectory() as tmp, tracing(Path(tmp), 3):
+            Jev(settings("typesafe"), responder=lambda s, q: {"model": "jev-1", "answers": GOOD}).ask(
+                {"name": "Alex Morgan"}, QUESTIONS)
+            Jev(settings("typesafe"), responder=lambda s, q: {"answers": bad}).ask({}, QUESTIONS)
+            Jev(settings("openrouter"), transport=refused).ask({}, QUESTIONS)
+            lines = read_trace(Path(tmp))
+        requests = [line for line in lines if line["event"] == "jev_request"]
+        self.assertEqual((len(requests), requests[0]["state"]), (3, {"name": "Alex Morgan"}))
+        self.assertEqual(requests[0]["questions"]["fit"]["criteria"], ["low", "medium", "high"])
+        [answers] = [line for line in lines if line["event"] == "jev_answers"]
+        self.assertEqual((answers["model"], answers["answers"]["same_a1_a2"]), ("jev-1", {"type": "noul", "noul": 0.91}))
+        invalid, http = [line for line in lines if line["event"] == "jev_failed"]
+        self.assertEqual(invalid["error"]["chain"][0]["message"], "answer best chose 'p9', which is not an option")
+        self.assertEqual(invalid["response"]["answers"]["best"]["choice"], "p9")
+        self.assertEqual((http["code"], http["status"]), ("invalid_request", 400))
+        [body] = [line for line in lines if line["event"] == "jev_http_error"]
+        self.assertIn("unknown field 'fit'", body["body"])
+        self.assertNotIn("or-test-key", json.dumps(lines))
 
 
 class OpenRouterRouteTests(OfflineTestCase):

@@ -54,7 +54,7 @@ class BackendError(Exception):
 
 
 class SearchBackend(Protocol):
-    name: str  # "mock" or "serpapi"
+    name: str  # "mock", "serpapi", "facecheck" or "rekognition"
     origin: str | None  # mock server origin for normalize_url; None when live
     search_endpoint: str  # endpoint paths for run_log.jsonl; never a page URL
     fetch_endpoint: str
@@ -140,7 +140,8 @@ async def with_retries(
 
 
 def parse_image_results(payload: object, *, mock_origin: str | None = None) -> SearchResult:
-    """Normalize a Yandex-shaped reverse-image response (SerpApi or the mock) into ImageHits.
+    """Normalize a Yandex-shaped reverse-image response (SerpApi, the mock, or the converted
+    results of FaceCheck or backend V3) into ImageHits.
 
     A provider error or a non-success status is a failure even on HTTP 200, except
     SerpApi's "hasn't returned any results", which is zero hits. Missing
@@ -179,13 +180,31 @@ def parse_image_results(payload: object, *, mock_origin: str | None = None) -> S
             source=_text(row.get("source"), TITLE_LIMIT),
             snippet=_text(row.get("snippet"), SNIPPET_LIMIT),
             thumbnail_url=_thumbnail(row.get("thumbnail")),
+            face_score=_face_score(row.get("face_score")),
         ))
     hits.sort(key=lambda hit: hit.position)
 
     extras: dict = {"status": status or "Success"}
     info = payload.get("search_information")
-    if isinstance(info, dict) and isinstance(info.get("total_results"), int):
-        extras["total_results"] = info["total_results"]
+    if isinstance(info, dict):
+        if isinstance(info.get("total_results"), int):
+            extras["total_results"] = info["total_results"]
+        if isinstance(info.get("demo"), bool):  # FaceCheck demo mode: only 100,000 faces searched
+            extras["demo"] = info["demo"]
+        if isinstance(info.get("searched_faces"), int):
+            extras["searched_faces"] = info["searched_faces"]
+        # Backend V3: the engines that answered or failed, the similarity threshold, the number of
+        # merged results, and how many of them ended each way (matched, no_face, ...).
+        for name in ("engines", "failed_engines"):
+            if isinstance(info.get(name), list) and all(isinstance(item, str) for item in info[name]):
+                extras[name] = info[name]
+        if isinstance(info.get("min_similarity"), (int, float)) and not isinstance(info["min_similarity"], bool):
+            extras["min_similarity"] = info["min_similarity"]
+        if isinstance(info.get("candidates"), int):
+            extras["candidates"] = info["candidates"]
+        outcomes = info.get("outcomes")
+        if isinstance(outcomes, dict) and all(isinstance(count, int) for count in outcomes.values()):
+            extras["outcomes"] = {str(name): count for name, count in outcomes.items()}
     if skipped:
         extras["skipped_hits"] = skipped
     request_id = metadata.get("id")
@@ -196,10 +215,15 @@ def _text(value: object, limit: int) -> str:
     return " ".join(value.split())[:limit] if isinstance(value, str) else ""
 
 
+def _face_score(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
+
+
 def _thumbnail(value: object) -> str | None:
     if isinstance(value, dict):
         value = value.get("link")
     if not isinstance(value, str) or not value.startswith(("http://", "https://")):
         return None
-    # Never keep anything that looks like a signed URL (our own hosted image).
-    return None if "x-amz-" in value.lower() or len(value) > 2048 else value
+    # Never keep anything that looks like our own hosted image (a signed S3 URL or a tunnel URL).
+    lowered = value.lower()
+    return None if "x-amz-" in lowered or ".lhr.life" in lowered or len(value) > 2048 else value

@@ -1,0 +1,312 @@
+{
+  "$defs": {
+    "CandidateImage": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "available",
+            "failed",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "assetId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assetid"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Failure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "CandidateImage",
+      "type": "object"
+    },
+    "CandidateInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "sourceId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sourceid"
+        },
+        "imageUrl": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Imageurl",
+          "type": "string"
+        },
+        "sourceUrl": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Sourceurl",
+          "type": "string"
+        },
+        "pageTitle": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pagetitle"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "subject": {
+          "$ref": "#/$defs/Subject"
+        },
+        "profileMetadata": {
+          "$ref": "#/$defs/ProfileMetadata"
+        },
+        "image": {
+          "$ref": "#/$defs/CandidateImage"
+        }
+      },
+      "required": [
+        "id",
+        "imageUrl",
+        "sourceUrl",
+        "subject",
+        "image"
+      ],
+      "title": "CandidateInput",
+      "type": "object"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "enum": [
+            "retrieval",
+            "validation",
+            "image",
+            "classification",
+            "pipeline",
+            "storage"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "code": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stage",
+        "code",
+        "message"
+      ],
+      "title": "Failure",
+      "type": "object"
+    },
+    "ProfileMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "username": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Username"
+        },
+        "organization": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Organization"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "biography": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Biography"
+        }
+      },
+      "title": "ProfileMetadata",
+      "type": "object"
+    },
+    "Subject": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "usernames": {
+          "items": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Usernames",
+          "type": "array"
+        },
+        "context": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context"
+        }
+      },
+      "title": "Subject",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "requestId": {
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "title": "Requestid",
+      "type": "string"
+    },
+    "captureId": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Captureid"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/CandidateInput"
+      },
+      "maxItems": 20,
+      "title": "Candidates",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "candidates"
+  ],
+  "title": "CandidateBatch",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "FaceTrace Member 3 v1 structural schema. Cross-field and state validation also runs in candidate_processing.contracts."
+}

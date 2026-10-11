@@ -86,6 +86,9 @@ def render_page(corpus, page, base):
 
 class MockServer(ThreadingHTTPServer):
     daemon_threads = True
+    # macOS refuses connections once the listen backlog is full (Linux retries
+    # instead), and the default of 5 is too small for concurrent per-image fetches.
+    request_queue_size = 64
 
     def __init__(self, address, db_path):
         self.corpus = Corpus(db_path)

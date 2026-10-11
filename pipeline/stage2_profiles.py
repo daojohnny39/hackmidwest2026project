@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pipeline import trace
 from pipeline.artifacts import ArtifactError, invalidate_from, read_artifact, write_artifact
 from pipeline.config import TRUST_TABLE, Settings
 from pipeline.contracts import (
@@ -361,13 +362,15 @@ def _llm_fill(drafts: Mapping[str, _AccountDraft], extract: LlmExtractor) -> lis
     try:
         result = extract([{"url": url, "title": incomplete[url].page.title, "text": text} for url, text in pages.items()])
         extraction = result if isinstance(result, AccountExtraction) else AccountExtraction.model_validate(result)
-    except Exception:  # model, timeout, or schema failure: keep the partial deterministic fields
+    except Exception as exc:  # model, timeout, or schema failure: keep the partial deterministic fields
+        trace.error("llm_extraction_failed", exc, urls=list(pages))
         return ["llm_extraction_failed"]
     flags = set()
     for url, extracted in extraction.fields_by_url.items():
         draft = incomplete.get(url)
         if draft is None:
             flags.add("llm_rejected_url")
+            trace.event("llm_value_rejected", url=url, reason="not one of the pages asked about")
             continue
         for name in FIELD_NAMES:
             value = _string(getattr(extracted, name))
@@ -375,6 +378,7 @@ def _llm_fill(drafts: Mapping[str, _AccountDraft], extract: LlmExtractor) -> lis
                 continue
             if not _supported(value, pages[url]):
                 flags.add("llm_rejected_value")
+                trace.event("llm_value_rejected", url=url, field=name, value=value, reason="not in the page text")
                 continue
             draft.fields[name] = value
             if name == "display_name":
@@ -706,7 +710,9 @@ def strands_extractor(settings: Settings) -> LlmExtractor:
 
         from pipeline.llm import build_model
 
-        agent = Agent(model=build_model(settings), tools=[], callback_handler=None, system_prompt=EXTRACTION_PROMPT)
+        agent = Agent(model=build_model(settings), tools=[], callback_handler=None, system_prompt=EXTRACTION_PROMPT,
+                      name="account-extractor")
+        trace.watch_agent(agent)
         result = agent(json.dumps({"pages": pages}, ensure_ascii=False), structured_output_model=AccountExtraction)
         return result.structured_output
 

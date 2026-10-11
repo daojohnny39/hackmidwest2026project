@@ -1,8 +1,9 @@
-"""`python -m pipeline set-key`, the .env writer, and the SerpApi and TypeSafe key checks.
+"""`python -m pipeline set-key`, the .env writer, and the FaceCheck, SerpApi, TypeSafe, and AWS key checks.
 
-The prompt, SerpApi, and TypeSafe are patched; nothing leaves the machine.
+The prompt, FaceCheck, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
 """
 
+import configparser
 import fnmatch
 import getpass
 import io
@@ -15,13 +16,18 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import boto3
 import httpx
+from botocore.exceptions import EndpointConnectionError
+from botocore.stub import Stubber
 from dotenv import dotenv_values
 
 from pipeline import __main__ as cli
+from pipeline import aws_credentials
 from pipeline.__main__ import BAD_CONFIG, OK, REFUSED, main
 from pipeline.config import REPO_ROOT, load_settings, set_env_value
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected
+from pipeline.search.facecheck_backend import InfoCheckFailed, TokenRejected
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 from tests.support import OfflineTestCase
 
@@ -29,6 +35,7 @@ KEY = "0123abcdSECRETkey9876"
 QUOTA = {"plan_name": "Free Plan", "searches_per_month": 250, "total_searches_left": 250,
          "account_rate_limit_per_hour": 50}
 MODELS = ["jev-1.13.0"]
+FACECHECK_INFO = {"remaining_credits": 30, "has_credits_to_search": True, "is_online": True, "faces": 1_000_000}
 
 
 class EnvFileCase(OfflineTestCase):
@@ -45,7 +52,7 @@ class SetEnvValueTests(EnvFileCase):
         set_env_value(self.env_file, "SERPAPI_KEY", KEY, template=REPO_ROOT / ".env.example")
         values = dotenv_values(self.env_file)
         self.assertEqual(values["SERPAPI_KEY"], KEY)
-        self.assertEqual(values["SEARCH_BACKEND"], "serpapi")
+        self.assertEqual(values["SEARCH_BACKEND"], "rekognition")
         self.assertEqual(values["JEV_MODE"], "fake")
 
     def test_new_file_without_template(self):
@@ -157,7 +164,7 @@ class SetKeyCommandTests(EnvFileCase):
         checked.assert_called_once_with(KEY)
         self.assertIn("SerpApi accepted the key: Free Plan, 250 searches left", out)
         self.assertEqual(self.saved(), KEY)
-        self.assertEqual(dotenv_values(self.env_file)["SEARCH_BACKEND"], "serpapi")  # from .env.example
+        self.assertEqual(dotenv_values(self.env_file)["SEARCH_BACKEND"], "rekognition")  # from .env.example
 
     def test_rejected_key_is_not_saved(self):
         code, _, err, _ = self.set_key("serpapi", quota=KeyRejected("HTTP 401"))
@@ -176,6 +183,44 @@ class SetKeyCommandTests(EnvFileCase):
         self.assertEqual(code, OK)
         checked.assert_not_called()
         self.assertEqual(self.saved(), KEY)
+
+    def facecheck_info(self, result=FACECHECK_INFO):
+        return patch("pipeline.search.facecheck_backend.account_info",
+                     side_effect=result if isinstance(result, BaseException) else None, return_value=result)
+
+    def facecheck_saved(self):
+        return dotenv_values(self.env_file).get("FACECHECK_API_KEY") if self.env_file.exists() else None
+
+    def test_saves_a_checked_facecheck_token(self):
+        with self.facecheck_info() as info:
+            code, out, _, checked = self.set_key("facecheck")
+        self.assertEqual(code, OK)
+        info.assert_called_once_with(KEY)
+        checked.assert_not_called()
+        self.assertIn("FaceCheck accepted the token: 30 credits left (10 searches at 3 credits, $0.30 each)", out)
+        self.assertIn("FACECHECK_DEMO=true", out)
+        self.assertEqual(self.facecheck_saved(), KEY)
+
+    def test_rejected_facecheck_token_is_not_saved(self):
+        with self.facecheck_info(TokenRejected("INVALID_TOKEN")):
+            code, _, err, _ = self.set_key("facecheck")
+        self.assertEqual(code, REFUSED)
+        self.assertIn("FaceCheck rejected the token (INVALID_TOKEN)", err)
+        self.assertIsNone(self.facecheck_saved())
+
+    def test_unreachable_facecheck_check_still_saves(self):
+        with self.facecheck_info(InfoCheckFailed("ConnectError")):
+            code, out, _, _ = self.set_key("facecheck")
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the token with FaceCheck", out)
+        self.assertEqual(self.facecheck_saved(), KEY)
+
+    def test_no_check_skips_facecheck(self):
+        with self.facecheck_info() as info:
+            code, _, _, _ = self.set_key("facecheck", "--no-check")
+        self.assertEqual(code, OK)
+        info.assert_not_called()
+        self.assertEqual(self.facecheck_saved(), KEY)
 
     def test_other_services_are_saved_without_a_check(self):
         for service, name, mode in (("openrouter", "OPENROUTER_API_KEY", "JEV_MODE=openrouter"),
@@ -305,3 +350,190 @@ class AccountQuotaTests(OfflineTestCase):
     def test_describe_quota(self):
         self.assertEqual(describe_quota(QUOTA), "Free Plan, 250 searches left (250 per month), limit 50 per hour")
         self.assertEqual(describe_quota({}), "unknown plan")
+
+
+# AWS's documented example keys (https://docs.aws.amazon.com/IAM/latest/UserGuide/security-creds.html).
+AWS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+IDENTITY = aws_credentials.CallerIdentity(account="123456789012", arn="arn:aws:iam::123456789012:user/pipeline")
+
+
+class SetAwsKeysTests(EnvFileCase):
+    def setUp(self):
+        super().setUp()
+        self.credentials = self.folder / "aws" / "credentials"
+
+    def set_key(self, *argv, entered=(AWS_KEY_ID, AWS_SECRET), identity=IDENTITY, file=True):
+        """Run `set-key aws` with patched prompts and STS check; return (code, out, err, check mock)."""
+        prompt = patch.object(cli.getpass, "getpass", side_effect=entered if callable(entered) else list(entered))
+        check = patch.object(cli.aws_credentials, "check_keys",
+                             side_effect=identity if isinstance(identity, BaseException) else None,
+                             return_value=identity)
+        target = ["--credentials-file", str(self.credentials)] if file else []
+        out, err = io.StringIO(), io.StringIO()
+        with prompt, check as checked, redirect_stdout(out), redirect_stderr(err):
+            code = main(["set-key", "aws", *argv, *target, "--env-file", str(self.env_file)])
+        for secret in (AWS_SECRET, AWS_KEY_ID):
+            self.assertNotIn(secret, out.getvalue() + err.getvalue())
+        return code, out.getvalue(), err.getvalue(), checked
+
+    def saved(self, path=None):
+        parser = configparser.RawConfigParser()
+        parser.read(path or self.credentials)
+        return {section: dict(parser[section]) for section in parser.sections()}
+
+    def test_saves_checked_keys_where_boto3_reads_them(self):
+        code, out, _, checked = self.set_key()
+        self.assertEqual(code, OK)
+        checked.assert_called_once_with(AWS_KEY_ID, AWS_SECRET, None)
+        self.assertIn("account 123456789012", out)
+        self.assertIn("key ending MPLE", out)
+        self.assertEqual(self.saved(), {"default": {"aws_access_key_id": AWS_KEY_ID,
+                                                    "aws_secret_access_key": AWS_SECRET}})
+        self.assertEqual(stat.S_IMODE(self.credentials.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.credentials.parent.stat().st_mode), 0o700)
+        self.assertEqual([path.name for path in self.credentials.parent.iterdir()], ["credentials"])
+        self.assertFalse(self.env_file.exists())
+        os.environ["AWS_SHARED_CREDENTIALS_FILE"] = str(self.credentials)
+        found = boto3.Session().get_credentials()
+        self.assertEqual((found.access_key, found.secret_key), (AWS_KEY_ID, AWS_SECRET))
+
+    def test_default_path_follows_aws_shared_credentials_file(self):
+        os.environ["AWS_SHARED_CREDENTIALS_FILE"] = str(self.folder / "elsewhere")
+        self.assertEqual(self.set_key("--no-check", file=False)[0], OK)
+        self.assertEqual(self.saved(self.folder / "elsewhere")["default"]["aws_access_key_id"], AWS_KEY_ID)
+
+    def test_region_is_checked_and_saved_to_env(self):
+        code, out, _, checked = self.set_key("--region", "us-east-2")
+        self.assertEqual(code, OK)
+        checked.assert_called_once_with(AWS_KEY_ID, AWS_SECRET, "us-east-2")
+        self.assertEqual(dotenv_values(self.env_file)["AWS_REGION"], "us-east-2")
+        self.assertIn("Saved AWS_REGION=us-east-2", out)
+
+    def test_bad_region_is_refused_before_any_prompt(self):
+        code, _, err, checked = self.set_key("--region", "Ohio", entered=())
+        self.assertEqual(code, BAD_CONFIG)
+        self.assertIn("isn't an AWS region", err)
+        checked.assert_not_called()
+        self.assertFalse(self.credentials.exists())
+
+    def test_region_flag_is_for_aws_only(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(["set-key", "serpapi", "--region", "us-east-1", "--env-file", str(self.env_file)])
+        self.assertEqual(code, BAD_CONFIG)
+        self.assertFalse(self.env_file.exists())
+
+    def test_rejected_keys_are_not_saved(self):
+        code, _, err, _ = self.set_key(identity=aws_credentials.KeyRejected("InvalidClientTokenId"))
+        self.assertEqual(code, REFUSED)
+        self.assertIn("AWS rejected the keys (InvalidClientTokenId)", err)
+        self.assertFalse(self.credentials.exists())
+
+    def test_unreachable_check_still_saves(self):
+        code, out, _, _ = self.set_key(identity=aws_credentials.KeyCheckFailed("EndpointConnectionError"))
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the keys", out)
+        self.assertIn("default", self.saved())
+
+    def test_no_check_skips_sts(self):
+        code, _, _, checked = self.set_key("--no-check")
+        self.assertEqual(code, OK)
+        checked.assert_not_called()
+        self.assertIn("default", self.saved())
+
+    def test_malformed_or_temporary_keys_save_nothing(self):
+        cases = [(("ASIAIOSFODNN7EXAMPLE",), "temporary key ID"), (("not-a-key-id",), "access key ID"),
+                 ((AWS_KEY_ID, "short/secret"), "secret access key"), (("",), "access key ID")]
+        for entered, message in cases:
+            with self.subTest(message=message, entered=entered[0]):
+                code, _, err, checked = self.set_key(entered=entered)
+                self.assertEqual(code, BAD_CONFIG)
+                self.assertIn(message, err)
+                checked.assert_not_called()
+                self.assertFalse(self.credentials.exists())
+
+    def test_replaces_default_and_keeps_other_profiles(self):
+        self.credentials.parent.mkdir()
+        self.credentials.write_text("[default]\naws_access_key_id = AKIAOLDOLDOLDOLDOLD1\n"
+                                    "aws_secret_access_key = old\naws_session_token = stale\n\n"
+                                    "[work]\naws_access_key_id = AKIAWORKWORKWORKWORK\n")
+        code, out, _, _ = self.set_key()
+        self.assertEqual(code, OK)
+        self.assertIn("Replaced the [default] profile", out)
+        self.assertEqual(self.saved(), {
+            "default": {"aws_access_key_id": AWS_KEY_ID, "aws_secret_access_key": AWS_SECRET},
+            "work": {"aws_access_key_id": "AKIAWORKWORKWORKWORK"},
+        })
+
+    def test_warns_about_root_keys(self):
+        root = aws_credentials.CallerIdentity(account="123456789012", arn="arn:aws:iam::123456789012:root")
+        code, out, _, _ = self.set_key(identity=root)
+        self.assertEqual(code, OK)
+        self.assertIn("root-user keys", out)
+
+    def test_cancel_or_visible_input_saves_nothing(self):
+        def visible_fallback(prompt):
+            warnings.warn("Can not control echo on the terminal.", getpass.GetPassWarning)
+            return AWS_KEY_ID
+        for entered, message in ((KeyboardInterrupt(),), "Cancelled"), (visible_fallback, "can't hide"):
+            with self.subTest(message=message):
+                code, _, err, _ = self.set_key(entered=entered)
+                self.assertEqual(code, REFUSED)
+                self.assertIn(message, err)
+                self.assertFalse(self.credentials.exists())
+
+    def test_warns_when_exported_aws_variables_would_win(self):
+        os.environ["AWS_ACCESS_KEY_ID"] = "AKIAEXPORTEDEXPORTED"
+        code, out, _, _ = self.set_key()
+        self.assertEqual(code, OK)
+        self.assertIn("unset AWS_ACCESS_KEY_ID", out)
+
+
+class CheckAwsKeysTests(OfflineTestCase):
+    def stubbed(self):
+        client = boto3.client("sts", region_name="us-east-1", aws_access_key_id=AWS_KEY_ID,
+                              aws_secret_access_key=AWS_SECRET)
+        stubber = Stubber(client)
+        stubber.activate()
+        self.addCleanup(stubber.deactivate)
+        return client, stubber
+
+    def check(self, client):
+        return aws_credentials.check_keys(AWS_KEY_ID, AWS_SECRET, client=client)
+
+    def test_returns_account_and_arn(self):
+        client, stubber = self.stubbed()
+        stubber.add_response("get_caller_identity", {"UserId": "AIDAEXAMPLE", "Account": "123456789012",
+                                                     "Arn": "arn:aws:iam::123456789012:user/pipeline"})
+        self.assertEqual(self.check(client), IDENTITY)
+        self.assertFalse(IDENTITY.is_root)
+
+    def test_auth_errors_reject_the_keys(self):
+        for code in ("InvalidClientTokenId", "SignatureDoesNotMatch"):
+            with self.subTest(code=code):
+                client, stubber = self.stubbed()
+                stubber.add_client_error("get_caller_identity", service_error_code=code, http_status_code=403)
+                with self.assertRaisesRegex(aws_credentials.KeyRejected, f"^{code}$"):
+                    self.check(client)
+
+    def test_other_failures_do_not_reject_the_keys(self):
+        client, stubber = self.stubbed()
+        stubber.add_client_error("get_caller_identity", service_error_code="Throttling", http_status_code=400)
+        with self.assertRaisesRegex(aws_credentials.KeyCheckFailed, "^Throttling$"):
+            self.check(client)
+        client, _ = self.stubbed()
+        with patch.object(client, "get_caller_identity",
+                          side_effect=EndpointConnectionError(endpoint_url="https://sts.us-east-1.amazonaws.com")):
+            with self.assertRaisesRegex(aws_credentials.KeyCheckFailed, "^EndpointConnectionError$"):
+                self.check(client)
+
+    def test_real_client_is_built_from_the_given_keys(self):
+        # boto3.client is mocked, so no request is sent (and sockets are blocked anyway).
+        with patch("boto3.client") as make_client:
+            make_client.return_value.get_caller_identity.return_value = {"Account": "1", "Arn": "arn:aws:iam::1:root"}
+            identity = aws_credentials.check_keys(AWS_KEY_ID, AWS_SECRET, "eu-west-1")
+        self.assertTrue(identity.is_root)
+        _, kwargs = make_client.call_args
+        self.assertEqual((kwargs["region_name"], kwargs["aws_access_key_id"], kwargs["aws_secret_access_key"]),
+                         ("eu-west-1", AWS_KEY_ID, AWS_SECRET))

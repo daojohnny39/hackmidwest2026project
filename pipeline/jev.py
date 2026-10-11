@@ -13,7 +13,8 @@ Routes, picked by settings.jev_mode:
 `off` has no client: callers use their rules directly.
 
 Retries live in one place per route (the SDK's RetryPolicy, or the loop below) and
-share the per-call deadline. Only metadata reaches run_log.jsonl.
+share the per-call deadline. Only metadata reaches run_log.jsonl; the trace (trace.py)
+also gets each request, its answers, and the cause of any failure.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from collections.abc import Callable, Mapping
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from pipeline import trace
 from pipeline.artifacts import log_event
 from pipeline.config import Settings
 from pipeline.contracts import JevCall
@@ -222,9 +224,10 @@ class Jev:
     def ask(self, state: dict, questions: dict[str, dict], *, fake_answers: Mapping[str, dict] | None = None) -> JevCall:
         check_questions(questions)
         started = time.monotonic()
-        model = request_id = None
+        model = request_id = raw = None
         status: int | str | None = None
         retries = 0
+        trace.event("jev_request", provider=self.provider, model=self.model, questions=questions, state=state)
         try:
             size = len(json.dumps({"state": state, "questions": questions}, ensure_ascii=False))
             if size > MAX_INPUT_CHARS:
@@ -249,17 +252,25 @@ class Jev:
                 usage=_usage(raw.get("usage")),
             )
             status = "ok"
+            trace.event("jev_answers", provider=self.provider, model=model, request_id=call.request_id,
+                        answers=call.answers, usage=call.usage, latency_ms=_ms(started))
         except _CallFailed as failure:
             status = failure.status or failure.code
             retries = failure.retries
             call = JevCall(provider=self.provider, request_id=failure.request_id or request_id, error=failure.code)
-        except JevAnswerError:
+            trace.error("jev_failed", failure, provider=self.provider, code=failure.code, status=failure.status,
+                        retries=retries, latency_ms=_ms(started))
+        except JevAnswerError as exc:
             status = "invalid_response"
             call = JevCall(provider=self.provider, model=model, request_id=request_id, error="invalid_response")
+            trace.error("jev_failed", exc, provider=self.provider, code="invalid_response", response=raw,
+                        latency_ms=_ms(started))
         except Exception as exc:  # an SDK, transport, or responder failure must not end the stage
             code, http_status, sdk_request_id = _sdk_error(exc)
             status = http_status or code
             call = JevCall(provider=self.provider, request_id=sdk_request_id, error=code)
+            trace.error("jev_failed", exc, provider=self.provider, code=code, status=http_status,
+                        latency_ms=_ms(started))
         if self.run_dir is not None:
             log_event(
                 self.run_dir,
@@ -309,6 +320,9 @@ class Jev:
                 except httpx.HTTPError:
                     raise _CallFailed("connection_error", retries=attempt) from None
                 request_id = response.headers.get("x-request-id") or request_id
+                if response.status_code >= 400:
+                    trace.error("jev_http_error", status=response.status_code, attempt=attempt + 1,
+                                request_id=request_id, body=response.text[:2000])
                 if response.status_code in RETRY_STATUSES and attempt < self.max_retries:
                     wait = _retry_after(response.headers.get("retry-after"))
                     if wait is None:
@@ -358,6 +372,10 @@ def check_typesafe_key(api_key: str, *, transport=None) -> list[str]:
     except TypeSafeError as exc:
         raise KeyCheckFailed(type(exc).__name__) from None
     return [model.name for model in listing.models]
+
+
+def _ms(started: float) -> float:
+    return round((time.monotonic() - started) * 1000, 1)
 
 
 def _retry_after(value: str | None) -> float | None:

@@ -7,15 +7,18 @@ made; the agents drive the real tools against a local mock internet.
 
 import asyncio
 import json
+import tempfile
+from pathlib import Path
 
 from strands.models import Model
 
 from pipeline.capture import load_capture
 from pipeline.contracts import CaptureArtifact
-from pipeline.image_agent import make_agent_runner
+from pipeline.image_agent import make_agent_runner, system_prompt
 from pipeline.search.mock_backend import MockSearchBackend
 from pipeline.stage1_collect import collect_evidence
-from tests.support import FIXTURE_CAPTURES, MockServerTestCase
+from pipeline.trace import tracing
+from tests.support import FIXTURE_CAPTURES, MockServerTestCase, read_trace
 
 ARCHIVE = "https://archive.test/speakers/alex-morgan-2021"
 
@@ -41,6 +44,7 @@ class ScriptedModel(Model):
         self.skip_search = skip_search
         self.phase = 0
         self.hit_urls: list[str] = []
+        self.hits: list[dict] = []
         self.fetched: dict[str, dict] = {}
         self.sneak_result = None
         self.config = {}
@@ -58,6 +62,7 @@ class ScriptedModel(Model):
     def next_calls(self, messages):
         for result in tool_results(messages):
             if "hits" in result:
+                self.hits = result["hits"]
                 self.hit_urls = [hit["url"] for hit in result["hits"]]
             for page in result.get("pages", [result]):
                 if "url" in page and "kind" in page:
@@ -132,6 +137,26 @@ class ImageAgentTests(MockServerTestCase):
         self.assertTrue(bundle.pages["https://chatter.test/alexbuilds"].relevant)
         self.assertEqual(sum(page.page_kind == "profile" and page.relevant for page in bundle.pages.values()), 5)
 
+    def test_face_search_hits_carry_face_scores(self):
+        from pipeline.search.facecheck_backend import to_payload
+        from tests.test_stage1 import FakeBackend, live_capture, page_html, yandex
+
+        a, b = "https://github.com/pat", "https://lookalike.example/x"
+        output = {"items": [{"score": 55, "url": {"value": b}}, {"score": 92, "url": {"value": a}}]}
+        pages = {a: page_html(title="Pat"), b: page_html()}
+        for payload, expected in ((to_payload("s1", output, demo=False), [(a, 92), (b, 55)]),
+                                  (yandex(a, b), [(a, None), (b, None)])):
+            with self.subTest(face_search=expected[0][1] is not None):
+                model = ScriptedModel()
+                asyncio.run(collect_evidence(live_capture("img-1"), FakeBackend({"img-1": payload}, pages),
+                                             agent=make_agent_runner(lambda: model)))
+                self.assertEqual([(hit["url"], hit.get("face_score")) for hit in model.hits], expected)
+        from pipeline.search.facecheck_backend import FaceCheckBackend
+
+        self.assertIn("under 70 as likely lookalikes", system_prompt(FaceCheckBackend))
+        self.assertIn("No hit has a face_score", system_prompt(FakeBackend({}, {})))
+        self.assertNotIn("{", system_prompt(FakeBackend({}, {})))
+
     def test_tools_refuse_urls_outside_the_image(self):
         other_image_hit = "https://photogram.test/alexbuilds"  # img-2's hit, not img-1's
         models = [ScriptedModel(sneak_url=other_image_hit), ScriptedModel(), ScriptedModel()]
@@ -152,3 +177,44 @@ class ImageAgentTests(MockServerTestCase):
         self.assertEqual(self.mock_count("/api/reverse-image"), 3)
         self.assertEqual(len(bundle.pages), 9)
         self.assertTrue(all(page.relevant for page in bundle.pages.values()))
+
+    def test_trace_records_each_conversation_and_why_agents_fell_back(self):
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        with tracing(folder, 1):
+            self.collect([ScriptedModel(), ScriptedModel(crash=True), ScriptedModel(bad_triage=True)])
+        lines = read_trace(folder)
+
+        def of(agent, event):
+            return [line for line in lines if line.get("agent") == agent and line["event"] == event]
+
+        # img-1: prompts, every tool call and result, the structured triage, and usage.
+        [start] = of("collector-img-1", "agent_start")
+        self.assertEqual(start["tools"], ["reverse_image_search", "fetch_page", "follow_account_links"])
+        self.assertIn("Call reverse_image_search once.", start["system_prompt"])
+        prompt, call, result = of("collector-img-1", "agent_message")[:3]
+        self.assertIn("Collect the public pages for image img-1", prompt["content"][0]["text"])
+        self.assertEqual(call["content"][0]["toolUse"]["name"], "reverse_image_search")
+        self.assertIn('"hits"', result["content"][0]["toolResult"]["content"][0]["text"])
+        self.assertEqual({line["tool"] for line in of("collector-img-1", "tool_call")},
+                         {"reverse_image_search", "fetch_page", "follow_account_links", "ImageTriage"})
+        [end] = of("collector-img-1", "agent_end")
+        self.assertTrue(end["structured_output"]["judgments"])
+        self.assertGreater(end["usage"]["totalTokens"], 0)
+
+        # img-2: the model error, and the fallback that names it.
+        [failed] = of("collector-img-2", "model_call_failed")
+        self.assertEqual(failed["error"]["chain"][0]["message"], "model unavailable")
+        fallbacks = {line["image"]: line for line in lines if line["event"] == "image_agent_failed"}
+        self.assertEqual({image: line["reason"] for image, line in fallbacks.items()},
+                         {"img-2": "agent_error", "img-3": "invalid_output"})
+        self.assertEqual(fallbacks["img-2"]["error"]["chain"][0]["type"], "RuntimeError")
+
+        # img-3: the schema errors the model was shown.
+        errors = [block["toolResult"]["content"][0]["text"] for line in of("collector-img-3", "agent_message")
+                  for block in line["content"] if block.get("toolResult", {}).get("status") == "error"]
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("Input should be a valid list" in error for error in errors))
+
+        self.assertEqual({line["image"]: line["method"] for line in lines if line["event"] == "image_done"},
+                         {"img-1": "agent", "img-2": "fallback", "img-3": "fallback"})
+        self.assertEqual(len([line for line in lines if line["event"] == "search"]), 3)

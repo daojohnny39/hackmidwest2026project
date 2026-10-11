@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pipeline import trace
 from pipeline.artifacts import log_event, read_artifact, write_artifact
 from pipeline.config import ConfigError, Settings
 from pipeline.contracts import (
@@ -101,16 +102,25 @@ class PageStore:
             scraped = await asyncio.to_thread(scrape_html, page.html, page_url=url, fetched_url=page.fetched_url,
                                               mock_origin=self.backend.origin)
         except BackendError as error:
+            latency = _ms(started)
             self.log(backend=self.backend.name, endpoint=endpoint, status=error.status_code or error.reason,
-                     latency_ms=_ms(started), retries=error.retries, code=error.reason)
+                     latency_ms=latency, retries=error.retries, code=error.reason)
+            trace.error("page_fetch_failed", error, url=url, reason=error.reason, status=error.status_code,
+                        retries=error.retries, latency_ms=latency)
             return PageResult(url, error=FetchError(url=url, status_code=error.status_code, reason=error.reason))
-        except Exception:  # a scraper or adapter bug fails this page only
-            self.log(backend=self.backend.name, endpoint=endpoint, status="error", latency_ms=_ms(started),
+        except Exception as exc:  # a scraper or adapter bug fails this page only
+            latency = _ms(started)
+            self.log(backend=self.backend.name, endpoint=endpoint, status="error", latency_ms=latency,
                      code="internal_error")
+            trace.error("page_fetch_failed", exc, url=url, reason="internal_error", latency_ms=latency)
             return PageResult(url, error=FetchError(url=url, status_code=None, reason="internal_error"))
-        self.log(backend=self.backend.name, endpoint=endpoint, status=page.status_code, latency_ms=_ms(started),
+        latency = _ms(started)
+        self.log(backend=self.backend.name, endpoint=endpoint, status=page.status_code, latency_ms=latency,
                  retries=retries)
-        return PageResult(url, page=page, scraped=scraped)
+        result = PageResult(url, page=page, scraped=scraped)
+        trace.event("page_fetch", url=url, final_url=page.final_url, status=page.status_code, kind=result.kind,
+                    title=scraped.title, latency_ms=latency, retries=retries)
+        return result
 
     def pending(self) -> list[asyncio.Task]:
         return [task for task in self._tasks.values() if not task.done()]
@@ -184,15 +194,24 @@ class ImageCollector:
         self.searched_at = _now()
         started = time.monotonic()
         endpoint = getattr(self.backend, "search_endpoint", "search")
+        payload = None
         try:
             payload, retries = await with_retries(lambda: self.backend.reverse_image(self.image), deadline=self.deadline)
             result = parse_image_results(payload, mock_origin=self.backend.origin)
             self.outcome = SearchOutcome(hits=result.hits, request_id=result.request_id, extras=result.extras)
-            self.log(backend=self.backend.name, endpoint=endpoint, status=200, latency_ms=_ms(started), retries=retries)
+            latency = _ms(started)
+            self.log(backend=self.backend.name, endpoint=endpoint, status=200, latency_ms=latency, retries=retries)
+            trace.event("search", image=self.image_id, backend=self.backend.name, request_id=result.request_id,
+                        hits=[hit.url for hit in result.hits], extras=result.extras, latency_ms=latency,
+                        retries=retries)
         except BackendError as error:
+            latency = _ms(started)
             self.outcome = SearchOutcome(error=FetchError(url=None, status_code=error.status_code, reason=error.reason))
             self.log(backend=self.backend.name, endpoint=endpoint, status=error.status_code or error.reason,
-                     latency_ms=_ms(started), retries=error.retries, code=error.reason)
+                     latency_ms=latency, retries=error.retries, code=error.reason)
+            # response: the provider's reply (sanitized, for SerpApi) when it answered but couldn't be parsed
+            trace.error("search_failed", error, image=self.image_id, backend=self.backend.name, reason=error.reason,
+                        status=error.status_code, retries=error.retries, latency_ms=latency, response=payload)
         finally:
             # Hosted copies are deleted once the search and its retries are over, even on failure.
             await asyncio.shield(self.backend.release(self.image))
@@ -296,6 +315,7 @@ async def collect_image(collector: ImageCollector, *, agent: AgentRunner | None,
                 collector.fallback_reason = getattr(failure, "reason", None) or (
                     "timeout" if isinstance(failure, TimeoutError) else "agent_error")
                 collector.log(code=f"fallback:{collector.fallback_reason}")
+                trace.error("image_agent_failed", failure, image=collector.image_id, reason=collector.fallback_reason)
             else:
                 collector.method = "agent"
                 collector.apply_triage(triage)
@@ -304,11 +324,14 @@ async def collect_image(collector: ImageCollector, *, agent: AgentRunner | None,
             await asyncio.wait_for(collector.collect_deterministic(), timeout=remaining())
         elif collector.outcome is None:
             collector.problem = "timeout"
-    except TimeoutError:
+            trace.error("image_timeout", image=collector.image_id, detail="the deadline passed before a search")
+    except TimeoutError as exc:
         collector.problem = "timeout"
-    except Exception:
+        trace.error("image_timeout", exc, image=collector.image_id)
+    except Exception as exc:
         collector.problem = "internal_error"
         collector.log(code="internal_error")
+        trace.error("image_failed", exc, image=collector.image_id)
 
 
 async def collect_evidence(
@@ -324,16 +347,24 @@ async def collect_evidence(
     store = PageStore(backend, log=log)
     collectors = [ImageCollector(image, backend, store, log=log) for image in capture.capture.images]
     limit = asyncio.Semaphore(concurrency)
+    trace.event("collect_start", backend=backend.name, path="agent" if agent else "deterministic",
+                images=[collector.image_id for collector in collectors], image_deadline_s=image_deadline_s,
+                concurrency=concurrency)
 
     async def run(collector: ImageCollector) -> None:
         async with limit:
             collector.started_at = _now()
+            started = time.monotonic()
             await collect_image(collector, agent=agent, deadline_s=image_deadline_s)
+            trace.event("image_done", image=collector.image_id, method=collector.method,
+                        fallback_reason=collector.fallback_reason, problem=collector.problem,
+                        fetches=len(collector.requests), budget_skipped=collector.skipped, duration_ms=_ms(started))
 
     results = await asyncio.gather(*(run(collector) for collector in collectors), return_exceptions=True)
     for collector, result in zip(collectors, results):
         if isinstance(result, BaseException):
             collector.problem = collector.problem or "internal_error"
+            trace.error("image_failed", result, image=collector.image_id)
 
     # Nothing may still be running once the bundle is built: stop leftover searches and fetches.
     leftovers = [c._search_task for c in collectors if c._search_task and not c._search_task.done()]
@@ -479,6 +510,14 @@ def make_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *,
         from pipeline.search.mock_backend import MockSearchBackend
 
         return MockSearchBackend(settings.mock_internet_url, scenario=capture.scenario, delay_ms=settings.mock_delay_ms)
+    if capture.backend == "rekognition":
+        from pipeline.search.rekognition_backend import build_rekognition_backend
+
+        return build_rekognition_backend(settings, capture, run_dir, refresh=refresh)
+    if capture.backend == "facecheck":
+        from pipeline.search.facecheck_backend import build_facecheck_backend
+
+        return build_facecheck_backend(settings, capture, run_dir, refresh=refresh)
     from pipeline.search.serpapi_backend import build_serpapi_backend
 
     return build_serpapi_backend(settings, capture, run_dir, refresh=refresh)
@@ -499,17 +538,20 @@ def run_stage1(run_dir: Path, settings: Settings, *, refresh: bool = False, back
                agent: AgentRunner | None = None) -> RawEvidenceBundle:
     """Read 00_capture.json, collect evidence, validate it against the capture, and write 01_raw_evidence.json."""
     capture = read_artifact(run_dir, 0)
-    if capture.backend == "serpapi" and settings.search_backend != "serpapi":
-        raise ConfigError("this run searches with SerpApi; load settings with the serpapi backend")
+    if capture.backend != "mock" and settings.search_backend != capture.backend:
+        raise ConfigError(f"this run searches with {capture.backend}; load settings with the {capture.backend} backend")
     backend = backend or make_backend(settings, capture, run_dir, refresh=refresh)
     agent = agent or make_agent(settings)
+    # FaceCheck can queue a search for minutes, and backend V3 compares every result's face after
+    # searching, so their images get that much longer.
+    deadline_s = IMAGE_DEADLINE_S + getattr(backend, "extra_deadline_s", 0.0)
 
     def log(**fields: object) -> None:
         log_event(run_dir, stage=1, **fields)
 
     async def collect() -> RawEvidenceBundle:
         try:
-            bundle, _ = await collect_evidence(capture, backend, agent=agent, log=log)
+            bundle, _ = await collect_evidence(capture, backend, agent=agent, log=log, image_deadline_s=deadline_s)
         finally:
             await backend.aclose()
         return bundle
@@ -534,7 +576,10 @@ def format_hits(bundle: RawEvidenceBundle) -> str:
             status += ", errors: " + ", ".join(sorted({error.reason for error in image.errors}))
         lines.append(f"  {image.image_id} ({image.angle}): {status}")
         for hit in image.hits:
-            lines.append(f"    {hit.position:>2}. {hit.title[:60]}  {hit.url}")
+            label = hit.title[:60]
+            if hit.face_score is not None:
+                label = f"face {hit.face_score:>3}/100" + (f" {hit.title[:50]}" if hit.title else "")
+            lines.append(f"    {hit.position:>2}. {label}  {hit.url}")
     html = sum(page.extraction == "html" for page in bundle.pages.values())
     lines.append(f"Pages: {len(bundle.pages)} ({html} HTML, {len(bundle.pages) - html} snippet-only)")
     for page in bundle.pages.values():

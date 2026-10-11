@@ -30,6 +30,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 import httpcore
 import httpx
 
+from pipeline import trace
 from pipeline.config import ConfigError, Settings
 from pipeline.contracts import CaptureArtifact, CaptureImage, FetchedPage, UploadRecord
 from pipeline.platforms import normalize_url
@@ -129,10 +130,10 @@ class PublicOnlyTransport(httpx.AsyncHTTPTransport):
             max_keepalive_connections=10, keepalive_expiry=5.0, network_backend=PublicOnlyNetwork(resolver))
 
 
-def page_client(resolver=None) -> httpx.AsyncClient:
+def page_client(resolver=None, *, accept: str = ", ".join(HTML_TYPES)) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=PublicOnlyTransport(resolver), follow_redirects=False, trust_env=False,
-        timeout=httpx.Timeout(FETCH_TIMEOUT_S), headers={"User-Agent": USER_AGENT, "Accept": ", ".join(HTML_TYPES)},
+        timeout=httpx.Timeout(FETCH_TIMEOUT_S), headers={"User-Agent": USER_AGENT, "Accept": accept},
         cookies=CookieJar(DefaultCookiePolicy(allowed_domains=[])),  # accepts no cookies
     )
 
@@ -156,102 +157,11 @@ def sanitize(payload: dict) -> dict:
     return clean
 
 
-class SerpApiBackend:
-    name = "serpapi"
-    origin = None
-    search_endpoint = "/search.json"
+class LivePages:
+    """Guarded live page fetches for the live search backends; subclasses set self.pages (page_client())."""
+
     fetch_endpoint = "page-fetch"  # live page URLs are evidence, so the log never names them
-
-    def __init__(self, *, api_key: str, capture_dir: Path, host, cache_dir: Path | None = None, refresh: bool = False,
-                 search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None):
-        self.api_key = api_key
-        self.capture_dir = Path(capture_dir)
-        self.host = host  # hosting.S3ImageHost or a test double with upload(data) / delete(record)
-        self.cache_dir = cache_dir
-        self.refresh = refresh
-        self.search_client = search_client or httpx.AsyncClient(timeout=SEARCH_TIMEOUT_S, trust_env=False,
-                                                                headers={"User-Agent": USER_AGENT})
-        self.pages = pages or page_client()
-        self.cache_hits: set[str] = set()
-        self._hosted: dict[str, tuple[str, UploadRecord]] = {}
-        self._hosting_locks: dict[str, asyncio.Lock] = {}
-
-    # Search
-
-    def _image_bytes(self, image: CaptureImage) -> bytes:
-        if not image.file:
-            raise BackendError("invalid_request")
-        # capture.py already checked the path stays inside the folder with no symlinks.
-        return (self.capture_dir / image.file).read_bytes()
-
-    def _cache_path(self, data: bytes) -> Path | None:
-        if self.cache_dir is None:
-            return None
-        return self.cache_dir / f"{hashlib.sha256(data).hexdigest()}-{ENGINE}-{TAB}.json"
-
-    async def reverse_image(self, image: CaptureImage) -> dict:
-        data = await asyncio.to_thread(self._image_bytes, image)
-        cache = self._cache_path(data)
-        if cache is not None and not self.refresh and cache.is_file():
-            try:
-                self.cache_hits.add(image.image_id)
-                return json.loads(cache.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                self.cache_hits.discard(image.image_id)
-        url = await self._hosted_url(image, data)
-        params = {"engine": ENGINE, "url": url, "tab": TAB, "api_key": self.api_key}
-        try:
-            response = await self.search_client.get(SERPAPI_URL, params=params)
-        except httpx.TimeoutException:
-            raise BackendError("timeout") from None
-        except httpx.HTTPError:  # never show the exception: its text can include the request URL and key
-            raise BackendError("connection_error") from None
-        if response.status_code != 200:
-            raise status_error(response.status_code, response.headers)
-        try:
-            payload = response.json()
-        except ValueError:
-            raise BackendError("invalid_response") from None
-        if not isinstance(payload, dict):
-            raise BackendError("invalid_response")
-        clean = sanitize(payload)
-        metadata = clean.get("search_metadata", {})
-        if cache is not None and metadata.get("status") == "Success" and "error" not in clean:
-            await asyncio.to_thread(_write_json, cache, clean)
-        return clean
-
-    async def _hosted_url(self, image: CaptureImage, data: bytes) -> str:
-        lock = self._hosting_locks.setdefault(image.image_id, asyncio.Lock())
-        async with lock:
-            if image.image_id not in self._hosted:
-                try:
-                    self._hosted[image.image_id] = await asyncio.to_thread(self.host.upload, data)
-                except BackendError:
-                    raise
-                except Exception:
-                    raise BackendError("hosting_error") from None
-            return self._hosted[image.image_id][0]
-
-    async def release(self, image: CaptureImage) -> None:
-        hosted = self._hosted.pop(image.image_id, None)
-        if hosted is None:
-            return
-        try:
-            await asyncio.to_thread(self.host.delete, hosted[1])
-        except Exception:
-            pass  # uploads.json still lists it as not deleted; `purge` retries the deletion
-
-    async def aclose(self) -> None:
-        for image_id in list(self._hosted):
-            hosted = self._hosted.pop(image_id)
-            try:
-                await asyncio.to_thread(self.host.delete, hosted[1])
-            except Exception:
-                pass
-        await self.search_client.aclose()
-        await self.pages.aclose()
-
-    # Fetch
+    pages: httpx.AsyncClient
 
     async def fetch(self, url: str) -> FetchedPage:
         try:
@@ -294,6 +204,113 @@ class SerpApiBackend:
         raise BackendError("too_many_redirects")
 
 
+class SerpApiBackend(LivePages):
+    name = "serpapi"
+    origin = None
+    search_endpoint = "/search.json"
+
+    def __init__(self, *, api_key: str, capture_dir: Path, host, cache_dir: Path | None = None, refresh: bool = False,
+                 search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None):
+        self.api_key = api_key
+        self.capture_dir = Path(capture_dir)
+        self.host = host  # a hosting.py host, or a test double with upload(data) / delete(record) and optional close()
+        self.cache_dir = cache_dir
+        self.refresh = refresh
+        self.search_client = search_client or httpx.AsyncClient(timeout=SEARCH_TIMEOUT_S, trust_env=False,
+                                                                headers={"User-Agent": USER_AGENT})
+        self.pages = pages or page_client()
+        self.cache_hits: set[str] = set()
+        self._hosted: dict[str, tuple[str, UploadRecord]] = {}
+        self._hosting_locks: dict[str, asyncio.Lock] = {}
+
+    # Search
+
+    def _image_bytes(self, image: CaptureImage) -> bytes:
+        if not image.file:
+            raise BackendError("invalid_request")
+        # capture.py already checked the path stays inside the folder with no symlinks.
+        return (self.capture_dir / image.file).read_bytes()
+
+    def _cache_path(self, data: bytes) -> Path | None:
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / f"{hashlib.sha256(data).hexdigest()}-{ENGINE}-{TAB}.json"
+
+    async def reverse_image(self, image: CaptureImage) -> dict:
+        data = await asyncio.to_thread(self._image_bytes, image)
+        cache = self._cache_path(data)
+        if cache is not None and not self.refresh and cache.is_file():
+            try:
+                self.cache_hits.add(image.image_id)
+                payload = json.loads(cache.read_text(encoding="utf-8"))
+                trace.event("search_cache_hit", image=image.image_id)
+                return payload
+            except (OSError, ValueError) as exc:
+                self.cache_hits.discard(image.image_id)
+                trace.error("search_cache_unreadable", exc, image=image.image_id)
+        url = await self._hosted_url(image, data)
+        clean = sanitize(await self._get(image, {"engine": ENGINE, "url": url, "tab": TAB}))
+        metadata = clean.get("search_metadata", {})
+        if cache is not None and metadata.get("status") == "Success" and "error" not in clean:
+            await asyncio.to_thread(_write_json, cache, clean)
+        return clean
+
+    async def _get(self, image: CaptureImage, params: dict) -> dict:
+        """One SerpApi search with these parameters plus the key; returns the raw JSON object."""
+        try:
+            response = await self.search_client.get(SERPAPI_URL, params={**params, "api_key": self.api_key})
+        except httpx.TimeoutException:
+            raise BackendError("timeout") from None
+        except httpx.HTTPError:  # never show the exception: its text can include the request URL and key
+            raise BackendError("connection_error") from None
+        if response.status_code != 200:
+            trace.error("serpapi_http_error", image=image.image_id, engine=params.get("engine"),
+                        status=response.status_code, body=response.text[:2000])
+            raise status_error(response.status_code, response.headers)
+        try:
+            payload = response.json()
+        except ValueError:
+            raise BackendError("invalid_response") from None
+        if not isinstance(payload, dict):
+            raise BackendError("invalid_response")
+        return payload
+
+    async def _hosted_url(self, image: CaptureImage, data: bytes) -> str:
+        lock = self._hosting_locks.setdefault(image.image_id, asyncio.Lock())
+        async with lock:
+            if image.image_id not in self._hosted:
+                try:
+                    self._hosted[image.image_id] = await asyncio.to_thread(self.host.upload, data)
+                except BackendError:
+                    raise
+                except Exception:
+                    raise BackendError("hosting_error") from None
+            return self._hosted[image.image_id][0]
+
+    async def release(self, image: CaptureImage) -> None:
+        hosted = self._hosted.pop(image.image_id, None)
+        if hosted is None:
+            return
+        try:
+            await asyncio.to_thread(self.host.delete, hosted[1])
+        except Exception as exc:
+            # uploads.json still lists it as not deleted; `purge` retries the deletion
+            trace.error("image_release_failed", exc, image=image.image_id)
+
+    async def aclose(self) -> None:
+        for image_id in list(self._hosted):
+            hosted = self._hosted.pop(image_id)
+            try:
+                await asyncio.to_thread(self.host.delete, hosted[1])
+            except Exception as exc:
+                trace.error("image_release_failed", exc, image=image_id)
+        close = getattr(self.host, "close", None)
+        if close is not None:
+            await asyncio.to_thread(close)
+        await self.search_client.aclose()
+        await self.pages.aclose()
+
+
 def _login_wall(url: str) -> bool:
     path = urlsplit(url).path.lower().rstrip("/")
     return any(path == login or path.startswith(login + "/") for login in LOGIN_PATHS)
@@ -311,12 +328,25 @@ def _write_json(path: Path, data: dict) -> None:
         raise
 
 
-def build_serpapi_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *, refresh: bool) -> SerpApiBackend:
-    """The live backend for a run: needs SERPAPI_KEY, IMAGE_BUCKET and AWS_REGION."""
-    from pipeline.hosting import host_for
+def open_host(settings: Settings, run_dir: Path):
+    """The run's image host (IMAGE_HOST, hosting.py). A tunnel opens here, before any image's
+    deadline starts; if it can't, no search is made."""
+    from pipeline.hosting import HostingError, host_for
 
+    host = host_for(settings, run_dir)
+    if hasattr(host, "start"):
+        try:
+            host.start()
+        except HostingError as error:
+            raise ConfigError(f"couldn't open the image tunnel ({error}); check the network and retry with "
+                              "`stage 1 --run <run>`, set IMAGE_HOST=s3, or pass --mock") from None
+    return host
+
+
+def build_serpapi_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *, refresh: bool) -> SerpApiBackend:
+    """The live backend for a run: needs SERPAPI_KEY and an image host (IMAGE_HOST, hosting.py)."""
     if not settings.serpapi_key:
         raise ConfigError("SERPAPI_KEY is missing; save it with `python -m pipeline set-key serpapi`, or pass --mock")
     return SerpApiBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir),
-                          host=host_for(settings, run_dir), cache_dir=Path(run_dir) / "cache" / "serpapi",
+                          host=open_host(settings, run_dir), cache_dir=Path(run_dir) / "cache" / "serpapi",
                           refresh=refresh)

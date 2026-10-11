@@ -1,0 +1,1298 @@
+{
+  "mode": "offline",
+  "syntheticDataOnly": true,
+  "datasetVersion": "synthetic-context-v1",
+  "datasetSha256": "ba3046a7584d6e36a649f6b80e3f1a0b9019fa4117d68a394ba867e754b8b369",
+  "labelSource": "agent-authored-provisional",
+  "humanReviewed": false,
+  "accuracyAcceptanceComplete": false,
+  "limitations": [
+    "Offline runs use a fixed abstaining mock, not Jev predictions.",
+    "Provisional agent-authored labels require human review.",
+    "Small synthetic text-only evaluation does not establish population accuracy, facial identity, or image quality.",
+    "Unknown human labels are excluded from binary precision/recall; relevant abstentions count as missed positives.",
+    "Every fixture lacks an image, so pipeline review rate includes image-unavailable flags."
+  ],
+  "versions": {
+    "pipeline": "member3-v1",
+    "typesafeSdk": "0.7.4",
+    "models": [
+      "offline-abstain"
+    ],
+    "rubric": "context-v1"
+  },
+  "metrics": {
+    "caseCount": 40,
+    "expectedCounts": {
+      "high": 10,
+      "low": 10,
+      "unknown": 15,
+      "medium": 5
+    },
+    "confusion": {
+      "high": {
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "unknown": 10
+      },
+      "medium": {
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "unknown": 5
+      },
+      "low": {
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "unknown": 10
+      },
+      "unknown": {
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "unknown": 15
+      }
+    },
+    "truePositive": 0,
+    "falsePositive": 0,
+    "falseNegative": 15,
+    "precision": null,
+    "recallIncludingAbstentions": 0.0,
+    "determinateLabelCount": 25,
+    "abstentionsOnDeterminateCases": 25,
+    "relevantAbstentions": 15,
+    "classificationReviewRate": 1.0,
+    "pipelineReviewRate": 1.0,
+    "ambiguousReviewCoverage": 1.0,
+    "falseExclusionIds": [],
+    "simulatedSuppressLowFalseExclusionIds": [],
+    "deletedCandidateIds": [],
+    "providerErrorCounts": {},
+    "latencySeconds": {
+      "mean": 0.000340020773546712,
+      "p95": 0.0006212079970282502
+    }
+  },
+  "bySplit": {
+    "development": {
+      "caseCount": 24,
+      "expectedCounts": {
+        "high": 6,
+        "low": 6,
+        "unknown": 9,
+        "medium": 3
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 6
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 3
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 6
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 9
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 9,
+      "precision": null,
+      "recallIncludingAbstentions": 0.0,
+      "determinateLabelCount": 15,
+      "abstentionsOnDeterminateCases": 15,
+      "relevantAbstentions": 9,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": 1.0,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.00037952941602270585,
+        "p95": 0.0006301670000539161
+      }
+    },
+    "heldout": {
+      "caseCount": 16,
+      "expectedCounts": {
+        "high": 4,
+        "low": 4,
+        "unknown": 6,
+        "medium": 2
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 4
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 2
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 4
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 6
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 6,
+      "precision": null,
+      "recallIncludingAbstentions": 0.0,
+      "determinateLabelCount": 10,
+      "abstentionsOnDeterminateCases": 10,
+      "relevantAbstentions": 6,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": 1.0,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.00028075780983272125,
+        "p95": 0.0005077079986222088
+      }
+    }
+  },
+  "byTag": {
+    "contradiction": {
+      "caseCount": 3,
+      "expectedCounts": {
+        "unknown": 3
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 3
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 0,
+      "precision": null,
+      "recallIncludingAbstentions": null,
+      "determinateLabelCount": 0,
+      "abstentionsOnDeterminateCases": 0,
+      "relevantAbstentions": 0,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": 1.0,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.00035970799945062026,
+        "p95": 0.0005077079986222088
+      }
+    },
+    "corroborated": {
+      "caseCount": 10,
+      "expectedCounts": {
+        "high": 10
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 10
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 10,
+      "precision": null,
+      "recallIncludingAbstentions": 0.0,
+      "determinateLabelCount": 10,
+      "abstentionsOnDeterminateCases": 10,
+      "relevantAbstentions": 10,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": null,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.00045829999799025246,
+        "p95": 0.0012432500006980263
+      }
+    },
+    "injection": {
+      "caseCount": 2,
+      "expectedCounts": {
+        "unknown": 2
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 2
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 0,
+      "precision": null,
+      "recallIncludingAbstentions": null,
+      "determinateLabelCount": 0,
+      "abstentionsOnDeterminateCases": 0,
+      "relevantAbstentions": 0,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": 1.0,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.0002755624955170788,
+        "p95": 0.00027762499667005613
+      }
+    },
+    "name_collision": {
+      "caseCount": 10,
+      "expectedCounts": {
+        "low": 10
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 10
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 0,
+      "precision": null,
+      "recallIncludingAbstentions": null,
+      "determinateLabelCount": 10,
+      "abstentionsOnDeterminateCases": 10,
+      "relevantAbstentions": 0,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": null,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.00029892919919802805,
+        "p95": 0.00035845799720846117
+      }
+    },
+    "sparse": {
+      "caseCount": 10,
+      "expectedCounts": {
+        "unknown": 10
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 10
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 0,
+      "precision": null,
+      "recallIncludingAbstentions": null,
+      "determinateLabelCount": 0,
+      "abstentionsOnDeterminateCases": 0,
+      "relevantAbstentions": 0,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": 1.0,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.0002683205981156789,
+        "p95": 0.00035066700365860015
+      }
+    },
+    "username_only": {
+      "caseCount": 5,
+      "expectedCounts": {
+        "medium": 5
+      },
+      "confusion": {
+        "high": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "medium": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 5
+        },
+        "low": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        },
+        "unknown": {
+          "high": 0,
+          "medium": 0,
+          "low": 0,
+          "unknown": 0
+        }
+      },
+      "truePositive": 0,
+      "falsePositive": 0,
+      "falseNegative": 5,
+      "precision": null,
+      "recallIncludingAbstentions": 0.0,
+      "determinateLabelCount": 5,
+      "abstentionsOnDeterminateCases": 5,
+      "relevantAbstentions": 5,
+      "classificationReviewRate": 1.0,
+      "pipelineReviewRate": 1.0,
+      "ambiguousReviewCoverage": null,
+      "falseExclusionIds": [],
+      "simulatedSuppressLowFalseExclusionIds": [],
+      "deletedCandidateIds": [],
+      "providerErrorCounts": {},
+      "latencySeconds": {
+        "mean": 0.0003430167998885736,
+        "p95": 0.0006301670000539161
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "case-01",
+      "split": "development",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0012432500006980263
+    },
+    {
+      "id": "case-02",
+      "split": "development",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00039845900028012693
+    },
+    {
+      "id": "case-03",
+      "split": "development",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0006212079970282502
+    },
+    {
+      "id": "case-04",
+      "split": "development",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0004240830021444708
+    },
+    {
+      "id": "case-05",
+      "split": "development",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00042587499774526805
+    },
+    {
+      "id": "case-06",
+      "split": "development",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.000374249997548759
+    },
+    {
+      "id": "case-07",
+      "split": "development",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00035845799720846117
+    },
+    {
+      "id": "case-08",
+      "split": "development",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0003170409981976263
+    },
+    {
+      "id": "case-09",
+      "split": "development",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00029424999956972897
+    },
+    {
+      "id": "case-10",
+      "split": "development",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00028520900377770886
+    },
+    {
+      "id": "case-11",
+      "split": "development",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00030741700174985453
+    },
+    {
+      "id": "case-12",
+      "split": "development",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00034050000249408185
+    },
+    {
+      "id": "case-13",
+      "split": "development",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "skipped",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": null,
+      "sdkVersion": null,
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00023004099784884602
+    },
+    {
+      "id": "case-14",
+      "split": "development",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002815829939208925
+    },
+    {
+      "id": "case-15",
+      "split": "development",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00026666600024327636
+    },
+    {
+      "id": "case-16",
+      "split": "development",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00028141599614173174
+    },
+    {
+      "id": "case-17",
+      "split": "development",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00028204199770698324
+    },
+    {
+      "id": "case-18",
+      "split": "development",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00035066700365860015
+    },
+    {
+      "id": "case-19",
+      "split": "development",
+      "tags": [
+        "username_only"
+      ],
+      "expected": "medium",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0006301670000539161
+    },
+    {
+      "id": "case-20",
+      "split": "development",
+      "tags": [
+        "username_only"
+      ],
+      "expected": "medium",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027970800147159025
+    },
+    {
+      "id": "case-21",
+      "split": "development",
+      "tags": [
+        "username_only"
+      ],
+      "expected": "medium",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027150000096298754
+    },
+    {
+      "id": "case-22",
+      "split": "development",
+      "tags": [
+        "contradiction"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00028841599851148203
+    },
+    {
+      "id": "case-23",
+      "split": "development",
+      "tags": [
+        "contradiction"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00028300000121816993
+    },
+    {
+      "id": "case-24",
+      "split": "development",
+      "tags": [
+        "injection"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027349999436410144
+    },
+    {
+      "id": "case-25",
+      "split": "heldout",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002790829967125319
+    },
+    {
+      "id": "case-26",
+      "split": "heldout",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002737499962677248
+    },
+    {
+      "id": "case-27",
+      "split": "heldout",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027341699751559645
+    },
+    {
+      "id": "case-28",
+      "split": "heldout",
+      "tags": [
+        "corroborated"
+      ],
+      "expected": "high",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002696249939617701
+    },
+    {
+      "id": "case-29",
+      "split": "heldout",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027174999559065327
+    },
+    {
+      "id": "case-30",
+      "split": "heldout",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002678749951883219
+    },
+    {
+      "id": "case-31",
+      "split": "heldout",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027224999939789996
+    },
+    {
+      "id": "case-32",
+      "split": "heldout",
+      "tags": [
+        "name_collision"
+      ],
+      "expected": "low",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002745419988059439
+    },
+    {
+      "id": "case-33",
+      "split": "heldout",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "skipped",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": null,
+      "sdkVersion": null,
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002009169984376058
+    },
+    {
+      "id": "case-34",
+      "split": "heldout",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00025920799816958606
+    },
+    {
+      "id": "case-35",
+      "split": "heldout",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0002632909963722341
+    },
+    {
+      "id": "case-36",
+      "split": "heldout",
+      "tags": [
+        "sparse"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00026737499865703285
+    },
+    {
+      "id": "case-37",
+      "split": "heldout",
+      "tags": [
+        "username_only"
+      ],
+      "expected": "medium",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00026029199943877757
+    },
+    {
+      "id": "case-38",
+      "split": "heldout",
+      "tags": [
+        "username_only"
+      ],
+      "expected": "medium",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027341699751559645
+    },
+    {
+      "id": "case-39",
+      "split": "heldout",
+      "tags": [
+        "contradiction"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.0005077079986222088
+    },
+    {
+      "id": "case-40",
+      "split": "heldout",
+      "tags": [
+        "injection"
+      ],
+      "expected": "unknown",
+      "predicted": "unknown",
+      "status": "ok",
+      "sourceType": "unknown",
+      "reviewRequired": true,
+      "classificationReviewRequired": true,
+      "retained": true,
+      "includedInRankedList": true,
+      "providerErrors": [],
+      "model": "offline-abstain",
+      "sdkVersion": "offline-mock",
+      "rubricVersion": "context-v1",
+      "latencySeconds": 0.00027762499667005613
+    }
+  ]
+}

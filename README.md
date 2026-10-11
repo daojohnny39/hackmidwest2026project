@@ -1,289 +1,162 @@
-# Hack Midwest: mock internet
+# CyberPI
+*Your private investigator for personal information.*
 
-A local internet simulator for developing search, scraping, deduplication, and
-profile parsing without spending search credits. It uses Python's standard
-library and a persistent SQLite database. No API keys, package installs, cloud
-services, or live search requests are needed.
+## Member 3: candidate image processing
 
-## Run it
+Stage A's backend module validates retrieved JPEG/PNG images, detects up to two
+faces using the existing MediaPipe code, stores normalized crops and returns
+quality/review flags with source provenance. [Stage B](docs/member-3-stage-b.md)
+adds server-side Jev contextual relevance, source categories, duplicate-record
+reuse and stable ordering while preserving uncertain results for review.
+[Stage C](docs/member-3-stage-c.md) connects both stages through one callable,
+an authenticated local FastAPI adapter and a Strands tool, with a combined batch
+deadline and exact-image analysis reuse. Its evaluation runner includes 40
+synthetic cases, provisional labels and an explicitly mocked offline report.
+Live Jev acceptance needs a server-side `TYPESAFE_API_KEY`; human label review
+and live accuracy evaluation remain outstanding.
+Quality thresholds are provisional; authorized real-photo acceptance is pending.
 
-From this repository directory (`Project Directory/`), with Python 3.10 or newer:
+## Front-facing automatic capture
 
-```bash
-python3 -m mock_internet serve
-```
+The active first-round scope is **one automatic front-facing snapshot**, with live
+guidance for face position and head angle. See the
+[front capture specification](docs/front-capture-spec.md) for the rules, guided UI,
+capture output, verification plan, and future **AWS Strands Stage 2 handoff**.
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765) to search and browse the fictional
-web. The first start creates and seeds `data/mock_internet.sqlite3`; later starts
-preserve the database. On Windows, `py -3` can replace `python3`.
+Yaw, pitch, and roll must each be within ±5° of front-facing neutral, and angle and
+position checks must pass for 400 milliseconds before capture. Capture stops after
+one successful photo; retake is explicit. Framing thresholds are initial settings
+under test. The angle tolerance does not guarantee physical measurement accuracy.
 
-In a second terminal, from the same directory:
+The [earlier multi-perspective design](docs/automatic-capture-spec.md) is retained
+as future reference; left/right capture is deferred. The automatic capture engine,
+guidance, reset logging, and `useAutoCapture` integration hook are implemented.
+The camera page uses automatic capture by default. Choose **Start camera**, follow
+the positioning guidance, and hold steady; the app takes the photo once all checks
+pass. Choose **Manual** for a single-photo manual reference, or use `?capture=manual`.
+The original manual checkpoint remains available at `?mode=manual`.
+Stage 1 produces a JPEG and metadata; a later backend adapter can hand that result
+to the AWS Strands workflow. No upload or AWS execution is implemented.
 
-```bash
-# End-to-end search, combine three image fixture result sets, and scrape their pages.
-python3 -m mock_internet demo
+## OpenCV and MediaPipe setup
 
-# Integration tests create their own temporary database and HTTP server.
-python3 -m unittest discover -s tests -v
-```
+CyberPI helps users investigate where their likeness appears online and what
+that exposure could mean for their personal information.
 
-Optional server settings:
+The project's goal is to let a user take a picture with the camera built into
+the web application, use facial recognition to find public images of that user,
+label the certainty of each match, and assess the **Threat Level** of where each
+image was found. Potential concerns include sketchy websites, impersonation,
+and possible catfishing.
 
-```bash
-python3 -m mock_internet serve --port 9000 --db data/another-world.sqlite3
-```
+## Intended workflow
 
-For a different port, set `MOCK_INTERNET_URL=http://127.0.0.1:9000` in the environment
-of the client/demo process. `.env.example` documents the setting; `.env` files are
-not loaded automatically. The default listener is `127.0.0.1`.
+1. **Capture a photo:** take a picture of yourself using the in-app camera.
+2. **Find public images:** search for publicly accessible images that may show you
+   using facial recognition.
+3. **Review match certainty:** label how confidently each result matches your face.
+4. **Assess the Threat Level:** evaluate the source and context of each result for
+   signs of suspicious use, including possible catfishing or impersonation.
 
-## What's in the database
+Match certainty and Threat Level answer different questions: how likely the
+image is to show you, and how concerning its appearance on that site may be.
 
-The seed contains **six fictional people, 47 pages, 73 links, and six image lookup
-fixtures**. All names, companies, posts, and events are invented for testing.
+## Current implementation
 
-| Site | Content |
+The repository currently implements the camera and local face-analysis foundation:
+
+- Browser camera access, camera switching, and photo capture.
+- MediaPipe Face Landmarker analysis of each captured photo, including face
+  counts, facial landmarks, and transformation matrices.
+- Automatic capture integrated with optional subject details and a preview of fictional findings; manual capture requires one reference photo.
+- Automatic photo/metadata downloads and a manual landmark overlay; the original manual checkpoint also exports the photo, overlay, and analysis JSON.
+- Separate Python tools for initializing the detector and analyzing a local photo.
+
+Public-image search, facial identity matching, match-certainty labels, and Threat
+Level assessment are planned features. The existing landmark detector locates
+facial geometry; it does not identify a person or search the web.
+
+Current browser analysis runs on the user's device. Captured photos stay in
+browser memory until deleted or the page is closed, and analysis does not upload
+them. The web app currently runs without a Python backend or API credentials.
+
+## Technologies used
+
+| Technology | Role |
 | --- | --- |
-| `linkup.test` | Professional profiles and employment bios |
-| `chatter.test` | Social profiles and individual posts |
-| `photogram.test` | Photo-oriented bios and a private album |
-| `codeforge.test` | Developer profiles |
-| `fieldnotes.test` | Blog profiles and a deleted post |
-| `riverbend-news.test` | An interview mentioning multiple people |
-| `riverbend-makers.test` | A community event with cross-links |
-| `archive.test` | An outdated speaker biography |
-| `syndicated.test` | A duplicate article with a canonical link |
-| `everyday.test` | Unrelated background articles |
+| React 19 + TypeScript | Web application and camera interface |
+| Vite 8 | Frontend development server and production builds |
+| Browser MediaDevices API + Canvas | Camera streams, photo capture, and overlays |
+| MediaPipe Tasks Vision + WebAssembly | Local facial-landmark analysis in the browser |
+| Python + MediaPipe | Standalone detector and photo-analysis tools |
+| OpenCV (`opencv-contrib-python`) + NumPy | Image decoding, color conversion, and landmark overlays in Python |
+| Playwright | Browser integration tests with simulated camera inputs |
+| Oxlint + Python `unittest` | Frontend linting and Python tests |
 
-Alex Morgan the Kansas City engineer and Alex Morgan the Portland photographer
-are different people. Sam Rivera also posts as Sammy Rivera. Some profiles list
-outdated employers, while Casey Brooks has only a small public footprint.
+## Run a development environment
 
-Pages contain normal HTML: titles, bios, timestamps, links, Open Graph metadata,
-and JSON-LD. Every navigable link stays on the local server. Original fictional
-URLs are retained in search result metadata as `mock_original_url`.
+Run the setup commands from the repository root unless indicated otherwise.
+The commands below use a macOS/Linux shell.
 
-## API
+### Step 1: Prerequisites
 
-All endpoints use GET. No authentication is required.
+- Node.js **20.19+ in the 20.x line, or 22.12+**, with npm, as required by the
+  installed Vite version.
+- A browser and a camera for the interactive capture flow.
+- `curl` for the model download, or download the file manually from the URL below.
+- Python **3.12+ (tested on Python 3.12)** if you want to use the optional Python tools.
 
-| Endpoint | Purpose |
-| --- | --- |
-| `/health` | Readiness and database counts |
-| `/search.json?q=Alex+Morgan` | Text search (`/search` and `/api/search` also work) |
-| `/search.json?engine=yandex_images&url=mock://alex-front` | Canned image search results |
-| `/api/reverse-image?image_id=alex-front` | Simpler fixture lookup endpoint |
-| `/fetch?url=https%3A%2F%2Flinkup.test%2Fin%2Falexbuilds` | JSON containing page HTML, text, and links |
-| `/web/linkup.test/in/alexbuilds` | Direct HTML for browsers and scrapers |
-| `/fixtures` | Available image fixtures, platforms, and scenarios |
-| `/images/alex-front.svg` | Local placeholder image for that fixture |
-| `/stats` | In-memory request/status counts and database counts |
-
-Text search returns `organic_results`. Image lookup returns `image_results` with
-`title`, `link`, `snippet`, `source`, `thumbnail`, and `original_image` fields.
-The image result shape follows a subset of the documented
-[SerpApi Yandex reverse-image contract](https://serpapi.com/yandex-reverse-image-api).
-This is a small API-compatible surface for our tools, not a full SerpApi emulator.
-Unknown engines and misspelled fixture IDs return HTTP 400.
-
-Search supports:
-
-- `q`: case-insensitive terms (all must match), quoted phrases, `-excluded` terms,
-  and `site:chatter.test` filters. Yandex-style `text` is accepted as an alias.
-- `site`: an optional separate hostname filter; can be used without `q`.
-- `platform`: `professional`, `social`, `photos`, `code`, `blog`, or `web`.
-- `num`: page size, 1–100; default 10.
-- `start`: zero-based offset; default 0. More results include a local
-  `serpapi_pagination.next` URL.
-- `scenario`: one of the cases below.
-- `delay_ms`: deterministic latency from 0–5000 ms, also supported on fetch and HTML routes.
-
-Search ranking is deterministic keyword matching, not semantic search. Platform
-and site filters apply to text searches. Stored image fixture results use their
-seeded ordering. All search result `link` values are directly fetchable local URLs.
-
-Examples:
+### Step 2: Install frontend dependencies
 
 ```bash
-curl --get http://127.0.0.1:8765/search.json \
-  --data-urlencode 'q="Alex Morgan" -photographer' \
-  --data-urlencode 'platform=professional'
-
-curl --get http://127.0.0.1:8765/search.json \
-  --data-urlencode 'engine=yandex_images' \
-  --data-urlencode 'url=mock://alex-front' \
-  --data-urlencode 'scenario=ambiguous'
-
-curl --get http://127.0.0.1:8765/fetch \
-  --data-urlencode 'url=https://linkup.test/in/alexbuilds'
+cd frontend
+npm ci
+cd ..
 ```
 
-## Connect future agent tools
+### Step 3: Download the Face Landmarker model
 
-Use this adapter as the search/scrape boundary:
-
-```python
-from mock_internet.client import MockInternetClient, MockHTTPError
-
-internet = MockInternetClient()  # Reads MOCK_INTERNET_URL; defaults to localhost.
-
-results = internet.search('"Alex Morgan"', num=20)["organic_results"]
-for hit in results:
-    try:
-        page = internet.fetch(hit["link"])
-        print(page["title"], page["text"], page["links"])
-    except MockHTTPError as error:
-        print("Simulated page failure:", error.status)
-
-fixtures = internet.reverse_image("alex-front")["image_results"]
-```
-
-The adapter only accepts HTTP loopback origins, ignores proxy settings, and never
-follows redirects or falls back to live search. `/fetch` looks up the supplied URL
-in SQLite; it never fetches that URL over the internet. Unknown pages return 404.
-The server does not read search credentials, and it excludes `api_key` from
-responses and request logs.
-
-Existing clients that still call real search providers must be changed to use this
-adapter or explicitly configured to use this server. Running the mock server does
-not intercept other applications' traffic. No Strands, Jev, or LLM calls are made
-by this service or demo; model calls added to another pipeline remain separate.
-
-Image lookup is a **fixture mapping**, not image recognition. Use `alex-front`,
-`alex-left`, `alex-right`, `sam-front`, `casey-front`, or `unknown`. The three Alex
-fixtures overlap, so merging them exercises deduplication. `unknown` deliberately
-has zero matches. Input can be an `image_id`, a `mock://` URL, or an exact local
-image URL returned by `/fixtures`. SVGs are labeled placeholders, not photographs.
-
-## Repeatable test cases
-
-| Scenario | Expected behavior |
-| --- | --- |
-| `default` | Seeded results, including natural text-search ambiguity |
-| `empty` | Empty search results |
-| `ambiguous` | Alex image fixtures also return the other Alex's profiles |
-| `duplicates` | Repeated hits; Alex image fixtures also include a mirrored article |
-| `stale` | Alex image fixtures include an old biography and deleted page |
-| `rate_limited` | HTTP 429 and `Retry-After: 1` |
-| `server_error` | HTTP 503 and `Retry-After: 1` |
-
-Scenarios are per-request, so concurrent tests cannot change each other's world.
-The `ambiguous` and `stale` additions specifically apply to the Alex image fixtures;
-text searches already retrieve the same underlying pages when their terms match.
-The two error scenarios also work with `/fetch` and direct `/web/` routes.
-The deleted post always returns 404; the private album always returns 403.
-The client exposes status, parsed response body, and headers on `MockHTTPError`.
-
-The integration suite covers search and filters, pagination, all page/link targets,
-the SerpApi subset, multi-image deduplication, concurrent requests, real HTTP
-failures, timeouts, persistence/reset, and blocked external connections.
-
-## Edit or reset the world
-
-Edit `mock_internet/seed.py`: `PEOPLE` defines fictional identities and `build_world()`
-defines profiles, posts, cross-links, and image result sets. Stop the server, then:
+Both the web app and Python tools use `models/face_landmarker.task`. The model is
+excluded from Git and must be downloaded after cloning:
 
 ```bash
-# Replaces all data in this mock database with the seed world.
-python3 -m mock_internet seed --reset
-python3 -m mock_internet serve
+mkdir -p models
+curl --fail --location --retry 3 \
+  --output models/face_landmarker.task.part \
+  'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task' \
+  && mv models/face_landmarker.task.part models/face_landmarker.task
 ```
 
-Use `--db` on both commands if you use a custom database path. Running `seed`
-without `--reset` preserves existing data. Direct SQLite edits also persist across
-server restarts. Database files and local `.env` files are gitignored.
+Alternatively, download that URL in your browser and save the file as
+`models/face_landmarker.task` in the repository root.
 
-Tables: `entities`, `pages`, `links`, `image_fixtures`, `image_matches`, `metadata`.
-For assertions, `pages.entity_id` provides synthetic ground truth. Ground-truth
-IDs are absent from search responses and scraped HTML, so retrieval tests must
-work with the visible content. Request counters reset when the server restarts;
-page data persists.
-
-## Agent pipeline
-
-The pipeline in `pipeline/` follows `docs/agent-pipeline-spec.md`; the spec's opening
-lines say which sections are built. Section 1 (search and scrape) runs one collector
-per image: a reverse-image search, then page fetches and scraping, merged into
-`runs/<run_id>/01_raw_evidence.json`. It needs Python 3.12 and the packages in
-`requirements.txt`. If your Python has no pip, [uv](https://docs.astral.sh/uv/) can
-create the environment:
+### Step 4: Start the web app
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements.txt
+cd frontend
+npm run dev
 ```
 
-Search uses SerpApi by default. Save your key once; the prompt hides what you
-type, checks the key with SerpApi's free Account API (no search credits), and
-writes it to the gitignored `.env`, creating it from `.env.example` if needed:
+Open the URL printed by Vite (normally `http://localhost:5173`). Choose **Start
+camera**, accept consent, and allow camera access. Follow the guidance and hold
+steady to capture one photo automatically. Choose **Manual** to take one photo
+yourself and review its face count and landmark overlay. Subject details are
+optional; a valid photo and authorization enable **Preview sample findings**.
+The preview uses fictional findings and does not upload the photo.
 
-```bash
-.venv/bin/python -m pipeline set-key serpapi
-```
+The development and build scripts automatically copy the model and MediaPipe
+WebAssembly files into `frontend/public/mediapipe/`. Production builds include
+these assets, so analysis does not need a CDN at runtime.
 
-`set-key typesafe`, `set-key openrouter`, and `set-key anthropic` save the other
-keys the same way. A TypeSafe (Jev) key is checked first by listing TypeSafe's
-models, which makes no Jev decision; a rejected key isn't saved. Saving a key doesn't
-switch anything on: to use Jev, set `JEV_MODE=typesafe` in `.env` and add `--models`
-to `run` or `stage`, since those calls are paid.
+Camera access requires a secure browser context. `localhost` works for local
+development; testing from a phone or another device requires serving the app
+over HTTPS. See the [frontend README](frontend/README.md) for camera details and
+additional browser-test instructions.
 
-```bash
-.venv/bin/python -m pipeline set-key typesafe
-```
+## Optional Python development tools
 
-Add `--mock` to search the local mock internet instead
-(no key or credits needed), or set `SEARCH_BACKEND=mock` in `.env`. Start the mock
-first with `python3 -m mock_internet serve`.
-
-```bash
-# Validate a mock capture bundle and write runs/<run_id>/00_capture.json.
-.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 0 --mock
-
-# Search and scrape (Section 1) on the mock internet, printing hits per image.
-.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 1 --mock
-.venv/bin/python -m pipeline run --capture tests/fixtures/captures/alex --until 1 --mock --scenario ambiguous
-
-# Re-run one stage of a saved run (later stages' outputs are deleted first).
-.venv/bin/python -m pipeline stage 1 --run runs/<run_id>
-
-# Rebuild accounts, profiles, and trust graphs (Section 2) from a run's saved evidence.
-.venv/bin/python -m pipeline stage 2 --run runs/<run_id>
-
-# Delete a run (and, with --include-capture, its source folder under captures/).
-.venv/bin/python -m pipeline purge --run runs/<run_id>
-
-# Offline test suite: mock internet plus pipeline.
-.venv/bin/python -m unittest discover -s tests
-```
-
-Every run needs a capture folder whose `manifest.json` records the participant's
-consent (spec 0.4). SerpApi search (the default) and `--models` (paid model calls)
-send data to outside services, so both require `consent.external_processing: true`,
-and SerpApi runs need real image files. The mock fixtures under `tests/fixtures/`
-require the mock backend (`--mock` or `SEARCH_BACKEND=mock`). The offline tests
-always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
-
-SerpApi's Yandex engine only takes an image URL, so a SerpApi run hosts each photo
-briefly in S3 (spec 1.2): set `IMAGE_BUCKET` (a private bucket) and `AWS_REGION` in
-`.env`, with AWS credentials from `aws configure` or `AWS_PROFILE`. Each image is
-uploaded under a random key, shared through a presigned URL valid for 10 minutes, and
-deleted after its search; `uploads.json` in the run folder tracks it until then, and
-`purge` deletes anything left over. Try one consenting teammate's photo first. It
-costs one search and never calls a model:
-
-```bash
-.venv/bin/python -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
-```
-
-With `LLM_MODE=anthropic` (or `bedrock`) and `--models`, each image gets its own
-Strands agent that decides which hits to fetch and which pages are about the
-person. Without them, stage 1 fetches every hit in rank order and follows account
-links from the profiles it finds. If an agent fails, its image falls back to that
-deterministic path.
-
-## OpenCV setup
-
-Run from the project root using Python 3.13:
+From the repository root, confirm that `python3 --version` reports Python 3.12
+or newer, then create a virtual environment and install the pinned dependencies:
 
 ```bash
 python3 -m venv .venv
@@ -291,17 +164,83 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`.
+On Windows PowerShell, confirm the version with `py -3 --version`, create the
+environment with `py -3 -m venv .venv`, and activate it with
+`.venv\Scripts\Activate.ps1`.
 
-## Run the OpenCV tests
+Use only `opencv-contrib-python` in this environment; the other OpenCV package
+variants share its `cv2` module. If migrating an environment with an older
+`opencv-python` installation, uninstall both variants and reinstall the requirements:
 
-With the virtual environment activated:
+```bash
+python -m pip uninstall -y opencv-python opencv-contrib-python
+python -m pip install -r requirements.txt
+```
+
+With the model downloaded in Step 3, verify detector initialization:
+
+```bash
+python -m face_landmarker
+```
+
+Analyze a local JPEG or PNG:
+
+```bash
+python -m photo_checkpoint "/absolute/path/to/your/photo.jpg"
+```
+
+Each run writes a landmark overlay (`landmarks.png`) and an analysis report
+(`results.json`) into a new `checkpoints/photo-.../` directory. The report includes
+image dimensions, face counts, landmarks, and transformation matrices. The
+detector processes individual images on the CPU and returns at most two faces.
+The `checkpoints/`, `photos/`, and downloaded model files are ignored by Git.
+
+## Build and validation
+
+From `frontend/`:
+
+```bash
+npm run lint
+npm run build
+npm run preview
+```
+
+The build runs TypeScript checks and writes the production app to `frontend/dist/`.
+The preview command serves that build locally.
+
+To run browser tests, install the Playwright engines and select a project:
+
+```bash
+npx playwright install firefox webkit
+npm test -- --project=firefox
+npm test -- --project=webkit
+```
+
+Open the local Vite URL and choose **Start camera**. Follow the guidance; the
+front photo is captured automatically once angle and framing checks pass for
+400 ms. Download the photo and metadata, or choose **Retake front photo**.
+Use `?mode=manual` for the separate checkpoint with landmark overlays and analysis JSON.
+Model assets are copied automatically before development and
+production builds. See the [frontend README](frontend/README.md) for details and
+browser tests. This connection requires no Python endpoint or Vite API proxy.
+
+## Run the tests
+
+From the repository root, with the Python environment activated:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The tests check BGR-to-RGB color conversion and JPEG saving and loading using
-synthetic images. They use Python's built-in `unittest` module and require no
-camera, MediaPipe model, or additional testing package. Temporary images are
-automatically deleted after the test.
+Tests that use the real Python detector are skipped if the model is absent.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `frontend/` | React app, camera hook, browser face analysis, and Playwright tests |
+| `face_landmarker.py` | Reusable Python detector setup and initialization check |
+| `photo_checkpoint.py` | Local photo analysis, landmark overlay, and JSON export |
+| `requirements.txt` | Pinned Python dependencies |
+| `tests/` | Python image-processing and detector tests |
+| `models/` | Downloaded Face Landmarker model (ignored by Git) |

@@ -2,10 +2,12 @@
 
 OfflineTestCase forces the mock/fake/off modes regardless of .env, clears every
 credential variable, stops load_settings() from reading the repo's .env (which
-may hold real keys), and makes any non-loopback socket connection fail.
+may hold real keys) and boto3 from reading ~/.aws, and makes any non-loopback
+socket connection fail.
 """
 
 import ipaddress
+import json
 import os
 import socket
 import tempfile
@@ -16,22 +18,32 @@ from unittest.mock import patch
 
 from mock_internet.server import create_server
 from pipeline.config import load_settings
+from pipeline.trace import TRACE_FILE
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_CAPTURES = REPO_ROOT / "tests" / "fixtures" / "captures"
 
 PIPELINE_ENV = (
-    "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS",
-    "SERPAPI_KEY", "IMAGE_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN", "AWS_PROFILE", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
-    "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
+    "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "FACECHECK_API_KEY", "FACECHECK_DEMO",
+    "REKOGNITION_ENGINES", "REKOGNITION_MIN_SIMILARITY", "SERPAPI_KEY", "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "JEV_MODE", "JEV_MODEL",
+    "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
 )
 
-OFFLINE_ENV = {"SEARCH_BACKEND": "mock", "JEV_MODE": "fake", "LLM_MODE": "off"}
+# boto3 reads ~/.aws (where `set-key aws` saves keys) unless these point elsewhere; os.devnull is never a file it loads.
+# With no credentials it would also ask the EC2 instance metadata service, a network call.
+OFFLINE_ENV = {"SEARCH_BACKEND": "mock", "JEV_MODE": "fake", "LLM_MODE": "off",
+               "AWS_SHARED_CREDENTIALS_FILE": os.devnull, "AWS_CONFIG_FILE": os.devnull,
+               "AWS_EC2_METADATA_DISABLED": "true"}
 
 
 class ExternalNetworkBlocked(RuntimeError):
     pass
+
+
+def read_trace(folder: Path) -> list[dict]:
+    """The parsed lines of folder/trace.jsonl."""
+    return [json.loads(line) for line in (Path(folder) / TRACE_FILE).read_text().splitlines()]
 
 
 def _is_loopback(address):

@@ -1,7 +1,7 @@
 """Load and validate a capture bundle (spec 0.4): the consent gate for every run.
 
 Consent is checked before any image file is opened. Mock bundles name seed
-fixtures and carry no files (--mock); SerpApi runs need real JPEG or PNG files inside
+fixtures and carry no files (--mock); live runs need real JPEG or PNG files inside
 the capture folder. This module makes no network calls.
 """
 
@@ -109,7 +109,7 @@ def _check_consent(raw: object, *, external: bool) -> None:
         raise ConsentError("consent.confirmed is not exactly true; refusing to run")
     if external and raw.get("external_processing") is not True:
         raise ConsentError(
-            "SerpApi search and --models send data to outside services; consent.external_processing must be exactly true"
+            "live search and --models send data to outside services; consent.external_processing must be exactly true"
         )
     try:
         Consent.model_validate(raw)
@@ -120,7 +120,7 @@ def _check_consent(raw: object, *, external: bool) -> None:
 def _check_mock_image(image: CaptureImage) -> None:
     label = f"image {image.image_id}"
     if image.mock_fixture is None:
-        raise CaptureError(f"{label} has a file but no mock_fixture; real images need SerpApi search (run without --mock)")
+        raise CaptureError(f"{label} has a file but no mock_fixture; real images need live search (run without --mock)")
     if image.mock_fixture not in MOCK_FIXTURES:
         known = ", ".join(sorted(MOCK_FIXTURES))
         raise CaptureError(f"{label}: unknown mock_fixture {image.mock_fixture!r} (known: {known})")
@@ -130,9 +130,9 @@ def _check_live_image(folder: Path, image: CaptureImage) -> str | None:
     """Validate one real image file; return a warning for small images."""
     label = f"image {image.image_id}"
     if image.mock_fixture is not None:
-        raise CaptureError(f"{label}: mock_fixture is for tests only; SerpApi search needs a real image file (use --mock for fixtures)")
+        raise CaptureError(f"{label}: mock_fixture is for tests only; live search needs a real image file (use --mock for fixtures)")
     if not image.file:
-        raise CaptureError(f"{label}: SerpApi search needs a file")
+        raise CaptureError(f"{label}: live search needs a file")
     relative = Path(image.file)
     if relative.anchor or not relative.parts or ".." in relative.parts:
         raise CaptureError(f"{label}: file {image.file!r} must be a relative path inside the capture folder")

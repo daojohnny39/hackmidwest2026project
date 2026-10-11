@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "pipelineVersion": "member3-v1",
+  "requestId": "request-example-001",
+  "captureId": "capture-example-001",
+  "candidates": [
+    {
+      "id": "candidate-001",
+      "sourceId": "source-001",
+      "imageUrl": "https://example.com/images/alex-example.jpg",
+      "sourceUrl": "https://example.com/people/alex-example",
+      "assetId": "0123456789abcdef0123456789abcdef",
+      "disposition": "candidate",
+      "duplicateOf": null,
+      "imageAnalysis": {
+        "status": "error",
+        "valid": null,
+        "faceCount": null,
+        "maxFaces": 2,
+        "atDetectorLimit": false,
+        "crops": [],
+        "quality": "unknown"
+      },
+      "classification": {
+        "status": "skipped",
+        "relevance": "unknown",
+        "sourceType": "unknown",
+        "reasons": [
+          {
+            "code": "insufficient_context",
+            "message": "A name mention alone does not support contextual relevance.",
+            "field": "pageTitle",
+            "excerpt": "Alex Example",
+            "method": "rule"
+          }
+        ],
+        "model": null,
+        "rubricVersion": "context-v1"
+      },
+      "reviewRequired": true,
+      "reviewReasons": ["image_analysis_failed", "insufficient_context"],
+      "errors": [
+        {
+          "stage": "image",
+          "code": "worker_timeout",
+          "message": "Image analysis exceeded its time limit.",
+          "retryable": true
+        }
+      ]
+    }
+  ],
+  "rankedCandidateIds": ["candidate-001"],
+  "reviewCandidateIds": ["candidate-001"]
+}
