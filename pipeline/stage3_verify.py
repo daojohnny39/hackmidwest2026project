@@ -49,7 +49,7 @@ WEIGHTS = {
 PLATFORM_CAP = 5
 # Face scores that map to face_match 0 and 1, per backend: the floors of its "possible"/"uncertain" band
 # and of its "strong"/"certain" band (SCORE_BANDS in each backend). Scores in between scale linearly.
-FACE_SCORE_RANGE = {"rekognition": (90, 99), "facecheck": (70, 90)}
+FACE_SCORE_RANGE = {"rekognition": (90, 99), "fakedb": (90, 99), "facecheck": (70, 90)}
 
 ACCEPT_CONFIDENCE = 0.80
 ACCEPT_LEAD = 0.20

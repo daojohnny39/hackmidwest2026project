@@ -302,7 +302,7 @@ class BuildTests(FaceCheckTestCase):
         settings = load_settings(backend="facecheck", environ=env, dotenv_path=None)
         bundle = CaptureBundle.model_validate({
             "session_id": "fc-test", "captured_at": "2026-10-10T12:00:00Z",
-            "consent": {"confirmed": True, "participant": "Pat", "confirmed_at": "2026-10-10T11:59:00Z",
+            "consent": {"confirmed": True, "confirmed_at": "2026-10-10T11:59:00Z",
                         "external_processing": True},
             "images": [IMAGE.model_dump()],
         })

@@ -6,7 +6,10 @@
   "scripts": {
     "prepare:vision": "node scripts/prepare-vision.mjs",
     "predev": "npm run prepare:vision",
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "predev:fake": "npm run prepare:vision",
+    "dev:fake": "node scripts/dev.mjs --fake-db",
+    "dev:frontend": "npm run prepare:vision && vite",
     "prebuild": "npm run prepare:vision",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

@@ -661,7 +661,7 @@ class StageRunnerTests(OfflineTestCase):
             "run_id": raw.run_id, "capture_dir": "captures/x", "backend": backend, "scenario": "default",
             "llm_mode": "off", "jev_mode": "fake",
             "capture": {"session_id": raw.run_id.rsplit("-", 1)[0], "captured_at": WHEN, "images": images,
-                        "consent": {"confirmed": True, "participant": "Fictional", "confirmed_at": WHEN,
+                        "consent": {"confirmed": True, "confirmed_at": WHEN,
                                     "external_processing": True}},
         })
         for stage, artifact in ((0, capture), (1, raw), (2, profiles)):

@@ -3,9 +3,14 @@
   "captured_at": "2026-10-10T14:02:11Z",
   "consent": {
     "confirmed": true,
-    "participant": "Alex Morgan (fictional)",
     "confirmed_at": "2026-10-10T14:01:50Z",
     "external_processing": true
+  },
+  "subject": {
+    "first_name": "Alex",
+    "last_name": "Morgan",
+    "city": "Riverbend",
+    "age": null
   },
   "images": [
     { "image_id": "img-1", "angle": "front", "yaw": 1.5, "pitch": -2.0, "roll": 0.3, "mock_fixture": "alex-front" },

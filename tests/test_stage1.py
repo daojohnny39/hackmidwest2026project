@@ -249,7 +249,7 @@ class FakeBackend:
 def live_capture(*image_ids):
     bundle = CaptureBundle.model_validate({
         "session_id": "live-test", "captured_at": "2026-10-10T12:00:00Z",
-        "consent": {"confirmed": True, "participant": "Pat", "confirmed_at": "2026-10-10T11:59:00Z",
+        "consent": {"confirmed": True, "confirmed_at": "2026-10-10T11:59:00Z",
                     "external_processing": True},
         "images": [{"image_id": image_id, "file": f"{image_id}.jpg", "angle": "front"} for image_id in image_ids],
     })

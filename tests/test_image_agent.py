@@ -14,7 +14,7 @@ from strands.models import Model
 
 from pipeline.capture import load_capture
 from pipeline.contracts import CaptureArtifact
-from pipeline.image_agent import make_agent_runner, system_prompt
+from pipeline.image_agent import agent_prompt, make_agent_runner, system_prompt
 from pipeline.search.mock_backend import MockSearchBackend
 from pipeline.stage1_collect import collect_evidence
 from pipeline.trace import tracing
@@ -216,6 +216,20 @@ class ImageAgentTests(MockServerTestCase):
         self.assertEqual(self.mock_count("/api/reverse-image"), 3)
         self.assertEqual(len(bundle.pages), 9)
         self.assertTrue(all(page.relevant for page in bundle.pages.values()))
+
+    def test_prompt_adds_the_subject_details_only_when_given(self):
+        from pipeline.contracts import CaptureImage, Subject
+        from pipeline.stage1_collect import ImageCollector
+
+        image = CaptureImage(image_id="front", angle="front", file="front.jpg")
+        bare = agent_prompt(ImageCollector(image, None, None))
+        self.assertEqual(bare, "Collect the public pages for image front (facial angle: front). "
+                               "You may fetch at most 12 pages.")
+        self.assertEqual(agent_prompt(ImageCollector(image, None, None, subject=Subject())), bare)
+        prompt = agent_prompt(ImageCollector(image, None, None, subject=Subject(last_name="Morgan", age=32)))
+        self.assertTrue(prompt.startswith(bare))
+        self.assertIn("gave these details about themselves: name: Morgan; age: 32.", prompt)
+        self.assertIn("may be impersonation", prompt)
 
     def test_trace_records_each_conversation_and_why_agents_fell_back(self):
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))

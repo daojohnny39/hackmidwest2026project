@@ -41,9 +41,9 @@ from pipeline.contracts import (
     validate_references,
 )
 from pipeline.jev import Jev, noul
-from pipeline.names import differing_facts, looks_like_person_name, name_in_text, names_compatible, same_fact
+from pipeline.names import differing_facts, looks_like_person_name, name_in_text, name_tokens, names_compatible, same_fact
+from pipeline.platforms import PLATFORM_LABELS, account_handle, is_account_url, normalize_url, platform_for
 from pipeline.scrape import post_authors
-from pipeline.platforms import PLATFORM_LABELS, account_handle, account_url_for, is_account_url, normalize_url, platform_for
 
 MAX_ACCOUNTS = 12  # caps pair questions at 66 (2b)
 JOIN_THRESHOLD = 0.70

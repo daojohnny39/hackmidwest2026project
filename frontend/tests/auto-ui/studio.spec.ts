@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { TestVision } from './vision'
+import { fakeSearchApi, hasField } from '../searchApi'
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -35,7 +36,7 @@ async function openCamera(page: Page, button = 'Start camera') {
 
 async function captured(page: Page) {
   await expect(page.getByRole('article', { name: 'Captured front photo' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Submit' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Search for my photo' })).toBeEnabled()
 }
 
 async function metadata(page: Page) {
@@ -53,12 +54,14 @@ async function setup(page: Page, mode: TestVision['mode'] = 'valid') {
   await expect(page.getByRole('checkbox', { name: 'Automatic capture', exact: true })).toBeChecked()
   await expect(page.getByRole('button', { name: 'Take photo', exact: true })).toHaveCount(0)
   await page.getByRole('checkbox', { name: /I am this person/ }).check()
-  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled()
+  await page.getByRole('checkbox', { name: /Send my face to the search services/ }).check()
+  await expect(page.getByRole('button', { name: 'Search for my photo' })).toBeDisabled()
 }
 
 test('default automatic capture supplies the subject reference after consent and qualifying hold', async ({ page }, testInfo) => {
-  const uploads: string[] = []
-  page.on('request', request => { if (request.method() !== 'GET') uploads.push(request.url()) })
+  const requests: string[] = []
+  page.on('request', request => { if (request.method() !== 'GET') requests.push(new URL(request.url()).pathname) })
+  const uploads = await fakeSearchApi(page)
   await setup(page)
   await openCamera(page)
   await captured(page)
@@ -69,9 +72,13 @@ test('default automatic capture supplies the subject reference after consent and
   expect(report.qualification.holdMs).toBeGreaterThanOrEqual(400)
   expect(report.toleranceDegrees).toEqual({ yaw: 5, pitch: 5, roll: 5 })
   expect(await page.evaluate(() => (window as unknown as { testTracks: MediaStreamTrack[] }).testTracks.every(track => track.readyState === 'ended'))).toBe(true)
-  await page.getByRole('button', { name: 'Submit' }).click()
-  await expect(page.locator('.candidate-card')).toHaveCount(4)
-  expect(uploads).toEqual([])
+  expect(requests).toEqual([])  // nothing leaves the tab before the search
+  await page.getByRole('button', { name: 'Search for my photo' }).click()
+  await expect(page.locator('.candidate-card')).toHaveCount(1)
+  await expect(page.getByText('Confidence: 97% · likely match', { exact: true })).toBeVisible()
+  expect(requests).toEqual(['/api/search'])
+  expect(hasField(uploads[0], 'externalProcessing', 'true')).toBe(true)
+  expect(uploads[0]).toContain('Content-Type: image/jpeg')
   for (const width of [1280, 390, 320]) {
     await page.setViewportSize({ width, height: 844 })
     await page.getByLabel('About subject details').click()
@@ -81,7 +88,7 @@ test('default automatic capture supplies the subject reference after consent and
   }
   await page.screenshot({ path: testInfo.outputPath('automatic-studio.png'), fullPage: true })
   await page.getByRole('button', { name: 'Delete photo', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Search for my photo' })).toBeDisabled()
   await expect(page.locator('.candidate-card')).toHaveCount(0)
 })
 
@@ -94,7 +101,7 @@ test('retake preserves the reference on failure and replaces it after success', 
   await openCamera(page, 'Retake front photo')
   await expect(page.getByText(/Face analysis could not load/)).toBeVisible()
   expect((await metadata(page)).captureId).toBe(first.captureId)
-  await expect(page.getByRole('button', { name: 'Submit' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Search for my photo' })).toBeEnabled()
   await page.evaluate(() => { window.testVision.failure = false })
   await openCamera(page, 'Try again')
   await expect(page.getByRole('status')).toHaveText('Front photo captured.')
@@ -114,8 +121,9 @@ test('clear session cancels a pending capture and supports a fresh automatic ses
   await page.waitForTimeout(1400)
   await expect(page.getByRole('article', { name: 'Captured front photo' })).toHaveCount(0)
   await expect(page.getByRole('textbox', { name: 'First Name optional', exact: true })).toHaveValue('')
-  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Search for my photo' })).toBeDisabled()
   await page.getByRole('checkbox', { name: /I am this person/ }).check()
+  await page.getByRole('checkbox', { name: /Send my face to the search services/ }).check()
   await openCamera(page)
   await captured(page)
 })

@@ -81,8 +81,8 @@ def capture():
         "capture": {
             "session_id": "mock-alex",
             "captured_at": "2026-10-10T14:02:11Z",
-            "consent": {"confirmed": True, "participant": "Alex Morgan (fictional)",
-                        "confirmed_at": "2026-10-10T14:01:50Z", "external_processing": True},
+            "consent": {"confirmed": True, "confirmed_at": "2026-10-10T14:01:50Z", "external_processing": True},
+            "subject": {"first_name": "Alex", "last_name": "Morgan", "city": "", "age": None},
             "images": [{"image_id": image_id, "angle": angle, "mock_fixture": fixture}
                        for image_id, (angle, fixture) in images.items()],
         },

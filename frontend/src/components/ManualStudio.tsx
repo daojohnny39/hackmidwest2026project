@@ -7,6 +7,7 @@ import type { PreviewState } from '../mocks/investigationFixtures'
 import { SubjectForm } from './SubjectForm'
 import { PhotoAnalyzer, type PhotoAnalysis } from '../faceAnalysis'
 import { PhotoReview } from './PhotoReview'
+import { useInvestigation } from '../hooks/useInvestigation'
 
 export interface Snapshot {
   id: string
@@ -36,6 +37,7 @@ function ManualSession({ onClear, previewOptions, mirrored }: ManualStudioProps 
   const [photo, setPhoto] = useState<Snapshot | null>(null)
   const photoRef = useRef<Snapshot | null>(null)
   const [results, setResults] = useState<PreviewState>('idle')
+  const live = useInvestigation()
   const [captureError, setCaptureError] = useState<string | null>(null)
   const [capturing, setCapturing] = useState(false)
   const [videoReady, setVideoReady] = useState(false)
@@ -85,7 +87,7 @@ function ManualSession({ onClear, previewOptions, mirrored }: ManualStudioProps 
       if (session !== sessionRef.current) return
       const next: Snapshot = { id: crypto.randomUUID(), blob, url: URL.createObjectURL(blob), state: 'analyzing' }
       releaseSnapshot(photoRef.current)
-      photoRef.current = next; setPhoto(next); setResults('idle')
+      photoRef.current = next; setPhoto(next); setResults('idle'); live.clear()
       // One reference completes capture. Retake replaces it only after a new JPEG exists.
       stop(); setVideoReady(false)
       await analyzePhoto(next)
@@ -105,7 +107,7 @@ function ManualSession({ onClear, previewOptions, mirrored }: ManualStudioProps 
   }
   function deletePhoto() {
     releaseSnapshot(photoRef.current)
-    photoRef.current = null; setPhoto(null); setResults('idle')
+    photoRef.current = null; setPhoto(null); setResults('idle'); live.clear()
   }
 
   return <>
@@ -122,11 +124,13 @@ function ManualSession({ onClear, previewOptions, mirrored }: ManualStudioProps 
       <div className="manual-preview-options">{previewOptions}</div>
       {(error || captureError) && <p className="camera-error" role="alert">{captureError || error}</p>}
       {isActive && devices.length > 1 && <label className="camera-picker">Camera<select value={activeDeviceId ?? ''} onChange={event => { sessionRef.current++; setVideoReady(false); void start(event.target.value) }}>{devices.map((device, index) => <option value={device.deviceId} key={device.deviceId}>{device.label || `Camera ${index + 1}`}</option>)}</select></label>}
-      <div className="photo-tray"><div className="tray-heading"><span className="eyebrow">Reference photo <span className="count">{photo ? '1 / 1' : '0 / 1'}</span></span><span>Only in this tab</span></div>
+      <div className="photo-tray"><div className="tray-heading"><span className="eyebrow">Reference photo <span className="count">{photo ? '1 / 1' : '0 / 1'}</span></span><span>In this tab until you search</span></div>
         <div className="photo-slots single-photo"><div className={`photo-slot ${photo ? 'filled' : ''}`}>{photo ? <><img src={photo.url} alt="Captured photo 1" /><button className="photo-delete" onClick={deletePhoto} aria-label="Delete photo 1"><Icon name="close" /></button></> : <Icon name="camera" />}</div></div>
         {photo && <PhotoReview key={photo.id} photo={photo} number={1} busy={capturing} onRetry={() => void retryAnalysis(photo)} />}
       </div>
-    </section><SubjectForm photo={photo?.blob} onPreview={() => setResults('many')} onClear={() => { stop(); onClear() }} /></div><ResultsPanel state={results} onChange={setResults} /></div>
+    </section><SubjectForm photo={photo?.blob} busy={live.search.phase === 'submitting' || live.search.phase === 'waiting'}
+      onSearch={input => { if (photo) { setResults('idle'); void live.start(input, photo.blob) } }} onClear={() => { stop(); onClear() }} /></div>
+    <ResultsPanel state={results} onChange={setResults} live={live.search} onCheckAgain={id => void live.checkAgain(id)} /></div>
     {consentOpen && <ConsentDialog onAccept={openCamera} onClose={() => setConsentOpen(false)} />}
   </>
 }

@@ -8,6 +8,10 @@ fetch, and which profiles' account links and posts' authors to follow. Its
 structured output is ImageTriage; code builds the evidence from the page store
 plus those judgments.
 
+When the person gave details about themselves (contracts.Subject), the prompt lists them so the
+agent can tell their own pages from pages that show their face under another name. With no details,
+the prompt names only the image, its angle and the fetch budget.
+
 Structured output gets one correction: a second invalid ImageTriage cancels the
 agent, and the caller falls back to deterministic triage over the stored results.
 Strands is imported lazily, so offline runs never load it. trace.watch_agent records
@@ -67,6 +71,18 @@ class AgentFailed(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+def agent_prompt(collector: ImageCollector) -> str:
+    """The first message: which image, its angle, the fetch budget, and the person's details if any."""
+    prompt = (f"Collect the public pages for image {collector.image_id} (facial angle: {collector.image.angle}). "
+              f"You may fetch at most {collector.budget} pages.")
+    details = collector.subject.details()
+    if details:
+        prompt += (f" The person in the photo gave these details about themselves: {'; '.join(details)}. "
+                   "Use them to judge which pages are about them. If a page shows their face under someone "
+                   "else's name, fetch it and say so in its note: it may be impersonation.")
+    return prompt
 
 
 def _budget_left(collector: ImageCollector) -> int:
@@ -183,10 +199,8 @@ async def run_image_agent(collector: ImageCollector, model: Model) -> ImageTriag
                   callback_handler=None, name=f"collector-{collector.image_id}")
     agent.add_hook(bound_corrections, AfterToolCallEvent)
     trace.watch_agent(agent)
-    prompt = (f"Collect the public pages for image {collector.image_id} (facial angle: {collector.image.angle}). "
-              f"You may fetch at most {collector.budget} pages.")
     try:
-        result = await agent.invoke_async(prompt, structured_output_model=ImageTriage,
+        result = await agent.invoke_async(agent_prompt(collector), structured_output_model=ImageTriage,
                                           limits={"turns": MAX_TURNS}, cancel_signal=cancel)
     except StructuredOutputException:
         raise AgentFailed("invalid_output") from None

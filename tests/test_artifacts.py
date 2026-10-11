@@ -46,7 +46,7 @@ def capture_artifact(run_id: str, capture_dir: Path | str = "/nonexistent/captur
         capture=CaptureBundle(
             session_id=SESSION,
             captured_at=WHEN,
-            consent=Consent(confirmed=True, participant="Alex Test", confirmed_at=WHEN, external_processing=True),
+            consent=Consent(confirmed=True, confirmed_at=WHEN, external_processing=True),
             images=[CaptureImage(image_id="img-1", angle="front", mock_fixture="alex-front")],
         ),
         capture_dir=str(capture_dir),

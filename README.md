@@ -35,8 +35,8 @@ The camera page uses automatic capture by default. Choose **Start camera**, foll
 the positioning guidance, and hold steady; the app takes the photo once all checks
 pass. Uncheck **Automatic capture** beside **Mirror preview** for a single-photo manual reference, or use `?capture=manual`.
 The original manual checkpoint remains available at `?mode=manual`.
-Stage 1 produces a JPEG and metadata; a later backend adapter can hand that result
-to the AWS Strands workflow. No upload or AWS execution is implemented.
+Stage 1 produces a JPEG and metadata. **Search for my photo** sends the reference
+to the Python search API after both search consent checkboxes are confirmed.
 
 ## OpenCV and MediaPipe setup
 
@@ -72,13 +72,13 @@ The repository currently implements the camera and local face-analysis foundatio
 - Automatic photo/metadata downloads and a manual landmark overlay; the original manual checkpoint also exports the photo, overlay, and analysis JSON.
 - Separate Python tools for initializing the detector and analyzing a local photo.
 
-Public-image search, facial identity matching, match-certainty labels, and Threat
-Level assessment are planned features. The existing landmark detector locates
-facial geometry; it does not identify a person or search the web.
+The Python search pipeline now provides public-image search and face-match confidence
+through the website. Threat Level assessment remains separate. The browser landmark
+detector locates facial geometry; it does not identify a person or search the web.
 
-Current browser analysis runs on the user's device. Captured photos stay in
-browser memory until deleted or the page is closed, and analysis does not upload
-them. The web app currently runs without a Python backend or API credentials.
+Browser landmark analysis runs on the user's device. A live search uploads the
+reference to the Python API and configured providers after explicit consent.
+Live search requires Python dependencies and server-side API credentials.
 
 ## Technologies used
 
@@ -132,6 +132,9 @@ Alternatively, download that URL in your browser and save the file as
 
 ### Step 4: Start the web app
 
+Install `requirements.txt` into the repository `.venv` using the Python setup below
+and configure search credentials as described in [the pipeline guide](docs/agent-pipeline.md).
+
 ```bash
 cd frontend
 npm run dev
@@ -141,8 +144,17 @@ Open the URL printed by Vite (normally `http://localhost:5173`). Choose **Start
 camera**, accept consent, and allow camera access. Follow the guidance and hold
 steady to capture one photo automatically. Uncheck **Automatic capture** to take one photo
 yourself and review its face count and landmark overlay. Subject details are
-optional; a valid photo and authorization enable **Submit**.
-The preview uses fictional findings and does not upload the photo.
+optional; a valid photo and both consent checkboxes enable **Search for my photo**.
+**View sample** uses fictional findings and does not upload the photo.
+
+`npm run dev` starts the Python search API on port 8000 and waits for readiness
+before opening Vite. It reuses an existing API and stops its own processes on Ctrl-C.
+For camera/UI-only development, use `npm run dev:frontend`.
+
+`npm run dev:fake` starts dev mode, the same app searching the team's fake image
+database instead of the internet (API on port 8001, site normally
+`http://localhost:5180`). Only `evilassociation.hakr` shows up as a threat there. See
+[dev mode](docs/agent-pipeline.md#dev-mode-the-fake-image-database).
 
 The development and build scripts automatically copy the model and MediaPipe
 WebAssembly files into `frontend/public/mediapipe/`. Production builds include
@@ -222,7 +234,8 @@ front photo is captured automatically once angle and framing checks pass for
 Use `?mode=manual` for the separate checkpoint with landmark overlays and analysis JSON.
 Model assets are copied automatically before development and
 production builds. See the [frontend README](frontend/README.md) for details and
-browser tests. This connection requires no Python endpoint or Vite API proxy.
+browser tests. Capture analysis is local; live searches use the Python API through
+Vite's `/api` proxy.
 
 ## Run the tests
 
@@ -239,8 +252,8 @@ Tests that use the real Python detector are skipped if the model is absent.
 The search side is the Python package in `pipeline/`. One AWS Strands agent per
 captured photo searches the web for the face, scrapes the pages it finds, and the
 pipeline then groups the accounts into candidate profiles, scores each candidate, and
-writes a final profile. It runs from the command line and isn't connected to the web
-app yet. Setup, API keys, search backends, and the local mock internet it's tested
+writes a final profile. The website's search API runs the capture and search stages
+and returns per-source findings. Setup, API keys, search backends, and the local mock internet it's tested
 against are in [docs/agent-pipeline.md](docs/agent-pipeline.md). The build spec is
 [docs/agent-pipeline-spec.md](docs/agent-pipeline-spec.md).
 

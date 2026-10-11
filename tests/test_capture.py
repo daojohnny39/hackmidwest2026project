@@ -15,7 +15,7 @@ from PIL import Image
 from mock_internet.seed import build_world
 from pipeline import capture
 from pipeline.capture import MOCK_FIXTURES, CaptureError, ConsentError, load_capture, recheck_consent
-from pipeline.contracts import CaptureArtifact
+from pipeline.contracts import CaptureArtifact, Subject
 from tests.support import FIXTURE_CAPTURES, OfflineTestCase
 
 BUNDLES = {
@@ -80,7 +80,8 @@ class FixtureBundleTests(CaptureCase):
                 bundle = load_capture(folder).bundle
                 self.assertEqual(bundle.session_id, f"mock-{name}")
                 self.assertTrue(bundle.consent.confirmed and bundle.consent.external_processing)
-                self.assertIn("(fictional)", bundle.consent.participant)
+                expected = {"alex": "Alex Morgan", "sam": "Sam Rivera", "casey": "Casey Brooks", "unknown": ""}
+                self.assertEqual(bundle.subject.name, expected[name])
                 self.assertTrue(all(image.file is None for image in bundle.images))
 
     def test_mock_fixtures_match_seed(self):
@@ -346,15 +347,36 @@ class RecheckConsentTests(CaptureCase):
             with self.subTest(flags=flags), self.assertRaisesRegex(ConsentError, "external_processing"):
                 recheck_consent(self.artifact, **flags)
 
-    def test_empty_participant_is_allowed(self):
+    def test_subject_details_are_optional(self):
         data = fixture_manifest()
-        data["consent"]["participant"] = ""
+        data["subject"] = {"first_name": "", "last_name": "", "city": "", "age": None}
         self.write_manifest(data)
-        self.assertEqual(load_capture(self.folder, models=True).bundle.consent.participant, "")
+        self.assertEqual(load_capture(self.folder, models=True).bundle.subject.details(), [])
+        del data["subject"]
+        self.write_manifest(data)
+        self.assertEqual(load_capture(self.folder, models=True).bundle.subject, Subject())
 
-    def test_changed_participant(self):
-        self.edit(lambda m: m["consent"].update(participant="Sam Rivera (fictional)"))
-        with self.assertRaisesRegex(ConsentError, "participant changed"):
+    def test_invalid_subject_details(self):
+        for change in ({"age": -1}, {"age": 151}, {"age": "32"}, {"city": "x" * 121}, {"first_name": None},
+                       {"nickname": "Al"}):
+            with self.subTest(change=change):
+                data = fixture_manifest()
+                data["subject"].update(change)
+                self.write_manifest(data)
+                with self.assertRaisesRegex(CaptureError, "invalid manifest: subject"):
+                    load_capture(self.folder)
+
+    def test_legacy_participant_is_ignored(self):
+        data = fixture_manifest()
+        data["consent"]["participant"] = "Alex Morgan (fictional)"
+        self.write_manifest(data)
+        bundle = load_capture(self.folder, models=True).bundle
+        self.assertNotIn("participant", bundle.model_dump()["consent"])
+        self.assertEqual(bundle.subject.name, "Alex Morgan")
+
+    def test_changed_subject(self):
+        self.edit(lambda m: m["subject"].update(city="Kansas City"))
+        with self.assertRaisesRegex(ConsentError, "subject details changed"):
             recheck_consent(self.artifact)
 
     def test_changed_session(self):

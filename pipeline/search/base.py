@@ -54,7 +54,7 @@ class BackendError(Exception):
 
 
 class SearchBackend(Protocol):
-    name: str  # "mock", "serpapi", "facecheck" or "rekognition"
+    name: str  # "mock", "serpapi", "facecheck", "rekognition" or "fakedb"
     origin: str | None  # mock server origin for normalize_url; None when live
     search_endpoint: str  # endpoint paths for run_log.jsonl; never a page URL
     fetch_endpoint: str
