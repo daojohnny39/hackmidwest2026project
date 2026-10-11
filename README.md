@@ -1,5 +1,15 @@
 # hackmidwest2026project
 
+## Member 3: candidate image processing
+
+Stage A's backend module validates retrieved JPEG/PNG images, detects up to two
+faces using the existing MediaPipe code, stores normalized crops and returns
+quality/review flags with source provenance. See the
+[Stage A guide](docs/member-3-stage-a.md) for usage and verification, and the
+[combined commit guide](docs/member-3-commit-sections.md) for the review checkpoint.
+Jev classification and HTTP/Strands adapters are later work. Quality thresholds
+are provisional; authorized real-photo acceptance remains outstanding.
+
 ## Front-facing automatic capture
 
 The active first-round scope is **one automatic front-facing snapshot**, with live
