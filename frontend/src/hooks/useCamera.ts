@@ -51,10 +51,9 @@ export function useCamera(onDisconnected?: (message: string) => void): UseCamera
     if (!navigator.mediaDevices?.enumerateDevices) return
     try {
       const all = await navigator.mediaDevices.enumerateDevices()
-      setDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId))
+      if (streamRef.current) setDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId))
     } catch {
-      // Camera enumeration can be restricted independently of an active stream.
-      // Keep the preview working even when camera switching is unavailable.
+      // A device-list failure must not interrupt an already working camera.
     }
   }, [])
 
@@ -68,6 +67,8 @@ export function useCamera(onDisconnected?: (message: string) => void): UseCamera
     requestRef.current++
     releaseStream()
     setActiveDeviceId(undefined)
+    setDevices([])
+    setError(null)
     setStatus('idle')
   }, [releaseStream])
 
@@ -122,8 +123,6 @@ export function useCamera(onDisconnected?: (message: string) => void): UseCamera
           onDisconnected?.('The camera disconnected.')
         })
 
-        // Wait for playback before allowing a capture. Autoplay timing differs
-        // between browsers, especially Safari on mobile devices.
         await video.play()
         if (request !== requestRef.current) return false
         setStatus('active')
@@ -154,10 +153,7 @@ export function useCamera(onDisconnected?: (message: string) => void): UseCamera
         canvas.width = video.videoWidth
         canvas.height = video.videoHeight
         const context = canvas.getContext('2d')
-        if (!context) {
-          reject(new Error('This browser could not capture the camera frame.'))
-          return
-        }
+        if (!context) { reject(new Error('Could not prepare a photo.')); return }
         context.drawImage(video, 0, 0)
         canvas.toBlob(
           (blob) => (blob ? resolve(blob) : reject(new Error('Could not encode frame.'))),
@@ -171,14 +167,11 @@ export function useCamera(onDisconnected?: (message: string) => void): UseCamera
   useEffect(() => {
     const media = navigator.mediaDevices
     if (!media?.enumerateDevices) return
-    let cancelled = false
-    media.enumerateDevices().then((all) => {
-      if (!cancelled) setDevices(all.filter((d) => d.kind === 'videoinput' && d.deviceId))
-    }).catch(() => { /* Device labels may be unavailable until access is granted. */ })
-    media.addEventListener?.('devicechange', refreshDevices)
+    // Only inspect devices after the participant starts a camera session.
+    const onDeviceChange = () => { if (streamRef.current) void refreshDevices() }
+    media.addEventListener?.('devicechange', onDeviceChange)
     return () => {
-      cancelled = true
-      media.removeEventListener?.('devicechange', refreshDevices)
+      media.removeEventListener?.('devicechange', onDeviceChange)
     }
   }, [refreshDevices])
 
