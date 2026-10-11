@@ -1,0 +1,16 @@
+.privacy { margin: 0; color: var(--text-muted); font-size: 14px; }
+.stage .mirrored { transform: scaleX(-1); }
+.face-guide { position: absolute; left: 50%; top: 50%; height: 55%; aspect-ratio: 3 / 4; transform: translate(-50%, -50%); border: 3px dashed #fff; border-radius: 50%; box-shadow: 0 0 0 1px #0006; pointer-events: none; }
+.face-guide.qualified { border: 4px solid #6ee7b7; }
+.guidance-panel { padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.guidance-panel[data-running="true"] { position: sticky; top: 8px; z-index: 1; }
+.auto-stage { width: 100%; align-self: center; }
+.guidance { margin: 0 0 10px; font-size: 19px; font-weight: 600; }
+progress { display: block; width: 100%; height: 12px; margin-bottom: 10px; accent-color: var(--accent); }
+.mirror-control { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+.troubleshooting, .diagnostics { padding: 16px; border: 1px solid var(--border); border-radius: 10px; }
+h2 { margin: 0 0 8px; font-size: 20px; }
+.troubleshooting p { margin: 8px 0; }
+.diagnostics summary { cursor: pointer; }
+.front-result { display: flex; flex-direction: column; gap: 12px; }
+.front-result img { max-width: 100%; max-height: 640px; align-self: flex-start; border-radius: 12px; object-fit: contain; }

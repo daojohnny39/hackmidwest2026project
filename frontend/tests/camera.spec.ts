@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { test, expect, type Page } from '@playwright/test'
 
 async function startCamera(page: Page) {
-  await page.goto('/')
+  await page.goto('/?mode=manual')
   await page.getByRole('button', { name: 'Start camera' }).click()
   await expect(page.getByRole('button', { name: 'Stop camera' })).toBeVisible()
   await page.waitForFunction(() => (document.querySelector('video')?.videoWidth ?? 0) > 0)
@@ -118,7 +118,7 @@ test('permission denial is recoverable', async ({ page }) => {
       return getUserMedia(constraints)
     }
   })
-  await page.goto('/')
+  await page.goto('/?mode=manual')
   await page.getByRole('button', { name: 'Start camera' }).click()
   await expect(page.getByText(/Camera permission was denied/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Take photo' })).toBeDisabled()
@@ -140,7 +140,7 @@ test('failed playback releases the stream before retrying', async ({ page }) => 
       return play.call(this)
     }
   })
-  await page.goto('/')
+  await page.goto('/?mode=manual')
   await page.getByRole('button', { name: 'Start camera' }).click()
   await expect(page.getByText('Preview playback failed.', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => (window as unknown as { failedCameraTracks: MediaStreamTrack[] })

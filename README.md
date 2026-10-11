@@ -1,6 +1,28 @@
 # CyberPI
-
 *Your private investigator for personal information.*
+## Front-facing automatic capture
+
+The active first-round scope is **one automatic front-facing snapshot**, with live
+guidance for face position and head angle. See the
+[front capture specification](docs/front-capture-spec.md) for the rules, guided UI,
+capture output, verification plan, and future **AWS Strands Stage 2 handoff**.
+
+Yaw, pitch, and roll must each be within ±5° of front-facing neutral, and angle and
+position checks must pass for 400 milliseconds before capture. Capture stops after
+one successful photo; retake is explicit. Framing thresholds are initial settings
+under test. The angle tolerance does not guarantee physical measurement accuracy.
+
+The [earlier multi-perspective design](docs/automatic-capture-spec.md) is retained
+as future reference; left/right capture is deferred. The automatic capture engine,
+guidance, reset logging, and `useAutoCapture` integration hook are implemented.
+The camera page uses automatic capture by default. Choose **Start camera**, follow
+the positioning guidance, and hold steady; the app takes the photo once all checks
+pass. The manual checkpoint remains available at `?mode=manual`. A future UI can
+reuse the same capture state and actions without changing the agreed defaults.
+Stage 1 produces a JPEG and metadata; a later backend adapter can hand that result
+to the AWS Strands workflow. No upload or AWS execution is implemented.
+
+## OpenCV and MediaPipe setup
 
 CyberPI helps users investigate where their likeness appears online and what
 that exposure could mean for their personal information.
@@ -175,10 +197,15 @@ npm test -- --project=firefox
 npm test -- --project=webkit
 ```
 
-`npm test` runs all configured projects, including Chrome and Edge, which require
-those browsers to be installed. Tests build and serve the production app and use
-simulated camera inputs. Playwright WebKit tests Safari's engine; physical camera
-and device checks remain separate.
+Open the local Vite URL and choose **Start camera**. Follow the guidance; the
+front photo is captured automatically once angle and framing checks pass for
+400 ms. Download the photo and metadata, or choose **Retake front photo**.
+Use `?mode=manual` for the separate checkpoint with landmark overlays and analysis JSON.
+Model assets are copied automatically before development and
+production builds. See the [frontend README](frontend/README.md) for details and
+browser tests. This connection requires no Python endpoint or Vite API proxy.
+
+## Run the tests
 
 From the repository root, with the Python environment activated:
 
