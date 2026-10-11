@@ -19,6 +19,8 @@ from pydantic import (
     Field,
     JsonValue,
     StrictBool,
+    StrictInt,
+    StrictStr,
     TypeAdapter,
     field_validator,
     model_validator,
@@ -27,7 +29,7 @@ from pydantic import (
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 Angle = Literal["front", "left", "right", "up", "down", "unknown"]
-Backend = Literal["mock", "serpapi", "facecheck", "rekognition"]
+Backend = Literal["mock", "serpapi", "facecheck", "rekognition", "fakedb"]
 LlmMode = Literal["off", "anthropic", "bedrock"]
 JevMode = Literal["fake", "typesafe", "openrouter", "off"]
 
@@ -53,9 +55,51 @@ def safe_id(value: str, what: str) -> str:
 
 class Consent(Contract):
     confirmed: StrictBool
-    participant: str = ""  # may be empty; only the consent gate reads it, never search or models
     confirmed_at: AwareDatetime
     external_processing: StrictBool = False  # required true for live search or --models
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_participant(cls, data: object) -> object:
+        # Manifests and runs from before 2026-10-11 name the participant here. Subject replaced it, and
+        # nothing ever searched with it, so it's dropped.
+        if isinstance(data, dict) and "participant" in data:
+            return {key: value for key, value in data.items() if key != "participant"}
+        return data
+
+
+SUBJECT_TEXT_LIMIT = 120
+
+
+def _subject_text(value: str) -> str:
+    value = " ".join(value.split())  # one line: these go into the per-image agent's prompt
+    if len(value) > SUBJECT_TEXT_LIMIT:
+        raise ValueError(f"must be at most {SUBJECT_TEXT_LIMIT} characters")
+    return value
+
+
+SubjectText = Annotated[StrictStr, AfterValidator(_subject_text)]
+
+
+class Subject(Contract):
+    """What the person searched for says about themselves (the website's subject form). Every field is
+    optional: "" or null means not given, and with nothing given the search runs on the photos alone.
+    The per-image agent gets the details as context, and findings.py notes which pages show the
+    name or city. No search engine receives them."""
+
+    first_name: SubjectText = ""
+    last_name: SubjectText = ""
+    city: SubjectText = ""
+    age: StrictInt | None = Field(default=None, ge=0, le=150)
+
+    @property
+    def name(self) -> str:
+        return " ".join(part for part in (self.first_name, self.last_name) if part)
+
+    def details(self) -> list[str]:
+        """The given details as "label: value", e.g. ["name: Alex Morgan", "age: 32"]; [] when none."""
+        given = [("name", self.name), ("city", self.city), ("age", "" if self.age is None else str(self.age))]
+        return [f"{label}: {value}" for label, value in given if value]
 
 
 class CaptureImage(Contract):
@@ -83,6 +127,7 @@ class CaptureBundle(Contract):
     session_id: str
     captured_at: AwareDatetime
     consent: Consent
+    subject: Subject = Field(default_factory=Subject)  # a manifest without one gives no details
     images: list[CaptureImage] = Field(min_length=1, max_length=8)
 
     @field_validator("session_id")

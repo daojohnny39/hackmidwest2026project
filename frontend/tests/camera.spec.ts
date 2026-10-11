@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { test, expect, type Page } from '@playwright/test'
+import { fakeSearchApi } from './searchApi'
 
 async function consentToCamera(page: Page, button = 'Open camera') {
   await page.getByRole('button', { name: button, exact: true }).click()
@@ -95,16 +96,18 @@ for (const action of ['Delete photo 1', 'Clear session'] as const) {
   })
 }
 
-test('one manual capture stops the camera and enables a preview without a name; navigation clears it', async ({ page }) => {
+test('one manual capture stops the camera and enables a search without a name; navigation clears it', async ({ page }) => {
+  await fakeSearchApi(page)
   await startCamera(page)
   await takeBlankPhoto(page)
   await expect(photos(page)).toHaveCount(1)
   await expect(page.getByRole('button', { name: 'Retake photo', exact: true })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Stop camera', exact: true })).toHaveCount(0)
   await page.getByRole('checkbox', { name: /I am this person/ }).check()
+  await page.getByRole('checkbox', { name: /Send my face to the search services/ }).check()
   await expect(page.getByRole('textbox', { name: 'First Name optional', exact: true })).toHaveValue('')
-  await page.getByRole('button', { name: 'Submit' }).click()
-  await expect(page.locator('.candidate-card')).toHaveCount(4)
+  await page.getByRole('button', { name: 'Search for my photo' }).click()
+  await expect(page.locator('.candidate-card')).toHaveCount(1)
   await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'About', exact: true }).click()
   await page.getByRole('link', { name: 'Home', exact: true }).click()
   await expect(photos(page)).toHaveCount(0)

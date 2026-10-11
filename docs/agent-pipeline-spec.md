@@ -142,7 +142,8 @@ captures/<session_id>/
 {
   "session_id": "2026-10-10T14-02-11-johnny",
   "captured_at": "2026-10-10T14:02:11Z",
-  "consent": { "confirmed": true, "participant": "Johnny", "confirmed_at": "2026-10-10T14:01:50Z", "external_processing": true },
+  "consent": { "confirmed": true, "confirmed_at": "2026-10-10T14:01:50Z", "external_processing": true },
+  "subject": { "first_name": "Johnny", "last_name": "", "city": "", "age": null },
   "images": [
     { "image_id": "img-1", "file": "img-1.jpg", "angle": "front", "yaw": 1.5,   "pitch": -2.0, "roll": 0.3 },
     { "image_id": "img-2", "file": "img-2.jpg", "angle": "left",  "yaw": -32.0, "pitch": 0.0,  "roll": 1.1 },
@@ -157,13 +158,19 @@ captures/<session_id>/
 - Mock bundles use one fixture per image, without files: alex = `alex-front`, `alex-left`, `alex-right`; sam = `sam-front`; casey = `casey-front`; unknown = `unknown`. Alex image IDs are `img-1`, `img-2`, `img-3` in that order. Synthetic manifests set both consent fields true so optional model smoke checks can use them. The placeholder SVGs are not photos and do not need image validation.
 - Reject duplicate image IDs, empty bundles, unknown fixtures, and paths or symlinks escaping the capture folder. Live mode requires real files and rejects `mock_fixture`. Validate actual image format and size before uploading. Session IDs must be safe path components.
 - HTTP/base64 handoff is deferred. It would need an endpoint, payload limits, and revised input validation as well as `capture.py`.
+- `subject` holds what the person says about themselves; it replaced `consent.participant` on 2026-10-11. Every field is optional: `""` or `null` means not given, and the website writes all four either way. A manifest without `subject` has no details, and a legacy `consent.participant` is ignored. With details, the per-image agent's prompt lists them and the findings say where the name and city appear; without them the search runs on the photos alone. No search engine receives them. A stage rerun refuses a manifest whose subject changed.
 
 ```python
 class Consent(BaseModel):
     confirmed: bool
-    participant: str = ""             # may be empty; never sent to search or models
     confirmed_at: datetime
     external_processing: bool = False  # required true for live search or --models
+
+class Subject(BaseModel):              # every field optional; "" or None is "not given"
+    first_name: str = ""              # at most 120 characters, whitespace collapsed
+    last_name: str = ""
+    city: str = ""
+    age: int | None = None            # 0-150
 
 class CaptureImage(BaseModel):
     image_id: str
@@ -178,6 +185,7 @@ class CaptureBundle(BaseModel):
     session_id: str
     captured_at: datetime
     consent: Consent
+    subject: Subject = Subject()      # absent: no details
     images: list[CaptureImage]        # 1–8
 
 class CaptureArtifact(BaseModel):

@@ -22,6 +22,7 @@ import httpx
 from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError, ReadTimeoutError
 from PIL import Image
 
+from pipeline import progress
 from pipeline.config import ConfigError, load_settings
 from pipeline.contracts import CaptureImage, FetchedPage, UploadRecord, validate_references
 from pipeline.image_agent import system_prompt
@@ -221,7 +222,12 @@ class V3TestCase(OfflineTestCase):
 class SearchTests(V3TestCase):
     def test_search_compare_and_convert(self):
         backend = self.backend()
-        payload = self.search(backend)
+        stages = []
+        with progress.reporting(stages.append):
+            payload = self.search(backend)
+        self.assertEqual(stages, ["preparing", "searching", "comparing"])
+        progress.report("reviewing")
+        self.assertEqual(stages[-1], "comparing")  # reporter cleared when the search scope ends
 
         # DetectFaces saw an upright JPEG copy; only the padded face crop was hosted and compared.
         [detect] = self.rekognition.detect_calls

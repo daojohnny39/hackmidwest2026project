@@ -59,7 +59,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 
-from pipeline import trace
+from pipeline import progress, trace
 from pipeline.config import DEFAULT_MIN_SIMILARITY, ConfigError, Settings
 from pipeline.contracts import CaptureArtifact, CaptureImage
 from pipeline.platforms import normalize_url, platform_for
@@ -335,6 +335,7 @@ class RekognitionBackend(SerpApiBackend):
     vision_search only for Cloud Vision."""
 
     name = "rekognition"
+    supported_engines = ALL_ENGINES  # dev mode's subclass searches its own engine (fakedb_backend.py)
 
     def __init__(self, *, api_key: str | None, capture_dir: Path, host, rekognition, engines: tuple[str, ...],
                  trace_search: TraceFaceSearch | None = None, vision_search: CloudVisionSearch | None = None,
@@ -343,9 +344,9 @@ class RekognitionBackend(SerpApiBackend):
                  cache_dir: Path | None = None, refresh: bool = False,
                  search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None,
                  images: httpx.AsyncClient | None = None, compare_timeout: float = COMPARE_TIMEOUT_S):
-        unknown = [engine for engine in engines if engine not in ALL_ENGINES]
+        unknown = [engine for engine in engines if engine not in self.supported_engines]
         if unknown or not engines:
-            raise ValueError(f"unsupported engines {unknown}; expected some of {', '.join(ALL_ENGINES)}")
+            raise ValueError(f"unsupported engines {unknown}; expected some of {', '.join(self.supported_engines)}")
         if TRACE in engines and trace_search is None:
             raise ValueError("the trace engine needs a TraceFaceSearch")
         if CLOUD_VISION in engines and vision_search is None:
@@ -382,9 +383,12 @@ class RekognitionBackend(SerpApiBackend):
         async with self._locks.setdefault(image.image_id, asyncio.Lock()):
             face = self._faces.get(image.image_id)
             if face is None:
+                progress.report("preparing")
                 face = self._faces[image.image_id] = await self._find_face(image, data)
                 face.digest = digest
+            progress.report("searching")
             results, failed = await self._search_engines(image, digest, face)
+            progress.report("comparing")
             payload, complete = await self._match(image, results, failed, face.crop)
         if final is not None and complete:
             await asyncio.to_thread(_write_json, final, payload)

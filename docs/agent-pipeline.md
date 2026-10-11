@@ -429,6 +429,87 @@ The author is whoever posted, which isn't always the person in the photo (a team
 brand page, for example), so the agent's relevance judgment and verification still
 decide whether that account belongs to the person.
 
+### Website search API
+
+`serve` connects the camera page to the pipeline. It implements `frontend/API-CONTRACT.md`
+on 127.0.0.1 only (there's no authentication): `POST /api/search` takes the photo as
+multipart and answers 202 with an `investigationId`, and `GET /api/search/<id>` reports
+`queued`, `running`, `completed` with `candidates`, or `failed`. The Vite dev server
+proxies `/api` to port 8000 (`CYBERPI_API_URL` changes that). `GET /api/health`
+checks that the API is running without uploading a photo or calling providers.
+
+```bash
+# Starts both services; uses .venv and .env, and waits for API readiness before Vite.
+cd frontend && npm run dev
+# Dev mode: the same website on the team's fake image database (API :8001, site :5180).
+cd frontend && npm run dev:fake
+
+# Alternatively, manage the API separately from the repository root:
+.venv/bin/python -m pipeline serve --models
+# Free: the mock internet searches the alex-front fixture; the photo isn't saved.
+python3 -m mock_internet serve   # in another terminal
+LLM_MODE=off .venv/bin/python -m pipeline serve --mock
+
+cd frontend && npm run dev:frontend
+```
+
+Each upload becomes `captures/web-<8 hex>/` (`manifest.json` plus `front.jpg`) and a run
+`runs/web-<8 hex>-<8 hex>/` with stages 0 and 1, the same as `run --until 1`; stages 2-4
+don't run. The form's `authorized=true` and `externalProcessing=true` fill the manifest's
+consent block, and the server refuses a live or `--models` search without both. The
+optional `firstName`, `lastName`, `city` and `age` become the manifest's `subject` block,
+always written in full:
+
+```json
+"subject": { "first_name": "Alex", "last_name": "", "city": "Kansas City", "age": null }
+```
+
+With details, each per-image agent's prompt lists them so it can tell the person's own
+pages from pages that show their face under another name, and each finding says whether
+the name and city appear on the page ("Your name doesn't appear on this page" on a fetched
+page). With none, the search runs on the photo alone. No search engine gets
+the details; Claude does, through the agent. Photos are JPEG or PNG, at most 5 MiB, and
+fully decoded before the search is queued.
+
+`findings.py` turns `01_raw_evidence.json` into one candidate per page whose image
+matched the face, highest first. For now a source's `confidence` is its V3 face score
+(Rekognition similarity) with the bands above: `{"score": 97, "level": "likely",
+"reasons": [...]}`, plus the agent's note on the page when it fetched it. Other backends,
+the mock included, give `level: "unknown"`. If every image's search fails, the
+investigation is `failed`, never `completed` with an empty list.
+
+Live search gives no threat level, so each card shows "Threat: not assessed". Only dev
+mode (below) sets `threat`.
+
+One search runs at a time and three more can queue; a fifth gets 429. Investigations
+live in memory, so restarting the server forgets their IDs, but `captures/` and `runs/`
+keep the photo and evidence like any CLI run (`purge --include-capture` deletes both).
+
+#### Dev mode: the fake image database
+
+`npm run dev:fake` (or `.venv/bin/python -m pipeline serve --models --fake-db --port 8001`)
+runs the website against Zach's fake image database instead of the internet, to show the
+threat model on made-up data. It uses API port 8001 and site port 5180, so it can run next
+to `npm run dev`. `GET /api/health` returns `"search": "fakedb"`, and each launcher
+refuses to reuse an API running the other mode.
+
+- The database is at `FAKE_DB_URL`, by default `http://100.125.109.107:8000` on the team
+  tailnet, so this machine must be on the tailnet. `serve` checks that it answers before
+  starting. Its page doubles as a browser for the data.
+- It holds the 202,599 CelebA photos with made-up names and sites, plus photos the team
+  uploads (Settings, Upload image) with a JSON file such as
+  `{"first_name": "Johnny", "last_name": "Dao", "foundOn": ["evilassociation.hakr"]}`.
+  Dev mode compares the face only with the uploads, found as the non-CelebA file names in
+  the first and last 500 rows. Give uploads a file name that starts with a letter. The
+  name typed into the website isn't sent to the database.
+- Each upload becomes one source per `foundOn` site, at a made-up URL on that site.
+  Rekognition still compares the faces (`AWS_REGION` and AWS keys needed, about $0.001
+  per comparison), so the consent checkboxes still apply. The per-image agent runs as in
+  normal mode and reads a made-up page for each source.
+- After the findings, a `checking` stage gives every site `threat` low (score 0) except
+  `evilassociation.hakr`, which is high (score 100) as a malicious fraud site. Its page is
+  a fake profile, with the uploaded name and photo and a scam pitch.
+
 ### Debugging a run
 
 Every stage appends to `runs/<run_id>/trace.jsonl`, one JSON object per line. It

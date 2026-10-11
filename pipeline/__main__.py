@@ -1,13 +1,17 @@
-"""CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
+"""CLI: python3 -m pipeline {run,stage,smoke-search,serve,purge,set-key}.
 
 Search uses backend V3 with V5's engines (Trace face search and SerpApi's Yandex and Bing, faces
 checked by Amazon Rekognition) unless
 SEARCH_BACKEND=facecheck picks FaceCheck face search, SEARCH_BACKEND=serpapi picks Yandex
 alone through SerpApi, or `run --mock` (or SEARCH_BACKEND=mock) picks the local mock internet.
-`set-key {trace,serpapi,google-vision,facecheck,typesafe,openrouter,anthropic}` prompts for a key with
-hidden input and saves it to .env; Trace, SerpApi, Google Cloud Vision, FaceCheck and TypeSafe keys
-are checked first.
+`set-key {trace,serpapi,google-vision,facecheck,typesafe,openrouter,anthropic}` prompts for a key
+with hidden input and saves it to .env; Trace, SerpApi, Google Cloud Vision, FaceCheck and
+TypeSafe keys are checked first.
 `set-key aws` saves an AWS access key pair to ~/.aws/credentials after a free STS check.
+`serve` runs the website's HTTP API on 127.0.0.1 (server.py): each uploaded photo runs stages 0-1
+and comes back as a list of sources with a confidence level. `serve --fake-db` is dev mode: it
+searches the team's fake image database (FAKE_DB_URL) instead of the internet, and marks every site
+benign except one fake fraud site (search/fakedb_backend.py).
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
 2 bad configuration or usage, 3 stopped because a requested stage isn't built yet.
@@ -59,7 +63,8 @@ DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 ENV_TEMPLATE = REPO_ROOT / ".env.example"
 SERVICE_NAMES = {"trace": "Trace", "facecheck": "FaceCheck", "serpapi": "SerpApi", "google-vision": "Google Cloud",
-                 "typesafe": "TypeSafe", "openrouter": "OpenRouter", "anthropic": "Anthropic"}
+                 "typesafe": "TypeSafe", "openrouter": "OpenRouter",
+                 "anthropic": "Anthropic"}
 # The .env mode that puts a saved model key to use; real modes also need --models.
 KEY_MODES = {"typesafe": "JEV_MODE=typesafe", "openrouter": "JEV_MODE=openrouter", "anthropic": "LLM_MODE=anthropic"}
 
@@ -146,7 +151,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Run {run_id}")
     print(f"  folder: {run_dir}")
     print(f"  trace: {run_dir / TRACE_FILE}")
-    print(f"  participant: {bundle.consent.participant or '(not recorded)'} (consent confirmed {bundle.consent.confirmed_at.isoformat()})")
+    print(f"  subject: {'; '.join(bundle.subject.details()) or '(no details; photos only)'} "
+          f"(consent confirmed {bundle.consent.confirmed_at.isoformat()})")
     llm = (f"{settings.llm_mode} ({settings.llm_model}, effort {settings.llm_effort})"
            if settings.llm_mode != "off" else "off")
     engines = f" ({', '.join(settings.rekognition_engines)})" if settings.search_backend == "rekognition" else ""
@@ -160,13 +166,18 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def require_search(settings: Settings) -> None:
-    """Fail on missing image hosting or AWS credentials before a live search would need them."""
+    """Fail on missing image hosting or AWS credentials, or an unreachable fake database, before a search
+    would need them."""
     if settings.needs_hosting:
         require_hosting(settings)
-    if settings.search_backend == "rekognition":
+    if settings.search_backend in ("rekognition", "fakedb"):
         from pipeline.search.rekognition_backend import require_rekognition
 
         require_rekognition(settings)
+    if settings.search_backend == "fakedb":
+        from pipeline.search.fakedb_backend import check_database
+
+        check_database(settings.fake_db_url)
 
 
 def cmd_stage(args: argparse.Namespace) -> int:
@@ -237,6 +248,44 @@ def cmd_smoke_search(args: argparse.Namespace) -> int:
         print("Ask the participant which hits, if any, are really theirs; record that in the brain notes.")
         print(f"Delete this run's data when done: python3 -m pipeline purge --run {run_dir}")
     return code
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """The website's HTTP API (server.py) until Ctrl-C. Settings and credentials are checked first, so a
+    bad configuration stops here instead of failing every search."""
+    try:
+        settings = settings_for(args, backend="fakedb" if args.fake_db else "mock" if args.mock else None)
+        require_search(settings)
+    except ConfigError as exc:
+        return fail(f"Configuration error: {exc}", BAD_CONFIG)
+    import logging
+
+    import uvicorn
+
+    from pipeline.server import create_app
+
+    # Only the server's own log goes to the console; tracing() sends stage events to each run's trace.jsonl.
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    server_log = logging.getLogger("pipeline.server")
+    server_log.addHandler(console)
+    server_log.setLevel(logging.INFO)
+    server_log.propagate = False
+    app = create_app(settings, runs_dir=args.runs_dir, captures_dir=args.captures_dir)
+    llm = (f"{settings.llm_mode} ({settings.llm_model}, effort {settings.llm_effort})"
+           if settings.llm_mode != "off" else "off")
+    engines = f" ({', '.join(settings.rekognition_engines)})" if settings.search_backend == "rekognition" else ""
+    if settings.search_backend == "fakedb":
+        engines = f" (dev mode: fake image database at {settings.fake_db_url})"
+    print(f"Search API on http://127.0.0.1:{args.port}/api/search")
+    print(f"  search: {settings.search_backend}{engines}; llm: {llm}")
+    if settings.search_backend == "fakedb":
+        from pipeline.search.fakedb_backend import FRAUD_SITE
+
+        print(f"  threat levels: dev mode (every site benign except {FRAUD_SITE})")
+    print(f"  photos: {args.captures_dir}; runs: {args.runs_dir}")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    return OK
 
 
 def cmd_purge(args: argparse.Namespace) -> int:
@@ -450,6 +499,18 @@ def build_parser() -> argparse.ArgumentParser:
     gates(smoke)
     runs_dir(smoke)
     smoke.set_defaults(handler=cmd_smoke_search)
+
+    serve = commands.add_parser("serve", help="run the website's search API on 127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    mode = serve.add_mutually_exclusive_group()
+    mode.add_argument("--mock", action="store_true",
+                      help="search the local mock internet instead of the live backend (no search credits)")
+    mode.add_argument("--fake-db", action="store_true",
+                      help="dev mode: search the team's fake image database (FAKE_DB_URL) instead of the internet")
+    serve.add_argument("--models", action="store_true", help="allow paid model calls for the modes set in .env")
+    serve.add_argument("--captures-dir", type=Path, default=DEFAULT_CAPTURES_DIR, help=argparse.SUPPRESS)
+    runs_dir(serve)
+    serve.set_defaults(handler=cmd_serve)
 
     purge = commands.add_parser("purge", help="delete a run's data and any uploaded images")
     purge.add_argument("--run", required=True)

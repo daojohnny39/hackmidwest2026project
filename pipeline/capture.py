@@ -71,8 +71,8 @@ def recheck_consent(artifact: CaptureArtifact, *, live: bool = False, models: bo
         raise ConsentError(
             f"capture session changed from {saved.session_id!r} to {bundle.session_id!r}; start a new run"
         )
-    if bundle.consent.participant != saved.consent.participant:
-        raise ConsentError("the manifest's participant changed since this run started; start a new run")
+    if bundle.subject != saved.subject:
+        raise ConsentError("the manifest's subject details changed since this run started; start a new run")
     return bundle
 
 

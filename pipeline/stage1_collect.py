@@ -30,12 +30,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pipeline import trace
+from pipeline import progress, trace
 from pipeline.artifacts import log_event, read_artifact, write_artifact
 from pipeline.config import ConfigError, Settings
 from pipeline.contracts import (
     CaptureArtifact, CaptureImage, FetchedPage, FetchError, FoundVia, ImageEvidence, ImageHit, ImageTriage,
-    PageJudgment, PageRecord, RawEvidenceBundle, validate_references,
+    PageJudgment, PageRecord, RawEvidenceBundle, Subject, validate_references,
 )
 from pipeline.platforms import account_handle, normalize_url, page_kind, platform_for
 from pipeline.scrape import Scraped, post_authors, scrape_html
@@ -161,8 +161,9 @@ class ImageCollector:
     """Search and fetch state for one image. The agent's tools and the deterministic path both use it."""
 
     def __init__(self, image: CaptureImage, backend: SearchBackend, store: PageStore, *,
-                 budget: int = MAX_FETCHES_PER_IMAGE, log: Log = _no_log):
+                 budget: int = MAX_FETCHES_PER_IMAGE, log: Log = _no_log, subject: Subject | None = None):
         self.image = image
+        self.subject = subject or Subject()  # the agent's context; the search itself never sees it
         self.backend = backend
         self.store = store
         self.budget = budget
@@ -193,6 +194,7 @@ class ImageCollector:
         return await asyncio.shield(self._search_task)
 
     async def _search(self) -> SearchOutcome:
+        progress.report("searching")
         self.searched_at = _now()
         started = time.monotonic()
         endpoint = getattr(self.backend, "search_endpoint", "search")
@@ -217,6 +219,8 @@ class ImageCollector:
         finally:
             # Hosted copies are deleted once the search and its retries are over, even on failure.
             await asyncio.shield(self.backend.release(self.image))
+        if self.outcome is not None and self.outcome.error is None:
+            progress.report("reviewing")
         return self.outcome
 
     def hit_for(self, url: str) -> ImageHit | None:
@@ -352,7 +356,8 @@ async def collect_evidence(
 ) -> tuple[RawEvidenceBundle, PageStore]:
     """Collect every image in parallel (at most `concurrency` at once) and merge the evidence."""
     store = PageStore(backend, log=log)
-    collectors = [ImageCollector(image, backend, store, log=log) for image in capture.capture.images]
+    collectors = [ImageCollector(image, backend, store, log=log, subject=capture.capture.subject)
+                  for image in capture.capture.images]
     limit = asyncio.Semaphore(concurrency)
     trace.event("collect_start", backend=backend.name, path="agent" if agent else "deterministic",
                 images=[collector.image_id for collector in collectors], image_deadline_s=image_deadline_s,
@@ -521,6 +526,10 @@ def make_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *,
         from pipeline.search.rekognition_backend import build_rekognition_backend
 
         return build_rekognition_backend(settings, capture, run_dir, refresh=refresh)
+    if capture.backend == "fakedb":
+        from pipeline.search.fakedb_backend import build_fakedb_backend
+
+        return build_fakedb_backend(settings, capture)
     if capture.backend == "facecheck":
         from pipeline.search.facecheck_backend import build_facecheck_backend
 

@@ -7,7 +7,9 @@ Trace, SERPAPI_KEY for the SerpApi engines, GOOGLE_VISION_API_KEY for Cloud Visi
 and AWS credentials.
 FaceCheck (needs FACECHECK_API_KEY) and SerpApi's Yandex alone (needs SERPAPI_KEY) are
 the other live backends. The mock internet is opt-in (`backend="mock"`, `--mock`, or
-SEARCH_BACKEND=mock). Real Jev/LLM modes still need `models=True`. Secrets stay out of repr, describe(), and every error
+SEARCH_BACKEND=mock). Dev mode (`backend="fakedb"`, `serve --fake-db`, or SEARCH_BACKEND=fakedb)
+searches the team's fake image database at FAKE_DB_URL instead of the internet and still compares
+faces with Rekognition, so it needs AWS_REGION and AWS credentials (search/fakedb_backend.py). Real Jev/LLM modes still need `models=True`. Secrets stay out of repr, describe(), and every error
 message. No model or AWS SDK is imported here.
 """
 
@@ -22,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
@@ -34,10 +37,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MOCK_SCENARIOS = ("default", "ambiguous", "stale", "duplicates", "empty", "rate_limited", "server_error")
 TRUST_TABLE = {0: 0, 1: 50, 2: 95, 3: 99}  # key 3 means "3 or more" (spec 2c)
 
-SEARCH_BACKENDS = ("rekognition", "facecheck", "serpapi", "mock")
+SEARCH_BACKENDS = ("rekognition", "facecheck", "serpapi", "fakedb", "mock")
 DEFAULT_SEARCH_BACKEND = "rekognition"
 # Search the real internet; the run needs external_processing consent.
 LIVE_BACKENDS = ("rekognition", "facecheck", "serpapi")
+# Dev mode's fake image database: Zach's server on the team tailnet (search/fakedb_backend.py).
+DEFAULT_FAKE_DB_URL = "http://100.125.109.107:8000"
 IMAGE_HOSTS = ("tunnel", "s3")  # how SerpApi runs give the search engine a public image URL (hosting.py)
 # Engines backend V3 can search: Trace takes an upload, the SerpApi engines need a hosted image URL,
 # and Cloud Vision takes the image's bytes.
@@ -61,9 +66,9 @@ DEFAULT_LLM_EFFORT = "medium"
 MAX_MOCK_DELAY_MS = 5000
 
 ENV_VARS = (
-    "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "SERPAPI_KEY",
-    "FACECHECK_API_KEY", "FACECHECK_DEMO", "TRACE_API_KEY", "GOOGLE_VISION_API_KEY", "REKOGNITION_ENGINES",
-    "REKOGNITION_MIN_SIMILARITY", "REKOGNITION_PLATFORMS",
+    "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "FAKE_DB_URL", "SERPAPI_KEY",
+    "FACECHECK_API_KEY", "FACECHECK_DEMO", "TRACE_API_KEY", "GOOGLE_VISION_API_KEY",
+    "REKOGNITION_ENGINES", "REKOGNITION_MIN_SIMILARITY", "REKOGNITION_PLATFORMS",
     "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
     "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "LLM_EFFORT", "ANTHROPIC_API_KEY",
 )
@@ -89,10 +94,11 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Settings:
-    search_backend: Literal["mock", "serpapi", "facecheck", "rekognition"]
+    search_backend: Literal["mock", "serpapi", "facecheck", "rekognition", "fakedb"]
     mock_internet_url: str
     mock_scenario: str
     mock_delay_ms: int
+    fake_db_url: str | None  # dev mode only
     serpapi_key: str | None = field(repr=False)
     facecheck_api_key: str | None = field(repr=False)
     facecheck_demo: bool
@@ -112,7 +118,7 @@ class Settings:
     llm_model: str | None
     llm_effort: str | None
     anthropic_api_key: str | None = field(repr=False)
-    live: bool
+    live: bool  # a real photo goes to outside services: every backend but mock
     models: bool
 
     def trust_for(self, count: int) -> int:
@@ -159,7 +165,8 @@ def load_settings(
         backend = _choice(env, "SEARCH_BACKEND", SEARCH_BACKENDS, DEFAULT_SEARCH_BACKEND)
     elif backend not in SEARCH_BACKENDS:
         raise ConfigError(f"unknown search backend {backend!r}; expected one of {', '.join(SEARCH_BACKENDS)}")
-    live = backend in LIVE_BACKENDS
+    # The fake database isn't the internet, but dev mode still sends the photo to Amazon Rekognition.
+    live = backend in LIVE_BACKENDS or backend == "fakedb"
 
     mock_url = env.get("MOCK_INTERNET_URL", "http://127.0.0.1:8765")
     try:
@@ -214,7 +221,7 @@ def load_settings(
         required.setdefault("TRACE_API_KEY", []).append("Trace face search")
     if uses_vision:
         required.setdefault("GOOGLE_VISION_API_KEY", []).append("Cloud Vision web detection")
-    if backend == "rekognition":
+    if backend in ("rekognition", "fakedb"):
         required.setdefault("AWS_REGION", []).append("Rekognition face matching")
     elif backend == "facecheck":
         required.setdefault("FACECHECK_API_KEY", []).append("FaceCheck search")
@@ -240,6 +247,8 @@ def load_settings(
                 saves.append("AWS keys with `python -m pipeline set-key aws --region <region>`")
             hint = (f" Save {' and '.join(saves)}, change REKOGNITION_ENGINES, set SEARCH_BACKEND=facecheck or "
                     "serpapi for another backend, or pass --mock for the mock internet.")
+        elif backend == "fakedb":
+            hint = " Save AWS keys with `python -m pipeline set-key aws --region <region>`."
         elif "SERPAPI_KEY" in required and "SERPAPI_KEY" not in env:
             hint = " Save the SerpApi key with `python -m pipeline set-key serpapi`, or pass --mock for the mock internet."
         elif "FACECHECK_API_KEY" in required and "FACECHECK_API_KEY" not in env:
@@ -255,6 +264,7 @@ def load_settings(
         mock_internet_url=mock_url.rstrip("/"),
         mock_scenario=mock_scenario,
         mock_delay_ms=delay,
+        fake_db_url=_fake_db_url(env.get("FAKE_DB_URL", DEFAULT_FAKE_DB_URL)) if backend == "fakedb" else None,
         serpapi_key=env.get("SERPAPI_KEY") if uses_serpapi else None,
         facecheck_api_key=env.get("FACECHECK_API_KEY") if backend == "facecheck" else None,
         facecheck_demo=facecheck_demo,
@@ -333,6 +343,19 @@ def _similarity(raw: str) -> float:
     if not 0 <= value <= 100:  # also false for NaN
         raise ConfigError(f"REKOGNITION_MIN_SIMILARITY must be a number from 0 to 100, got {raw!r}")
     return value
+
+
+def _fake_db_url(raw: str) -> str:
+    """FAKE_DB_URL as an origin without a trailing slash. Never echoed: it could carry credentials."""
+    try:
+        parts = urlsplit(raw)
+        parts.port  # raises on a bad port
+    except ValueError:
+        parts = None
+    if (parts is None or parts.scheme not in ("http", "https") or not parts.hostname or parts.username
+            or parts.password or parts.path.strip("/") or parts.query or parts.fragment):
+        raise ConfigError("FAKE_DB_URL must be an http(s) origin such as http://100.125.109.107:8000")
+    return raw.rstrip("/")
 
 
 def _delay(raw: str) -> int:

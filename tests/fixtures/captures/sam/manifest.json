@@ -3,9 +3,14 @@
   "captured_at": "2026-10-10T14:10:05Z",
   "consent": {
     "confirmed": true,
-    "participant": "Sam Rivera (fictional)",
     "confirmed_at": "2026-10-10T14:09:40Z",
     "external_processing": true
+  },
+  "subject": {
+    "first_name": "Sam",
+    "last_name": "Rivera",
+    "city": "",
+    "age": null
   },
   "images": [
     { "image_id": "img-1", "angle": "front", "mock_fixture": "sam-front" }

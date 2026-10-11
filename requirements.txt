@@ -13,6 +13,10 @@ strands-agents[anthropic]==1.59.0
 typesafe-sdk==0.7.4
 # S3 image hosting for live search, and Bedrock.
 boto3==1.43.111
+# The website's search API (`python -m pipeline serve`). Strands' mcp dependency already installs all three.
+starlette==1.7.0
+uvicorn==0.54.0
+python-multipart==0.0.32
 
 # Capture-side image processing (ba-opencv, PR #2).
 # Use only the contrib variant: MediaPipe requires it, and OpenCV variants share cv2.
