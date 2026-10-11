@@ -47,8 +47,7 @@ function AutomaticStudio() {
 
   return <>
     <section className="studio-intro">
-      <div><h1>Public sources. <em>Clearer context.</em></h1><p>Capture a reference. Review the evidence.</p></div>
-      <span className="session-badge"><span className="status-dot" /> Local preview</span>
+      <div><h1>Public sources. <em>Clearer context.</em></h1></div>
     </section>
     <div className="workspace-grid">
       <div className="capture-column">
@@ -60,7 +59,7 @@ function AutomaticStudio() {
             onDelete={() => { setReference(null); setResults('idle') }}
           />
         </section>
-        <SubjectForm key={session} photo={reference?.image} photoNumber={reference ? 1 : undefined} onPreview={() => setResults('many')} onClear={clearSession} />
+        <SubjectForm key={session} photo={reference?.image} onPreview={() => setResults('many')} onClear={clearSession} />
       </div>
       <ResultsPanel state={results} onChange={setResults} />
     </div>

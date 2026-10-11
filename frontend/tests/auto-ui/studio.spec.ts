@@ -35,7 +35,7 @@ async function openCamera(page: Page, button = 'Start camera') {
 
 async function captured(page: Page) {
   await expect(page.getByRole('article', { name: 'Captured front photo' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Preview sample findings' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeEnabled()
 }
 
 async function metadata(page: Page) {
@@ -53,7 +53,7 @@ async function setup(page: Page, mode: TestVision['mode'] = 'valid') {
   await expect(page.getByRole('button', { name: 'Automatic', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('button', { name: 'Take photo', exact: true })).toHaveCount(0)
   await page.getByRole('checkbox', { name: /I am this person/ }).check()
-  await expect(page.getByRole('button', { name: 'Preview sample findings' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled()
 }
 
 test('default automatic capture supplies the subject reference after consent and qualifying hold', async ({ page }, testInfo) => {
@@ -69,7 +69,7 @@ test('default automatic capture supplies the subject reference after consent and
   expect(report.qualification.holdMs).toBeGreaterThanOrEqual(400)
   expect(report.toleranceDegrees).toEqual({ yaw: 5, pitch: 5, roll: 5 })
   expect(await page.evaluate(() => (window as unknown as { testTracks: MediaStreamTrack[] }).testTracks.every(track => track.readyState === 'ended'))).toBe(true)
-  await page.getByRole('button', { name: 'Preview sample findings' }).click()
+  await page.getByRole('button', { name: 'Submit' }).click()
   await expect(page.locator('.candidate-card')).toHaveCount(4)
   expect(uploads).toEqual([])
   for (const width of [1280, 390, 320]) {
@@ -81,7 +81,7 @@ test('default automatic capture supplies the subject reference after consent and
   }
   await page.screenshot({ path: testInfo.outputPath('automatic-studio.png'), fullPage: true })
   await page.getByRole('button', { name: 'Delete photo', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'Preview sample findings' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled()
   await expect(page.locator('.candidate-card')).toHaveCount(0)
 })
 
@@ -94,7 +94,7 @@ test('retake preserves the reference on failure and replaces it after success', 
   await openCamera(page, 'Retake front photo')
   await expect(page.getByText(/Face analysis could not load/)).toBeVisible()
   expect((await metadata(page)).captureId).toBe(first.captureId)
-  await expect(page.getByRole('button', { name: 'Preview sample findings' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeEnabled()
   await page.evaluate(() => { window.testVision.failure = false })
   await openCamera(page, 'Try again')
   await expect(page.getByRole('status')).toHaveText('Front photo captured.')
@@ -113,8 +113,8 @@ test('clear session cancels a pending capture and supports a fresh automatic ses
   await page.getByRole('button', { name: 'Clear session', exact: true }).click()
   await page.waitForTimeout(1400)
   await expect(page.getByRole('article', { name: 'Captured front photo' })).toHaveCount(0)
-  await expect(page.getByRole('textbox', { name: 'First Name', exact: true })).toHaveValue('')
-  await expect(page.getByRole('button', { name: 'Preview sample findings' })).toBeDisabled()
+  await expect(page.getByRole('textbox', { name: 'First Name optional', exact: true })).toHaveValue('')
+  await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled()
   await page.getByRole('checkbox', { name: /I am this person/ }).check()
   await openCamera(page)
   await captured(page)
@@ -131,7 +131,7 @@ test('manual selection and navigation release the automatic session', async ({ p
   await page.evaluate(() => { window.testVision.mode = 'valid' })
   await openCamera(page)
   await expect(page.getByRole('article', { name: 'Captured front photo' })).toBeVisible()
-  await page.getByRole('link', { name: 'About', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'About', exact: true }).click()
   await page.getByRole('link', { name: 'Home', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Automatic', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('article', { name: 'Captured front photo' })).toHaveCount(0)

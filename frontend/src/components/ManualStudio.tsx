@@ -107,7 +107,7 @@ function ManualSession({ onClear }: { onClear: () => void }) {
   }
 
   return <>
-    <section className="studio-intro"><div><h1>Public sources. <em>Clearer context.</em></h1><p>Capture a reference. Review the evidence.</p></div><span className="session-badge"><span className="status-dot" /> Local preview</span></section>
+    <section className="studio-intro"><div><h1>Public sources. <em>Clearer context.</em></h1></div></section>
     <div className="workspace-grid"><div className="capture-column"><section className="camera-panel" aria-label="Camera studio">
       <div className={`camera-stage ${isActive ? 'is-live' : ''}`}><video ref={videoRef} autoPlay playsInline muted className={isActive ? 'is-active' : ''} onLoadedData={() => setVideoReady(true)} onEmptied={() => setVideoReady(false)} aria-label="Live camera preview" aria-hidden={!isActive} />
         <div className="camera-heading"><span className="eyebrow recognition-text">Face capture</span><span className={`camera-status ${isActive ? 'active' : ''}`}><span className="status-dot" /> {isActive ? 'Live' : status === 'starting' ? 'Connecting' : 'Camera off'}</span></div>
@@ -123,7 +123,7 @@ function ManualSession({ onClear }: { onClear: () => void }) {
         <div className="photo-slots single-photo"><div className={`photo-slot ${photo ? 'filled' : ''}`}>{photo ? <><img src={photo.url} alt="Captured photo 1" /><button className="photo-delete" onClick={deletePhoto} aria-label="Delete photo 1"><Icon name="close" /></button></> : <Icon name="camera" />}</div></div>
         {photo && <PhotoReview key={photo.id} photo={photo} number={1} busy={capturing} onRetry={() => void retryAnalysis(photo)} />}
       </div>
-    </section><SubjectForm photo={photo?.blob} photoNumber={photo ? 1 : undefined} onPreview={() => setResults('many')} onClear={() => { stop(); onClear() }} /></div><ResultsPanel state={results} onChange={setResults} /></div>
+    </section><SubjectForm photo={photo?.blob} onPreview={() => setResults('many')} onClear={() => { stop(); onClear() }} /></div><ResultsPanel state={results} onChange={setResults} /></div>
     {consentOpen && <ConsentDialog onAccept={openCamera} onClose={() => setConsentOpen(false)} />}
   </>
 }

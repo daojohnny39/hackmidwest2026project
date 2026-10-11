@@ -23,7 +23,7 @@ export default function App() {
       <span className="edition"><span className="status-dot" /> Hack Midwest ’26</span>
     </header>
     <main id="main-content" tabIndex={-1}>{page === 'studio' ? <Studio /> : page === 'about' ? <About /> : <Team />}</main>
-    <footer className="site-footer"><span><Mark /> CyberPI</span><a href="?mode=front">Automatic capture <Icon name="arrow" /></a><a href="#about">About this demo <Icon name="arrow" /></a></footer>
+    <footer className="site-footer"><span><Mark /> CyberPI</span><a href="?mode=front">Automatic capture <Icon name="arrow" /></a><a href="#about">About <Icon name="arrow" /></a></footer>
   </div>
 }
 function About() {

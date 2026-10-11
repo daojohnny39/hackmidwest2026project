@@ -141,7 +141,7 @@ Open the URL printed by Vite (normally `http://localhost:5173`). Choose **Start
 camera**, accept consent, and allow camera access. Follow the guidance and hold
 steady to capture one photo automatically. Choose **Manual** to take one photo
 yourself and review its face count and landmark overlay. Subject details are
-optional; a valid photo and authorization enable **Preview sample findings**.
+optional; a valid photo and authorization enable **Submit**.
 The preview uses fictional findings and does not upload the photo.
 
 The development and build scripts automatically copy the model and MediaPipe

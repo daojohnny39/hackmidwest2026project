@@ -29,7 +29,7 @@ npm test -- --project=chrome
 1. Automatic capture is selected by default. Choose **Start camera**, accept local capture consent, and allow the browser's camera prompt.
 2. Follow the face-position and angle guidance; a qualifying 400 ms hold automatically captures one reference and stops the camera. Alternatively, select **Manual**, open the camera, and choose **Take photo** once. Retaking replaces the single reference. Manual mode includes the original/landmark toggle.
 3. Optionally provide First Name, Last Name, City, and Age, and confirm authorization. The information icon beside **Subject details** explains how these fields help narrow results.
-4. Choose **Preview sample findings**. The photo is not uploaded. A missing or invalid image or absent authorization keeps this action disabled. Failed manual landmark analysis does not block an otherwise valid photo.
+4. Choose **Submit**. The photo is not uploaded. A missing or invalid image or absent authorization keeps this action disabled. Failed manual landmark analysis does not block an otherwise valid photo.
 5. Use **Sample scenario** for multiple/one/no findings, partial findings, missing metadata, queued, running, or failed. These are static examples, not a simulated live investigation.
 6. **Clear session** discards photos, details and results and stops the camera. Leaving Home also clears the session.
 
