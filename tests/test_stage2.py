@@ -383,7 +383,7 @@ class ExtractionTests(OfflineTestCase):
 
     def raw_with(self, *pages, retained=None):
         hits = [ImageHit(position=p.found_via[0].hit_position, title=p.title, url=p.url, fetch_url=p.url, source="x")
-                for p in pages]
+                for p in pages if p.found_via[0].depth == 0]
         evidence = ImageEvidence(image_id="img-1", angle="front", backend="mock", searched_at=SEARCHED_AT, hits=hits,
                                  page_urls=sorted(retained if retained is not None else [p.url for p in pages]),
                                  collection_method="deterministic")
@@ -420,6 +420,24 @@ class ExtractionTests(OfflineTestCase):
         instagram = accounts["https://instagram.com/jordanwater"]
         self.assertEqual((instagram.display_name, instagram.handle, instagram.extraction), (None, "jordanwater", "partial"))
         self.assertEqual(format_accounts(build_profiles(self.raw_with(pages[3])))[0], "Instagram: @jordanwater")
+
+    def test_a_post_is_tied_to_the_author_its_page_names(self):
+        # instagram.com/p/<id> hides its author; the page's og:url names it, and stage 1 followed it.
+        post_url, author_url = "https://instagram.com/p/AbC123", "https://instagram.com/pat.lee"
+        post = self.page(post_url, 1, platform="instagram", page_kind="post", title="Instagram",
+                         og={"og:url": "https://instagram.com/pat.lee/reel/AbC123"},
+                         outbound_links=[LinkRef(url="https://instagram.com/commenter", label="commenter")])
+        author = PageRecord(url=author_url, source_urls=[author_url], fetched_url=author_url, status_code=200,
+                            platform="instagram", page_kind="profile", title="Pat Lee (@pat.lee) • Instagram",
+                            found_via=[FoundVia(image_id="img-1", hit_position=None, depth=1, parent_url=post_url)])
+        raw = self.raw_with(post, author)
+        validate_references(raw=raw)
+        accounts, [mention], _ = extract_accounts(raw)
+        [account] = accounts.values()
+        self.assertEqual((account.url, account.depth), (author_url, 1))
+        self.assertEqual((mention.author_account_id, mention.subject_account_ids), (account.account_id, [account.account_id]))
+        # The post's search rank makes the followed account a direct find for img-1.
+        self.assertEqual((account.direct_image_ids, account.best_hit_position), (["img-1"], 1))
 
     def test_snippet_accounts_have_no_edges(self):
         snippet = self.page("https://linkedin.com/in/walled", 1, title="Pat Doe - Analyst - Acme | LinkedIn",

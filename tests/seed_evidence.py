@@ -3,7 +3,7 @@
 This mirrors Section 1's deterministic path (spec 1.3) closely enough to test
 Section 2 on its own: search hits per fixture and scenario (as mock_internet/server.py
 returns them), every hit fetched once per image, account links followed one level
-from depth-0 profiles, 403/404 hits kept as snippet-only records, and the mirror
+from depth-0 profiles and depth-0 posts' authors, 403/404 hits kept as snippet-only records, and the mirror
 merged into its canonical page. Page fields match what scrape.py reads from
 render_page(): trimmed JSON-LD, Open Graph, newline-separated visible text, and
 outbound links as original https URLs.
@@ -17,7 +17,7 @@ from urllib.parse import quote, urlsplit
 
 from mock_internet.seed import build_world
 from pipeline.contracts import FetchError, FoundVia, ImageEvidence, ImageHit, LinkRef, PageRecord, RawEvidenceBundle
-from pipeline.platforms import is_account_url, page_kind, platform_for
+from pipeline.platforms import account_url_for, is_account_url, page_kind, platform_for
 
 MOCK_ORIGIN = "http://127.0.0.1:8765"
 FETCH_BUDGET = 12
@@ -115,13 +115,21 @@ def collect(capture: str, scenario: str = "default", *, run_id: str | None = Non
                 requested.append(hit.url)
                 vias[hit.url].append(FoundVia(image_id=image_id, hit_position=hit.position, depth=0))
                 snippets.setdefault(hit.url, hit)
-        parents = [url for url in requested if BY_URL[url]["kind"] == "profile" and BY_URL[url]["status_code"] == 200]
         targets: dict[str, str] = {}
-        for parent in parents:
-            for target_id, _ in LINKS[BY_URL[parent]["id"]]:
-                target = BY_ID[target_id]["url"]
-                if is_account_url(target):
-                    targets.setdefault(target, parent)
+        for parent in list(requested):  # request order, so the best-ranked parent wins
+            page, loaded = BY_URL[parent], BY_URL[parent]["status_code"] == 200
+            if page_kind(parent) == "post":
+                # Its first author: the handle in its URL, else (when it loaded) its "Author" link.
+                authors = [account_url_for(parent)] + [BY_ID[target_id]["url"] for target_id, label
+                                                       in LINKS[page["id"]] if loaded and label == "Author"]
+                follow = [url for url in authors if url and is_account_url(url)][:1]
+            elif page["kind"] == "profile" and loaded:
+                follow = [BY_ID[target_id]["url"] for target_id, _ in LINKS[page["id"]]
+                          if is_account_url(BY_ID[target_id]["url"])]
+            else:
+                follow = []
+            for target in follow:
+                targets.setdefault(target, parent)
         for target in sorted(targets):  # then followed accounts, in URL order
             if target not in requested and len(requested) < FETCH_BUDGET:
                 requested.append(target)

@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. FaceCheck face search replaced Yandex as the default backend on 2026-10-10 (Johnny), after a live Yandex run on his own photo returned only lookalikes; the state before that is tagged `cyberpi-backend-v1`. Backend V3 replaced FaceCheck as the default later that day, at Johnny's request: SerpApi searches the open web for a crop of the participant's face, and Amazon Rekognition checks the face in every result (`SEARCH_BACKEND=rekognition`, 1.1). FaceCheck's default state is commit `25e807f`. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. FaceCheck face search replaced Yandex as the default backend on 2026-10-10 (Johnny), after a live Yandex run on his own photo returned only lookalikes; the state before that is tagged `cyberpi-backend-v1`. Backend V3 replaced FaceCheck as the default later that day, at Johnny's request: SerpApi searches the open web for a crop of the participant's face, and Amazon Rekognition checks the face in every result (`SEARCH_BACKEND=rekognition`, 1.1). FaceCheck's default state is commit `25e807f`. Johnny then dropped FaceCheck, and V3 added Trace's face index as its main engine, since Yandex and Lens only find lookalikes for a new photo. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -104,8 +104,10 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `FACECHECK_API_KEY` | token; save with `set-key facecheck` | none | facecheck backend |
 | `FACECHECK_DEMO` | `true`/`false`; true searches only 100,000 faces, free | `false` | facecheck backend |
 | `SERPAPI_KEY` | key; save with `set-key serpapi` | none | rekognition and serpapi backends |
-| `REKOGNITION_ENGINES` | comma-separated SerpApi engines: `yandex_images`, `google_lens` | both | rekognition backend |
+| `TRACE_API_KEY` | key (`trk_live_…`); save with `set-key trace` | none | rekognition backend, `trace` engine |
+| `REKOGNITION_ENGINES` | comma-separated: `trace`, `yandex_images`, `google_lens` | all three | rekognition backend |
 | `REKOGNITION_MIN_SIMILARITY` | CompareFaces similarity 0–100; results under it are dropped | `80` | rekognition backend |
+| `REKOGNITION_PLATFORMS` | Platforms to keep, comma-separated (`linkedin`, `x`, `instagram`, `github`, `facebook`, `blog`, `news`); results on other sites are dropped before comparing. `linkedin,facebook` is V3_1 | unset: every site | rekognition backend |
 | `IMAGE_HOST` | `tunnel` or `s3` | `tunnel` | `hosting.py` (live only) |
 | `IMAGE_BUCKET` + AWS credentials | S3 bucket name; keys via `set-key aws` (to `~/.aws/credentials`) | none | `hosting.py` (`IMAGE_HOST=s3`) |
 | `JEV_MODE` | `fake`, `typesafe`, `openrouter`, `off` | `fake` | Sections 2, 3 |
@@ -113,7 +115,8 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` | key | none | `jev.py` |
 | `LLM_MODE` | `off`, `anthropic`, `bedrock` | `off` | Sections 1–4 |
 | `ANTHROPIC_API_KEY` | key | none | `llm.py` |
-| `LLM_MODEL` | provider-specific model ID | `claude-sonnet-5-5` for Anthropic; required for Bedrock | `llm.py` |
+| `LLM_MODEL` | provider-specific model ID | `claude-opus-5-5` for Anthropic (V4); required for Bedrock | `llm.py` |
+| `LLM_EFFORT` | `low`, `medium`, `high`, `xhigh`, `max`; applies to Opus 5.5, Sonnet 5.5, and Fable 5.1 on Anthropic | `medium` (V4; V3 ran Sonnet 5.5 at `low`) | `llm.py` |
 | `AWS_REGION` | region with Rekognition, bucket, or model access | required for V3, S3, and Bedrock | Rekognition, hosting, and Bedrock |
 
 `config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `rekognition` (V3), which requires `SERPAPI_KEY`, `AWS_REGION`, and AWS credentials; `facecheck` requires `FACECHECK_API_KEY`; `serpapi` requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. Hosting settings (`IMAGE_HOST`, then `ssh` for the tunnel or `IMAGE_BUCKET` for S3) are checked by `hosting.require_hosting` before a SerpApi search, and AWS credentials by `rekognition_backend.require_rekognition` before a V3 search, not at load, so stages that only read saved evidence don't need them. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
@@ -237,7 +240,8 @@ Contract snippets omit imports and validators. Use postponed annotations, `BaseM
 **Built** (2026-10-10): `pipeline/platforms.py`, `scrape.py`, `search/` (`base.py`, `mock_backend.py`, `serpapi_backend.py`, later `facecheck_backend.py` and `rekognition_backend.py`), `hosting.py`, `llm.py`, `stage1_collect.py` (store, collectors, merge, `run_stage1`, `STAGE_RUNNERS[1]`), and `image_agent.py`. Tests: `tests/test_platforms.py`, `test_scrape.py`, `test_search.py`, `test_stage1.py`, `test_image_agent.py`, `test_serpapi_backend.py`, `test_facecheck_backend.py`, `test_rekognition_backend.py`, `test_hosting.py`, `test_llm.py`, and the stage-1 cases in `test_cli.py`. Every mock target in 1.8 and the Section 1 column of the matrix (9) pass against the real collector. Not yet done: a live smoke-search on a consenting teammate, which needs an S3 bucket, and the optional paid agent check. These choices fill gaps in 1.1–1.7. They are implementation defaults, not decisions:
 
 - **Identity.** `normalize_url` also drops `www.`, maps `twitter.com` and the mobile hosts of known platforms to their main host, and strips trailing slashes. A redirect keeps the requested URL as the page key; `final_url` and `fetched_url` record where it landed.
-- **Provenance.** Each page keeps one `FoundVia` per image: its best route, a hit before a followed link and then the lowest rank. A depth-1 page's parent is the best-ranked depth-0 profile that links to it.
+- **Provenance.** Each page keeps one `FoundVia` per image: its best route, a hit before a followed link and then the lowest rank. A depth-1 page's parent is the best-ranked depth-0 profile that links to it, or depth-0 post that it wrote.
+- **Post authors** (added 2026-10-11). A depth-0 post leads to one depth-1 target: its author's account. `scrape.post_authors` lists the candidates, most trusted first: the handle in the post URL, the handle in the post URL the page gives for itself (`og:url`, then canonical) on the same platform, then account links labeled "Author". Only the first is followed. A post that failed to load still leads to the handle in its URL. `instagram.com/p/<id>` names no author, but Instagram's `og:url` (`instagram.com/<handle>/reel/<id>`) does, so `instagram.com/<handle>/(p|reel|reels|tv)/<id>` is a post pattern too. Handles that are site paths (`x.com/i/status/<id>`) name no one.
 - **Snippet records.** A failed direct hit keeps a snippet record only when the hit has a title or snippet. Otherwise only the `FetchError` remains.
 - **Agent triage.** Pages the agent fetched but didn't judge count as retained, because fetching them was its choice. `relevant=false` excludes a page, and the exclusion is noted as `img-N excluded: <note>`. An agent that returns without searching falls back (`no_search`).
 - **Bookkeeping.** `search_extras` carries only `status`, `total_results`, `skipped_hits` (unusable result links), `budget_skipped`, `fallback_reason`, and `collection_error`. `run_log.jsonl` names endpoint paths only: `/api/reverse-image` and `/fetch` for the mock, and `/search.json` and `page-fetch` for live runs. Live page URLs are evidence, so `run_log.jsonl` never names them; only `trace.jsonl`, which holds evidence like the artifacts, does.
@@ -298,15 +302,17 @@ Rules:
 - **Face first.** `DetectFaces` runs on a JPEG copy at most 1,600 px on its longest side, EXIF stripped and upright. The largest face is the participant's. An image with no face fails as `no_face` before any SerpApi search or upload.
 - **Search the crop.** The face box, padded by half its width and height on each side and clipped to the image, is cut out as a JPEG. Only this crop is hosted (tunnel or S3, 1.2) and searched, once per engine in `REKOGNITION_ENGINES`: `yandex_images` with `tab=about` and `google_lens`, in parallel. If one engine fails, the other's results are used and `failed_engines` names it. If all fail, the search fails, and a retry searches again, without a second `DetectFaces` or upload. SerpApi's "hasn't returned any results" counts as zero results.
 - **Merge.** Results are merged by normalized page URL, alternating engines by rank, and the first 40 are compared. Each keeps every engine's full-size image URL (`original_image.link` for Yandex, `image` for Lens) ahead of the thumbnails.
-- **Compare.** Each result image is downloaded with the guard page fetches use: public addresses only, every redirect hop checked, at most 8 MB in 8 s, `image/*` content. It is shrunk to at most 1,600 px and sent to `CompareFaces` with the crop as the source and `SimilarityThreshold=0`, so every face in it gets a similarity. A failed download or an unsupported image falls back to the next URL, usually the thumbnail. `face_score` is the highest similarity, rounded down. Eight comparisons run at once, and comparing stops after 45 s.
-- **Filter.** Results under `REKOGNITION_MIN_SIMILARITY` (default 80, CompareFaces' own default) and images without a face are dropped. The rest become the Yandex-shaped payload `parse_image_results` reads, ranked by similarity, with each engine's title, snippet, and thumbnail kept. `search_extras` records `engines`, `failed_engines`, `min_similarity`, `candidates`, and `outcomes`, which counts `matched`, `below_threshold`, `no_face`, `no_image`, `image_unavailable`, `compare_error`, `not_compared`, and `over_limit`.
+- **Compare.** Each result image is downloaded with the guard page fetches use: public addresses only, every redirect hop checked, at most 8 MB in 8 s, `image/*` content. It is shrunk to at most 1,600 px and sent to `CompareFaces` with the crop as the source and `SimilarityThreshold=0`, so every face in it gets a similarity. A failed download, an unsupported image, or an image with no face falls back to the next URL, usually the thumbnail; the result counts as `no_face` only if none of its images that loaded shows a face. `face_score` is the highest similarity in the first image with a face, rounded down. Eight comparisons run at once, and comparing stops after 45 s.
+- **Filter.** Results under `REKOGNITION_MIN_SIMILARITY` (default 80, CompareFaces' own default) and images without a face are dropped. The rest become the Yandex-shaped payload `parse_image_results` reads, ranked by similarity, with each engine's title, snippet, and thumbnail kept. `search_extras` records `engines`, `failed_engines`, `min_similarity`, `candidates`, and `outcomes`, which counts `matched`, `below_threshold`, `no_face`, `no_image`, `image_unavailable`, `compare_error`, `not_compared`, `over_limit`, and `out_of_scope`.
+- **V3_1 (2026-10-11).** V3 with `REKOGNITION_PLATFORMS=linkedin,facebook`. Same engines and costs, but after the merge, results whose page isn't on a listed platform (`platform_for`) are dropped as `out_of_scope` before any download or comparison, so the 40-result cap counts only LinkedIn and Facebook results. `search_extras.platforms` records the list, and the final-payload cache key includes it. Account links followed from the kept pages in stage 1 are not limited. First run, `groupmate-2-808787c9`: 177 merged results, 170 out of scope, 7 compared, none at 80 or above (best 71.66, the same LinkedIn profile V3 ranked first).
 - **Errors.** Rekognition error codes map to the codes in 1.7: `AccessDeniedException` and credential errors become `unauthorized` and stop the image's search at once, throttling becomes `rate_limited`, and `InvalidParameterException` from `CompareFaces` means the image has no face.
 - **Cache.** Each engine's sanitized reply is cached under `cache/rekognition/`, so a rerun or a new threshold makes no new SerpApi search. The final payload is cached only when every engine answered and every result was compared. `--refresh` skips both.
 - **Setup.** `SERPAPI_KEY`, `AWS_REGION`, and AWS credentials with `rekognition:DetectFaces` and `rekognition:CompareFaces`. `run` and `smoke-search` look the credentials up (no AWS request) before creating a run folder, and `build_rekognition_backend` does again before opening the tunnel. The image deadline becomes 35 s plus 75 s (`extra_deadline_s`).
-- **Cost.** One SerpApi search per engine per image, and about $0.001 per Rekognition image: one `DetectFaces` and up to 40 `CompareFaces` per capture image, about $0.12 for X = 3.
+- **Cost.** One SerpApi search per engine per image, and about $0.001 per Rekognition image: one `DetectFaces` and up to 40 `CompareFaces` per capture image, about $0.12 for X = 3, plus one more `CompareFaces` for each result image that shows no face.
 - **Agent.** The per-image agent sees `face_score` and V3's bands: 99+ strong, 95–98 likely, 90–94 possible, lower weak. These bands are ours, not AWS's. AWS recommends 99 or higher for public-safety uses, says even 99 doesn't guarantee a match, and asks for human review ([thresholds](https://docs.aws.amazon.com/rekognition/latest/dg/thresholds-collections.html), [public safety](https://docs.aws.amazon.com/rekognition/latest/dg/considerations-public-safety-use-cases.html)).
 - **Privacy.** Unless the AWS account opts out with an AWS Organizations AI services opt-out policy, AWS may keep the analyzed images and use them to improve its services ([Rekognition FAQ](https://aws.amazon.com/rekognition/faqs/)). Consent must cover that.
 - **Checked live 2026-10-10 (run `johnny-1-8c9c0190`, Johnny's own photo):** Johnny's account is a Free-plan "project" from AWS's new sign-up. Its sandbox SCP allows Rekognition only in us-east-2 (us-east-1 and us-west-2 are denied), so `AWS_REGION=us-east-2`. DetectFaces found 2 faces and kept the largest. Yandex returned 104 results and Google Lens 60; of the first 40 compared, 39 scored under 80 (best 56.6) and 1 had no face, so V3 returned no hits, where V1 had passed lookalikes on. Stage 1 took 38 s. Still unknown: whether comparing all 164 results, or more images per person, finds the participant's own pages.
+- **Trace engine (added 2026-10-10, `trace_face.py`).** The live runs above showed that Yandex and Lens can't find a person from a new photo, and Johnny ruled out FaceCheck, so V3 got Trace's face index ([API](https://traceaifacescan.app/ai-face-scan-api/), [OpenAPI](https://traceaifacescan.app/openapi.json)) as a third engine, on by default. The crop is uploaded (`POST /api/v1/scans`, multipart `image`, at least 200 px; the upright copy goes instead when the crop is smaller) with an Idempotency-Key derived from the capture image's hash, then `GET /scans/{id}` is polled every 3 s for at most 300 s (Trace says 25-45 s; the first live scan was at 87% after 90 s, timed out under the old 90 s limit, and cost a credit). A locked scan (no credits when made) is revealed with `POST /scans/{id}/reveal`; 402 becomes `no_credits`. Problem-document codes and failed-scan `error_code`s map to the codes in 1.7. Each match's page URL, platform, handle and score become a result titled `<handle> on <platform>` with the snippet `Trace face match 96/100 (near certain)`. Rekognition compares the crop with the match's preview (`/scans/{id}/previews/{index}`, fetched with the key, which is sent only to that path). Trace's matches are merged first and every one is compared; the 40-result cap applies only to the SerpApi results (until 2026-10-11 it covered Trace too, and the first groupmate run compared only 40 of Trace's 50 matches). `release()` deletes a finished scan (`DELETE /scans/{id}`), so Trace replies aren't cached and a rerun pays again. A scan that timed out is left running; a rerun of the same photo within 24 hours sends the same key, gets the same scan back, and pays nothing. With Trace on, the image deadline is 35 s plus 355 s. Cost: one credit per image, in packs of 5 for $4, 40 for $22, or 100 for $50, by card. `set-key trace` checks the key with the free `GET /account` (a bad key gets 401 `unauthenticated`, checked live 2026-10-10) and prints only credit counts. Not yet checked live: a paid search, its result quality, and the preview format.
 
 ### 1.2 Image hosting (live only; default changed to a tunnel, see below)
 
@@ -347,7 +353,7 @@ The tools are built per image with closures, so each agent can touch only its ow
 |---|---|---|
 | `reverse_image_search()` | Runs the reverse search on this agent's image. It takes no arguments. Repeated tool calls return the stored result or error. | 1 logical search; bounded retries |
 | `fetch_page(url)` | Fetches and scrapes a page into a `PageRecord` and stores it in the shared page store. Returns a short summary: platform, kind, title, display name, first 300 characters, and outbound account links. | 12 fetches per image |
-| `follow_account_links(url)` | Fetches account links from a profile found directly in search. Does not follow links from depth-1 pages, posts, or articles. | shares the 12 |
+| `follow_account_links(url)` | Fetches account links from a profile found directly in search, or the author's account of a post found directly in search. Does not follow links from depth-1 pages or articles. | shares the 12 |
 
 Tools enforce limits in code. `fetch_page` accepts only this image's search hits or permitted depth-1 targets. A per-URL future/task in the shared store deduplicates in-flight fetches, including failures; do not hold a global lock during network I/O. Every requesting image adds its own provenance even on a cache hit. The per-image budget counts distinct requested URLs, including failures and shared results. Search hits consume the budget first, in rank order; followed targets then use normalized URL order.
 
@@ -357,7 +363,7 @@ The agent's job is triage. Real Yandex results are noisy (lookalikes, stock phot
 
 - which hits look like pages about this person,
 - which of those to fetch,
-- which profiles' account links to follow.
+- which profiles' account links, and which posts' authors, to follow.
 
 Its structured output contains only those judgments:
 
@@ -378,7 +384,7 @@ The system prompt tells the agent:
 - It owns the search for one consenting participant's image. It receives search evidence, not pixels, and must not claim to have compared faces.
 - Run the search once.
 - Fetch the hits most likely to be this person's own profiles or posts, or articles about them.
-- Follow account links from profiles.
+- Follow account links from profiles, and posts to their authors.
 - Skip shopping, stock, and lookalike pages.
 - Stop when the budget is spent or nothing useful is left.
 
@@ -386,7 +392,7 @@ The system prompt tells the agent:
 
 1. Search.
 2. Fetch every hit in rank order, up to the budget.
-3. Follow account links from depth-0 profile pages, once.
+3. Follow account links from depth-0 profile pages, and depth-0 posts to their author's account, once.
 4. Keep successful HTML and search-snippet-only records as relevant. Snippets never supply graph edges or justify bypassing a 403/login wall.
 
 This gives stable retrieval targets. LLM triage may differ; optional model tests measure that separately.
@@ -445,7 +451,7 @@ Merge before Jev. Key pages by the validated canonical URL or normalized origina
 class FoundVia(BaseModel):
     image_id: str
     hit_position: int | None      # rank in that image's results; None if reached by a followed link
-    depth: int                    # 0 = search hit, 1 = followed from a profile
+    depth: int                    # 0 = search hit, 1 = followed from a profile or a post's author
     parent_url: str | None = None
 
 class LinkRef(BaseModel):
@@ -522,7 +528,7 @@ Using `tests/fixtures/captures/alex`, whose images map to `alex-front`, `alex-le
 - [x] 3 reverse-image requests return 13 hits total, with 10 unique URLs. That means exactly 10 fetches, because the shared page store prevents duplicates.
 - [x] The 10 fetches yield 9 successful HTML responses and one 404. Canonical merging leaves 8 HTML records plus one snippet-only 404 record: 9 `PageRecord`s total.
 - [x] There is one 404 `FetchError` for `fieldnotes.test/@alexbuilds/old-project`, and the run continues.
-- [x] There are 5 profile pages (Alex's LinkUp, Chatter, Photogram, CodeForge, and FieldNotes), each with `found_via` filled in. `chatter.test/alexbuilds` lists both `img-1` and `img-2`.
+- [x] There are 5 profile pages (Alex's LinkUp, Chatter, Photogram, CodeForge, and FieldNotes), each with `found_via` filled in. `chatter.test/alexbuilds` lists `img-1` and `img-2` at depth 0, and `img-3` at depth 1 as the author of its Chatter post.
 
 Other cases:
 
@@ -574,10 +580,10 @@ For the mock, Person `worksFor.name` supplies workplace and `homeLocation` is a 
 
 Posts and articles become `Mention`s:
 
-- A post is tied to its author's account through its "Author" link or the handle in its URL.
+- A post is tied to its author's account through the first collected account among `scrape.post_authors`: the handle in its URL, the handle in the post URL it gives for itself (`og:url` or canonical), or its "Author" link.
 - An article keeps names from explicit author metadata or labeled account links and all account URLs it links to. Set `subject_account_ids` only for an explicit post author or an account whose extracted full display name appears in the article title. If the title could refer to multiple linked accounts, leave attribution empty.
 
-Mentions don't form profiles or trigger crawling. Only `subject_account_ids` carry image support. Riverbend's title names Alex, so its interview supports Alex's LinkUp account, not Sam's merely linked account. The archived bio has no account link and creates no account. Ambiguous or unlinked mentions remain evidence without attribution. Do not transfer image support through arbitrary outbound links.
+Mentions don't form profiles. The only crawling a mention triggers is a depth-0 post's author account (1.3). Only `subject_account_ids` carry image support. Riverbend's title names Alex, so its interview supports Alex's LinkUp account, not Sam's merely linked account. The archived bio has no account link and creates no account. Ambiguous or unlinked mentions remain evidence without attribution. Do not transfer image support through arbitrary outbound links.
 
 For each Account, `depth` is the minimum collection depth. `image_ids` contains its retained page provenance plus attributed mention images. `direct_image_ids` excludes depth-1-only discovery. `best_hit_position` is the minimum direct rank across its page and attributed mentions, or null. Keep all PageRecord provenance intact so these fields can be recomputed.
 
@@ -784,6 +790,8 @@ Checked 2026-10-10 in `tests/test_stage2.py` against `tests/seed_evidence.py`, w
 | `consistency` | Accounts matching the most common nonempty normalized workplace, divided by all accounts. Missing workplaces contribute 0; all missing gives 0. | Exposes disagreement and missing data |
 | `name_collision` | Another candidate has a compatible name | Flags the two-Alex case |
 | `newest_update` | Latest valid `updated_at`, or null | Helps compare dated claims; a fetch timestamp is not an update |
+| `face_score` | Highest `face_score` among the hits that reached this profile's accounts or attributed Mentions, kept after triage; null when none has one (Yandex alone, the mock) | How close the search backend's face comparison was |
+| `face_match` | `face_score` on its backend's scale, clamped to 0–1: 0 at the floor of the "possible"/"uncertain" band, 1 at the "strong"/"certain" band (V3 90→99, FaceCheck 70→90); null with `face_score` | Puts V3's and FaceCheck's scores on one scale |
 
 Followed links never create a new direct image match. Failed/empty searches remain in the denominator. Resolve hit URLs through `url_aliases`, and attribute mentions as in 2a. An image's rank-1 hit counts toward `top_hit_share` only if that image kept the page after triage. Break workplace ties lexically for deterministic scoring. The optional Jev consistency `score` is deferred; keeping one definition makes fallback comparisons meaningful.
 
@@ -791,7 +799,7 @@ Followed links never create a new direct image match. Failed/empty searches rema
 
 **Primary method (`typesafe` or `openrouter`, Proposal).** Make one Jev request. The state holds every candidate's account summary and signals, plus the number of images. It asks two kinds of question:
 
-- `match_<profile_id>`, a `noul`: "Does the retrieved evidence support candidate <id> as the searched participant? Treat missing or conflicting evidence as uncertainty; you have no pixels or face comparison." Its `noul` value becomes the displayed model confidence.
+- `match_<profile_id>`, a `noul`: "Does the retrieved evidence support candidate <id> as the searched participant? Treat missing or conflicting evidence as uncertainty; you have no pixels or face comparison." Its `noul` value becomes the displayed model confidence. When any candidate has a `face_match`, the question ends "you have no pixels, only face_match" instead, and the state explains `face_match` and says a strong match puts the participant in a page's photo without proving the account is theirs. Jev gets `face_match` (two decimals) but not `face_score`, whose scale depends on the backend.
 - `best`, a `choice` over the candidate IDs plus `none`: "Which candidate, if any, is the searched person?" This is a cross-check.
 
 **Fallback formula (Proposal).** Use it for `fake`, `off`, or failed Jev calls. Always compute it for comparison. In `fake` mode, stage 3 still sends synthetic answers derived from the formula through the Jev adapter, so typed parsing is exercised and the call is recorded, but scoring uses the formula. These weights preserve the draft's mock behavior; they are not calibrated probabilities:
@@ -799,8 +807,11 @@ Followed links never create a new direct image match. Failed/empty searches rema
 ```
 z = −4 + 2·image_support + 3·top_hit_share + 1.5·(mean_link_trust / 100)
        + 0.3·min(platform_count, 5) + 1·consistency − 0.5·name_collision
+       + 4·(face_match − 0.5)          # only when face_match is set
 confidence = 1 / (1 + e^(−z))
 ```
+
+The face term (added 2026-10-11) moves z by up to 2 either way: a weak match lowers confidence and a strong one raises it. Before it, live V3 runs scored a candidate whose only face match was 80 at 0.79 (it was the rank-1 hit) and one at 99.86 at 0.15 (rank 2). The mock has no face scores, so the values below are unchanged.
 
 With the proposed extraction and graph rules, the formula gives these values (rounded to two decimals for display):
 
@@ -822,7 +833,7 @@ With the proposed extraction and graph rules, the formula gives these values (ro
 - Require a nonempty sourced name, direct image support, and at least one HTML account. Otherwise return `insufficient_evidence`. Snippets alone cannot establish a match.
 - Accept the top candidate only if confidence is ≥ 0.80 and the lead over the runner-up is ≥ 0.20. With one candidate, use runner-up 0. Use unrounded values; the lead comparison allows only 1e-9 of float noise, so 0.85 vs 0.65 counts as 0.20. Otherwise use `below_threshold` or `too_close`. Accept at most one.
 - Keep the Jev number but flag `jev_fallback_disagree` when the absolute difference exceeds 0.4. Carry graph/grouping flags. Add `partial_search_failure` when some image searches failed, `sparse_footprint` for fewer than three accounts, and `verification_fallback` when a real Jev call failed or returned an incomplete or invalid response.
-- **Decided (Johnny, 2026-10-10):** a live run using fallback verification returns `review_required`, with no automatic match. The mock retains its accepted examples to test the flow. This prevents the synthetic rule weights from appearing to verify a real person during an outage.
+- **Decided (Johnny, 2026-10-10; narrowed 2026-10-11):** a live run whose real Jev call failed (an error, an invalid answer, or a request over the size cap) returns `review_required`, with no automatic match. This prevents the synthetic rule weights from appearing to verify a real person during an outage. Until 2026-10-11 this covered every live run on the formula, so with `JEV_MODE=fake` (the default) or `off` no live run could accept anyone. Johnny called that a bug. Those modes choose the formula on purpose, so their live runs now go through the checks below like the mock.
 
 ### 3.3 Contract
 
@@ -843,6 +854,8 @@ class CandidateSignals(BaseModel):
     consistency: float
     name_collision: bool
     newest_update: str | None = None
+    face_score: int | None = None   # 0-100; set together with face_match
+    face_match: float | None = None # 0-1
 
 class CandidateVerdict(BaseModel):
     profile_id: str
@@ -869,7 +882,7 @@ class VerificationResult(BaseModel):
 Built 2026-10-10 in `pipeline/stage3_verify.py` and revised after a GPT-6 Astra review. `tests/test_stage3.py` checks these on real Section 2 output built from the seed (`tests/seed_evidence.py`), in fake and off modes. The outage rows inject terminal search errors because the seed helper doesn't model server faults. Choices the spec left open:
 
 - A `best` answer that picks any of the tied top-noul candidates passes the cross-check; the tie then fails as `too_close`.
-- A live run on the formula returns `review_required` before any other check.
+- A live run whose real Jev call failed returns `review_required` before any other check. Fake and off runs skip this check, live or not.
 - Dates without a timezone count as UTC for `newest_update`.
 - The profile name may come from a snippet account if another account in the profile has HTML evidence.
 - Jev's question text names candidates only by ID, never by scraped name. The state caps text fields, and a request over 24,000 bytes of JSON falls back without a call.
@@ -882,7 +895,8 @@ Built 2026-10-10 in `pipeline/stage3_verify.py` and revised after a GPT-6 Astra 
 - [x] **`unknown`:** the result is `reason="no_candidates"`; no downstream model calls are made. With the default fake/off settings, no model calls occur anywhere. A real per-image agent would already have used its LLM to search.
 - [x] **Jev unavailable** (simulated with an exception): the run finishes on the fallback with `method="fallback"`.
 - [x] **Boundaries:** test 0.80, the 0.20 margin, single candidates, ties, `best=none`, conflicting `best`, malformed answers, and all-search failures. A partial search failure lowers support; it is not silently removed from X.
-- [x] **Live fallback policy:** simulated live metadata plus failed Jev yields `review_required` and no accepted ID, with no live calls in the test.
+- [x] **Live fallback policy:** simulated live metadata plus failed Jev yields `review_required` and no accepted ID, with no live calls in the test. Simulated live metadata with fake or off Jev reaches the same reason as the mock.
+- [x] **Face scores** (2026-10-11): with the same evidence, a closer face match gives higher confidence; a candidate with a strong face match outranks a rank-1 candidate with a weak one; hits dropped in triage don't count; the mock and Yandex results are unchanged; the largest request with a `face_match` on every candidate still fits in 24,000 bytes.
 - [ ] **Optional, real Jev:** record its answers beside the fallback. Fixture success alone does not establish live accuracy.
 
 ## 7. Section 4: Summarization
@@ -1025,7 +1039,7 @@ python3 -m pipeline purge --run runs/<run_id> --include-capture
 
 - `run --until N` stops after stage N (0–4). `--scenario` overrides `MOCK_SCENARIO` for mock search; reject it with live search. Each run gets new artifacts and a new cache.
 - `stage N --run ...` supports 1–4 and loads saved run settings/prerequisites. A saved run keeps the search backend it was created with, and real model calls need `--models`. Re-read the source manifest's consent; refuse a missing/revoked manifest or changed participant/session. Later stages read saved SerpApi evidence locally and make no new search. Invalidate downstream outputs and never reuse mismatched artifacts.
-- `--models` authorizes the selected modes, without choosing a provider. If modes remain fake/off, print that no real model is enabled. A SerpApi run without `--models` therefore performs live collection with deterministic verification and returns `review_required` if it finds a candidate.
+- `--models` authorizes the selected modes, without choosing a provider. If modes remain fake/off, print that no real model is enabled. A SerpApi run without `--models` therefore performs live collection with deterministic verification, and the formula decides whether a candidate is accepted.
 - `--refresh` is valid for live search in `run`, `stage 1`, or `smoke-search`; it bypasses only this run's cache. Smoke-search stores a stage-0 bundle containing only the selected image and stage-1 evidence with `num_images=1`, while retaining the original capture folder for consent/cleanup.
 - `purge` needs no consent or API search key. Attempt S3 deletion, then delete run artifacts, logs, and caches even if remote cleanup fails. On failure, keep only the minimal cleanup manifest, report failure, and allow a retry. Reject paths outside `runs/` and never follow symlinks. `--include-capture` deletes only the registered folder under `captures/`, never test fixtures or arbitrary external paths. Default purge reports the source capture still retained. The capture owner must clear it and any other runs for the participant on withdrawal.
 
@@ -1051,7 +1065,7 @@ Review validation, 2026-10-10: the database persistence test passed. The HTTP su
 | If this is down | The pipeline does this |
 |---|---|
 | Hosting, SerpApi quota/outage, or fresh camera images return no useful hits | Reuse a same-run sanitized cache if present. Otherwise record failure or zero hits, continue other images, and use the labeled mock demo if live retrieval is ineffective. |
-| Jev access, routing, or service | Use grouping rules and formula; record `method="fallback"`. Live fallback requires review; mock flow still runs. |
+| Jev access, routing, or service | Use grouping rules and formula; record `method="fallback"`. A live run whose real Jev call failed requires review; fake/off and mock runs still use the accept rule. |
 | Claude/Bedrock or structured output | Reuse collected evidence with deterministic triage, partial extraction, code rationales, and the template. |
 | A page fetch or login wall | Keep public search title/snippet only. No HTML edges; no match from snippets alone. |
 | Too many accounts or slow calls | Apply account/page limits and deadlines; record truncation/partial evidence instead of widening the crawl. |
@@ -1109,8 +1123,8 @@ Every default in this table is a **Proposal**, not a recorded team decision.
 | Which agent runs verification and summary | One synthesis agent after the per-image agents | Johnny |
 | Image hosting for Yandex | Private S3 bucket, 10-minute presigned URL, delete in `finally`; verify Yandex can fetch it | Johnny |
 | Trust formula | Table: 0 → 0, 1 → 50, 2 → 95, 3+ → 99 | Johnny |
-| Trust → confidence and live acceptance | **Decided 2026-10-10:** accept at ≥ 0.80 with a ≥ 0.20 lead, and live fallback returns `review_required`. Still proposals: the Jev `noul` plus `best` mechanism and the uncalibrated formula weights in 3.2. | Johnny |
-| Strands model | Start with Anthropic `claude-sonnet-5-5`; Haiku `claude-haiku-4-5-20251001` is a documented alternative. Use Bedrock only with confirmed model access and its own ID. One provider first. | Johnny |
+| Trust → confidence and live acceptance | **Decided 2026-10-10:** accept at ≥ 0.80 with a ≥ 0.20 lead, and a live run whose real Jev call failed returns `review_required` (narrowed 2026-10-11 from every live run on the formula). Still proposals: the Jev `noul` plus `best` mechanism and the uncalibrated formula weights in 3.2. | Johnny |
+| Strands model | **V4, 2026-10-11:** Anthropic `claude-opus-5-5` at medium effort (`LLM_EFFORT`). Earlier runs (V3) used `claude-sonnet-5-5` at low effort, still selectable; Haiku `claude-haiku-4-5-20251001` is a documented alternative. Use Bedrock only with confirmed model access and its own ID. One provider first. | Johnny |
 | Consent and retention | External-processing consent; per-run cache; delete after demo/withdrawal; capture owner clears originals and other runs | Johnny and capture teammates |
 | Summary wording | Select sourced bio sentences for the MVP; defer free-form prose until factual support can be checked | Johnny |
 | Where the final profile is shown | `04_final.json` and the console; no UI decided yet | Team |

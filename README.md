@@ -214,37 +214,60 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 Search uses backend V3 by default (`SEARCH_BACKEND=rekognition`). For each photo,
-[Amazon Rekognition](https://aws.amazon.com/rekognition/) finds the face, SerpApi
-searches the open web for a crop of it with Yandex and Google Lens, and Rekognition
-then compares the participant's face with every face in every result image. Results
+[Amazon Rekognition](https://aws.amazon.com/rekognition/) finds the face. A crop of it
+goes to [Trace](https://traceaifacescan.app/ai-face-scan-api/), a face search index
+that returns pages showing the same face, and through SerpApi to Yandex and Google
+Lens. Rekognition then compares the participant's face with every face in every
+result image; for Trace matches, that's Trace's preview of the matched face. Results
 whose best face scores under `REKOGNITION_MIN_SIMILARITY` (default 80) are dropped,
 and the rest are ranked by similarity. The older backends stay selectable. V1, Yandex
 alone (`SEARCH_BACKEND=serpapi`), returns every visually similar image, which for a
 selfie means mostly lookalikes. V2, FaceCheck (`SEARCH_BACKEND=facecheck`), looks the
 face up in FaceCheck's own index of faces instead of searching the web.
 
-V3 needs a SerpApi key and AWS keys. Each prompt hides what you type, checks the key
-first (SerpApi's free Account API, AWS STS), and saves it outside git: the SerpApi key
-in `.env`, created from `.env.example` if needed, and the AWS keys in
-`~/.aws/credentials` (see below).
+V3_1 is V3 limited to LinkedIn and Facebook: set `REKOGNITION_PLATFORMS=linkedin,facebook`.
+It searches the same engines at the same cost, then drops results on other sites before any
+download or face comparison (they count as `out_of_scope`), so the 40-result cap applies only
+to LinkedIn and Facebook results. Any platform in `pipeline/platforms.py` can be listed.
 
 ```bash
-.venv/bin/python -m pipeline set-key serpapi
-.venv/bin/python -m pipeline set-key aws --region us-east-1
+SEARCH_BACKEND=rekognition REKOGNITION_PLATFORMS=linkedin,facebook \
+  .venv/bin/python -m pipeline run --capture captures/<session_id> --models
 ```
+
+Yandex and Google Lens alone can't find a person from a new photo: they find people
+who look alike (checked on Johnny's selfie, run `johnny-1-1e241523`: 164 results, none
+of them him). Trace is the engine that can.
+
+V3 needs a Trace key, a SerpApi key, and AWS keys. Each prompt hides what you type,
+checks the key first (Trace's free `/account`, SerpApi's free Account API, AWS STS),
+and saves it outside git: the Trace and SerpApi keys in `.env`, created from
+`.env.example` if needed, and the AWS keys in `~/.aws/credentials` (see below).
+
+```bash
+.venv/bin/python -m pipeline set-key trace
+.venv/bin/python -m pipeline set-key serpapi
+.venv/bin/python -m pipeline set-key aws --region us-east-2
+```
+
+Each Trace search costs 1 credit, one per photo (packs of 5 for $4, 40 for $22, 100 for
+$50, paid by card). Every Trace match is compared (the 40-result cap applies only to SerpApi results), and the
+photo's scan, with the uploaded crop and the previews, is deleted at Trace once the
+comparisons are over (Trace deletes it after 30 days otherwise). Trace replies aren't
+cached, so rerunning stage 1 pays again. `REKOGNITION_ENGINES=trace` skips SerpApi and
+the tunnel entirely; `yandex_images,google_lens` skips Trace.
 
 The AWS user needs `rekognition:DetectFaces` and `rekognition:CompareFaces`. An account
 on AWS's Free plan only allows some services in some regions: Johnny's project allows
 Rekognition in us-east-2 only, so its `.env` has `AWS_REGION=us-east-2`. Each photo
-costs one SerpApi search per engine (two by default; `REKOGNITION_ENGINES` picks them)
-and about $0.001 per image Rekognition looks at: one DetectFaces call and up to 40
+also costs one SerpApi search per SerpApi engine (two by default) and about $0.001 per
+image Rekognition looks at: one DetectFaces call and up to 40
 CompareFaces calls. Only the face crop leaves the machine, as a JPEG without EXIF.
 Unless the AWS organization has an AI services opt-out policy, AWS may keep the images
 Rekognition analyzes and use them to improve its services
 ([Rekognition FAQ](https://aws.amazon.com/rekognition/faqs/)); tell participants when
-you ask for consent. Each engine's results are cached in the run folder, so `stage 1
---run` on the same run, or a new threshold, makes no new SerpApi search (`--refresh`
-does). A result image that won't download falls back to the engine's thumbnail.
+you ask for consent. Each SerpApi engine's results are cached in the run folder, so
+`stage 1 --run` on the same run makes no new SerpApi search (`--refresh` does). A result image that won't download falls back to the engine's thumbnail.
 
 For FaceCheck instead, save its token and set `SEARCH_BACKEND=facecheck`. FaceCheck
 scores each match from 0 to 100 (90+ certain, 83-89 confident, 70-82 uncertain, 50-69
@@ -351,15 +374,31 @@ With V3 or FaceCheck, each hit carries a face score: the console view prints
 `face 97/100` before the title, and the per-image agent is told what the score means.
 For V3 that's Rekognition's similarity: 99+ strong, 95-98 likely, 90-94 possible. For
 FaceCheck, anything under 70 is a likely lookalike. Even 99 isn't proof, so ask the
-participant which hits are really theirs. `search_extras` in `01_raw_evidence.json`
-counts what happened to every V3 result (matched, below_threshold, no_face,
-image_unavailable, ...).
+participant which hits are really theirs. Stage 3 uses each candidate's best face
+score: a strong one (99+ on V3, 90+ on FaceCheck) raises its confidence and a weak one
+(under 90 on V3, under 70 on FaceCheck) lowers it. `search_extras` in
+`01_raw_evidence.json` counts what happened to every V3 result (matched,
+below_threshold, no_face, image_unavailable, ...).
 
 With `LLM_MODE=anthropic` (or `bedrock`) and `--models`, each image gets its own
 Strands agent that decides which hits to fetch and which pages are about the
 person. Without them, stage 1 fetches every hit in rank order and follows account
 links from the profiles it finds. If an agent fails, its image falls back to that
 deterministic path.
+
+V4 is V3's search with the Strands agents on Claude Opus 5.5 (`claude-opus-5-5`) at
+medium effort, the defaults when `LLM_MODEL` and `LLM_EFFORT` are blank. V3 ran them
+on Sonnet 5.5 at low effort: set `LLM_MODEL=claude-sonnet-5-5` and `LLM_EFFORT=low`.
+Higher effort means longer thinking. Each image gets 35 s for its search and agent, and
+the summary agent gets 10 s; an agent that runs out of time falls back to the
+deterministic path.
+
+Both paths also follow a post in the search results to its author's profile, one
+fetch per post. Instagram's `instagram.com/p/<id>` links hide the author, so the
+pipeline reads it from the page's `og:url` (`instagram.com/<handle>/reel/<id>`).
+The author is whoever posted, which isn't always the person in the photo (a team or
+brand page, for example), so the agent's relevance judgment and verification still
+decide whether that account belongs to the person.
 
 ### Debugging a run
 

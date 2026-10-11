@@ -29,8 +29,9 @@ from pipeline.contracts import (
     validate_references,
 )
 from pipeline.jev import Jev
+from pipeline.search import facecheck_backend, rekognition_backend
 from pipeline.stage2_profiles import build_graphs, build_profiles
-from pipeline.stage3_verify import apply_notes, compute_signals, fallback_confidence, verify
+from pipeline.stage3_verify import FACE_SCORE_RANGE, apply_notes, compute_signals, face_match, fallback_confidence, verify
 from tests.seed_evidence import collect
 from tests.support import FIXTURE_CAPTURES, MockServerTestCase, OfflineTestCase
 
@@ -87,6 +88,16 @@ def rename_profiles(profiles, ids):
             if target is not None:
                 connection["target_profile_id"] = mapping[target]
     return ProfilesBundle.model_validate(data)
+
+
+def face_scored(raw, backend, score_for):
+    """The bundle as if a face search backend had returned the same hits, each scored score_for(url)."""
+    data = raw.model_dump()
+    for image in data["images"]:
+        image["backend"] = backend
+        for hit in image["hits"]:
+            hit["face_score"] = score_for(hit["url"])
+    return RawEvidenceBundle.model_validate(data)
 
 
 def remove_search(raw, image_index, *, failed):
@@ -180,10 +191,12 @@ class SignalTests(OfflineTestCase):
         signals = compute_signals(raw, profiles)
         self.assertEqual(signals["p1"].model_dump(), {
             "image_support": 1.0, "top_hit_share": 1.0, "mean_link_trust": 76.0, "platform_count": 5,
-            "consistency": 0.8, "name_collision": True, "newest_update": "2026-10-01"})
+            "consistency": 0.8, "name_collision": True, "newest_update": "2026-10-01",
+            "face_score": None, "face_match": None})
         self.assertEqual(signals["p2"].model_dump(), {
             "image_support": 1.0, "top_hit_share": 0.0, "mean_link_trust": 72.5, "platform_count": 4,
-            "consistency": 1.0, "name_collision": True, "newest_update": "2026-10-01"})
+            "consistency": 1.0, "name_collision": True, "newest_update": "2026-10-01",
+            "face_score": None, "face_match": None})
 
     def test_failed_and_empty_searches_stay_in_the_denominator(self):
         for failed in (False, True):
@@ -303,6 +316,79 @@ class SignalTests(OfflineTestCase):
         self.assertAlmostEqual(fallback_confidence(signals), 0.8175744761936437)
 
 
+class FaceSignalTests(OfflineTestCase):
+    def test_face_match_follows_each_backends_bands(self):
+        for backend, score, expected in (("rekognition", 80, 0), ("rekognition", 90, 0), ("rekognition", 94, 4 / 9),
+                                         ("rekognition", 99, 1), ("rekognition", 100, 1), ("facecheck", 69, 0),
+                                         ("facecheck", 80, 0.5), ("facecheck", 90, 1), ("facecheck", 99, 1)):
+            with self.subTest(backend=backend, score=score):
+                self.assertAlmostEqual(face_match(score, backend), expected)
+        for backend, module in (("rekognition", rekognition_backend), ("facecheck", facecheck_backend)):
+            with self.subTest(backend=backend):
+                low, high = FACE_SCORE_RANGE[backend]
+                strongest = module.SCORE_BANDS[0][1]
+                self.assertEqual((module.score_band(high), module.score_band(high - 1) != strongest), (strongest, True))
+                self.assertEqual((module.score_band(low - 1), module.score_band(low) != "weak match"), ("weak match", True))
+
+    def test_face_score_and_face_match_are_set_together(self):
+        with self.assertRaises(ValueError):
+            CandidateSignals(image_support=1, top_hit_share=0, mean_link_trust=0, platform_count=1, consistency=0,
+                             name_collision=False, face_score=99)
+
+    def test_signals_take_the_best_face_score_of_kept_hits_and_attributed_mentions(self):
+        raw = face_scored(collect("alex"), "rekognition", lambda url: 85)
+        next(hit for hit in raw.images[2].hits if hit.url == INTERVIEW).face_score = 99  # a mention of p1
+        signals = compute_signals(raw, build_profiles(raw))["p1"]
+        self.assertEqual((signals.face_score, signals.face_match), (99, 1))
+        raw.images[2].page_urls.remove(INTERVIEW)
+        signals = compute_signals(raw, build_profiles(raw))["p1"]
+        self.assertEqual((signals.face_score, signals.face_match), (85, 0))
+
+    def test_face_match_moves_the_formula_around_its_midpoint(self):
+        signals = CandidateSignals(image_support=1, top_hit_share=0.5, mean_link_trust=0, platform_count=0,
+                                   consistency=0.5, name_collision=False)  # z = 0 without a face
+        for score, match, z in ((None, None, 0), (94, 0.5, 0), (99, 1, 2), (80, 0, -2)):
+            with self.subTest(match=match):
+                signals = signals.model_copy(update={"face_score": score, "face_match": match})
+                self.assertAlmostEqual(fallback_confidence(signals), 1 / (1 + math.exp(-z)))
+
+    def test_a_closer_face_match_raises_confidence(self):
+        raw = collect("casey")
+        without = verify(raw, build_profiles(raw)).verdicts[0]
+        verdicts = []
+        for score in (85, 95, 99):
+            scored = face_scored(raw, "rekognition", lambda url: score)
+            verdicts.append(verify(scored, build_profiles(scored)).verdicts[0])
+        confidences = [verdict.confidence for verdict in verdicts]
+        self.assertEqual(confidences, sorted(set(confidences)))
+        self.assertLess(confidences[0], without.confidence)
+        self.assertGreater(confidences[-1], without.confidence)
+        self.assertIn("Best face score 99/100.", verdicts[-1].rationale)
+        self.assertNotIn("face", without.rationale)
+
+    def test_a_strong_face_match_outranks_a_weak_top_hit(self):
+        # Live V3 runs ranked a rank-1 hit at similarity 80 above a rank-2 hit at 99.
+        raw = face_scored(collect("alex", "ambiguous"), "rekognition", lambda url: 99 if "alexframes" in url else 82)
+        result = verify(raw, build_profiles(raw))
+        self.assertEqual([(v.profile_id, v.signals.top_hit_share, v.signals.face_score) for v in result.verdicts],
+                         [("p2", 0, 99), ("p1", 1, 82)])
+        self.assertEqual(result.reason, "too_close")
+
+    def test_jev_sees_face_match_only_when_the_search_compared_faces(self):
+        raw, profiles = seed_case(scenario="ambiguous")
+        state, questions = stage3_verify.jev_request(raw, profiles, compute_signals(raw, profiles))
+        self.assertIn("no face comparison", state["task"])
+        self.assertNotIn("face_match", json.dumps([state, questions]))
+        raw = face_scored(raw, "rekognition", lambda url: 99 if "alexframes" in url else 94)
+        profiles = build_profiles(raw)
+        state, questions = stage3_verify.jev_request(raw, profiles, compute_signals(raw, profiles))
+        self.assertNotIn("no face comparison", state["task"])
+        self.assertIn("face_match", state["signal_notes"])
+        self.assertEqual({key: c["signals"]["face_match"] for key, c in state["candidates"].items()}, {"p1": 0.44, "p2": 1})
+        self.assertNotIn("face_score", json.dumps(state))
+        self.assertIn("only face_match", questions["match_p1"]["instructions"])
+
+
 class JevTests(OfflineTestCase):
     def test_valid_answers_from_either_route_supply_all_confidences(self):
         raw, profiles = seed_case(scenario="ambiguous")
@@ -336,7 +422,8 @@ class JevTests(OfflineTestCase):
         self.assertNotIn("Alex Morgan", json.dumps(questions))
         for profile in profiles.profiles:
             summary = state["candidates"][profile.profile_id]
-            self.assertEqual(summary["signals"], compute_signals(raw, profiles)[profile.profile_id].model_dump())
+            self.assertEqual(summary["signals"], compute_signals(raw, profiles)[profile.profile_id].model_dump(
+                exclude={"face_score", "face_match"}))
             self.assertEqual(len(summary["accounts"]), len(profile.account_ids))
             self.assertTrue(all("url" not in account and "text" not in account for account in summary["accounts"]))
 
@@ -353,10 +440,14 @@ class JevTests(OfflineTestCase):
                 setattr(account, field, "x" * 100_000)
             account.links_to = []
         profiles.graphs = build_graphs(profiles.accounts, profiles.profiles)
-        state, questions = stage3_verify.jev_request(raw, profiles, compute_signals(raw, profiles))
-        size = len(json.dumps({"state": state, "questions": questions}).encode())
-        self.assertLess(size, 24_000)
-        self.assertEqual(len(state["candidates"]), 12)
+        signals = compute_signals(raw, profiles)
+        # A face match on every candidate adds a note and a field each, and must still fit.
+        with_faces = {key: value.model_copy(update={"face_score": 94, "face_match": 4 / 9}) for key, value in signals.items()}
+        for candidate_signals in (signals, with_faces):
+            state, questions = stage3_verify.jev_request(raw, profiles, candidate_signals)
+            size = len(json.dumps({"state": state, "questions": questions}).encode())
+            self.assertLess(size, 24_000)
+            self.assertEqual(len(state["candidates"]), 12)
 
     def test_oversized_request_falls_back_before_contacting_provider(self):
         raw, profiles = seed_case()
@@ -508,20 +599,33 @@ class DecisionTests(OfflineTestCase):
         with self.assertRaisesRegex(ArtifactError, "reserved"):
             verify(raw, rename_profiles(profiles, ["none"]), jev=NoCallJev())
 
-    def test_live_fallback_always_requires_review_when_candidates_exist(self):
+    def test_live_run_requires_review_when_real_jev_fails(self):
         def outage(state, questions):
             raise TimeoutError
 
-        for jev in (real_jev(outage), client("fake"), None):
-            for name in ("Casey Brooks", None):
+        for name in ("Casey Brooks", None):
+            with self.subTest(name=name):
+                raw, profiles = seed_case("casey")
+                profiles.profiles[0].name = name
+                result = verify(raw, profiles, jev=real_jev(outage), live=True)
+                self.assertEqual((result.reason, result.accepted_profile_id), ("review_required", None))
+                self.assertTrue(all(v.decision == "rejected" for v in result.verdicts))
+        self.assertEqual(verify(*seed_case("alex", "rate_limited"), live=True).reason, "evidence_unavailable")
+        self.assertEqual(self.decide(seed_case("casey"), {"p1": 0.93}, live=True).reason, "accepted")
+
+    def test_live_run_without_real_jev_uses_the_accept_rule(self):
+        for jev in (client("fake"), None):
+            for name, reason in (("Casey Brooks", "accepted"), (None, "insufficient_evidence")):
                 with self.subTest(provider=getattr(jev, "provider", "off"), name=name):
                     raw, profiles = seed_case("casey")
                     profiles.profiles[0].name = name
                     result = verify(raw, profiles, jev=jev, live=True)
-                    self.assertEqual((result.reason, result.accepted_profile_id), ("review_required", None))
-                    self.assertTrue(all(v.decision == "rejected" for v in result.verdicts))
-        self.assertEqual(verify(*seed_case("alex", "rate_limited"), live=True).reason, "evidence_unavailable")
-        self.assertEqual(self.decide(seed_case("casey"), {"p1": 0.93}, live=True).reason, "accepted")
+                    self.assertEqual(result.reason, reason)
+                    self.assertEqual(result.accepted_profile_id, "p1" if reason == "accepted" else None)
+                    self.assertTrue(all(v.method == "fallback" for v in result.verdicts))
+            with self.subTest(provider=getattr(jev, "provider", "off"), scenario="ambiguous"):
+                self.assertEqual(verify(*seed_case(scenario="ambiguous"), jev=jev, live=True).reason,
+                                 verify(*seed_case(scenario="ambiguous"), jev=jev).reason)
 
 
 class NotesTests(OfflineTestCase):
@@ -574,10 +678,18 @@ class StageRunnerTests(OfflineTestCase):
         self.assertIn("uncalibrated", view)
 
     def test_live_policy_uses_recorded_backend_with_mock_replay_settings(self):
+        def outage(state, questions):
+            raise TimeoutError
+
+        failing = lambda settings, run_dir, stage: real_jev(outage, run_dir=run_dir, stage=stage)
+        for backend, reason in (("serpapi", "review_required"), ("mock", "accepted")):
+            with self.subTest(backend=backend), patch.object(stage3_verify, "Jev", failing):
+                result = stage3_verify.run_stage(self.write_run(backend), settings())
+                self.assertEqual(result.reason, reason)
         for mode in ("fake", "off"):
             with self.subTest(mode=mode):
                 result = stage3_verify.run_stage(self.write_run("serpapi"), settings(mode))
-                self.assertEqual((result.reason, result.accepted_profile_id), ("review_required", None))
+                self.assertEqual((result.reason, result.accepted_profile_id), ("accepted", "p1"))
 
     def test_rerun_invalidates_old_outputs_even_if_a_prerequisite_is_missing(self):
         for missing in (False, True):

@@ -1,13 +1,15 @@
 """Section 1: per-image reverse-image search and scrape -> 01_raw_evidence.json (spec 1.3-1.7).
 
-Each image gets its own ImageCollector. It can fetch only its own search hits
-and the account links of profiles found directly in its search (depth 1), with
-a budget of 12 distinct URLs. One PageStore per run fetches each normalized URL
-once, even when several images ask for it at the same moment, and failures are
-shared too. Every requesting image still records its own provenance.
+Each image gets its own ImageCollector. It can fetch only its own search hits,
+plus at depth 1 the account links of profiles found directly in its search and the
+author accounts of posts found there, with a budget of 12 distinct URLs. One
+PageStore per run fetches each normalized URL once, even when several images ask
+for it at the same moment, and failures are shared too. Every requesting image
+still records its own provenance.
 
 With LLM_MODE=off the collector runs the deterministic path: search, fetch every
-hit in rank order, then follow account links from depth-0 profiles in URL order.
+hit in rank order, then follow account links from depth-0 profiles and depth-0
+posts' authors in URL order.
 Otherwise each image gets a fresh Strands agent (image_agent.py). If the agent
 fails, deterministic triage continues over the stored results; a completed search
 is never repeated. A per-image deadline bounds agent work and retries alike.
@@ -36,7 +38,7 @@ from pipeline.contracts import (
     PageJudgment, PageRecord, RawEvidenceBundle, validate_references,
 )
 from pipeline.platforms import account_handle, normalize_url, page_kind, platform_for
-from pipeline.scrape import Scraped, scrape_html
+from pipeline.scrape import Scraped, post_authors, scrape_html
 from pipeline.search.base import BackendError, SearchBackend, parse_image_results, with_retries
 
 MAX_FETCHES_PER_IMAGE = 12
@@ -225,13 +227,18 @@ class ImageCollector:
     # Fetch permissions and budget
 
     def account_links(self, url: str) -> list[str]:
-        """Account links on one of this image's depth-0 profile pages, or [] if url isn't one."""
+        """The accounts one of this image's depth-0 pages leads to: a profile's account links, or a
+        post's author. [] for anything else."""
         request = self.requests.get(url)
-        if request is None or request.via.depth != 0 or request.result is None or not request.result.ok:
+        if request is None or request.via.depth != 0 or request.result is None:
             return []
-        if request.result.kind != "profile":
+        result = request.result
+        if result.kind == "post":
+            # Only the most trusted author. A post that failed to load can still name one in its URL.
+            return post_authors(url, result.scraped)[:1]
+        if not result.ok or result.kind != "profile":
             return []
-        links = (link.url for link in request.result.scraped.outbound_links)
+        links = (link.url for link in result.scraped.outbound_links)
         return list(dict.fromkeys(link for link in links if account_handle(link) is not None and link != url))
 
     def via_for(self, url: str) -> FoundVia:
@@ -273,7 +280,7 @@ class ImageCollector:
     # Collection paths
 
     async def collect_deterministic(self) -> None:
-        """Search; fetch every hit in rank order; follow account links from depth-0 profiles once."""
+        """Search; fetch every hit in rank order; follow depth-0 profiles' account links and posts' authors once."""
         outcome = await self.search()
         await self.fetch([hit.url for hit in outcome.hits])
         targets = [link for url in list(self.requests) for link in self.account_links(url) if link not in self.requests]

@@ -120,6 +120,15 @@ class ClassifyTests(unittest.TestCase):
         self.assertIsNone(post_author_handle("https://instagram.com/p/AbC123"))
         self.assertIsNone(account_url_for("https://instagram.com/p/AbC123"))
         self.assertFalse(is_post_url("https://chatter.test/alexbuilds"))
+        # instagram.com/<handle>/p|reel/<id> names its author, as Instagram's og:url does.
+        for url in ("https://instagram.com/some.name/reel/AbC123", "https://www.instagram.com/some.name/p/AbC123/"):
+            with self.subTest(url=url):
+                self.assertEqual(page_kind(url), "post")
+                self.assertIsNone(account_handle(url))
+                self.assertEqual(account_url_for(url), "https://instagram.com/some.name")
+        # A site path in the handle's place names no one.
+        self.assertIsNone(post_author_handle("https://x.com/i/status/101"))
+        self.assertIsNone(account_url_for("https://instagram.com/explore/p/AbC123"))
 
     def test_page_kind(self):
         self.assertEqual(page_kind("https://chatter.test/alexbuilds/status/101"), "post")

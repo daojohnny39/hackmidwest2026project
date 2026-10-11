@@ -24,7 +24,8 @@ from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase, read_
 ALEX = FIXTURE_CAPTURES / "alex"
 SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
 FACECHECK_ENV = {"SEARCH_BACKEND": "facecheck", "FACECHECK_API_KEY": "test-facecheck-token"}
-V3_ENV = {"SEARCH_BACKEND": "rekognition", "SERPAPI_KEY": "test-serpapi-key", "AWS_REGION": "us-east-1"}
+V3_ENV = {"SEARCH_BACKEND": "rekognition", "SERPAPI_KEY": "test-serpapi-key", "TRACE_API_KEY": "trk_live_test-key",
+          "AWS_REGION": "us-east-1"}
 AWS_KEYS = {"AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE", "AWS_SECRET_ACCESS_KEY": "test-aws-secret-" + "x" * 24}
 HOSTING_ENV = {"IMAGE_HOST": "s3", "IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
 
@@ -226,12 +227,12 @@ class CliTests(MockServerTestCase):
         self.assertEqual(code, OK, err)
         self.assertIn("search: rekognition", out)
         self.assertIn(f"1. face  97/100 Hit 1  {url}", out)
-        self.assertEqual(make_backend.call_args.args[0].rekognition_engines, ("yandex_images", "google_lens"))
+        self.assertEqual(make_backend.call_args.args[0].rekognition_engines, ("trace", "yandex_images", "google_lens"))
         [run_dir] = self.run_dirs()
         self.assertEqual(read_artifact(run_dir, 0).backend, "rekognition")
         self.assertEqual(read_artifact(run_dir, 1).images[0].backend, "rekognition")
         files = "".join(path.read_text() for path in run_dir.iterdir() if path.is_file())
-        for secret in ("test-serpapi-key", AWS_KEYS["AWS_SECRET_ACCESS_KEY"]):
+        for secret in ("test-serpapi-key", "trk_live_test-key", AWS_KEYS["AWS_SECRET_ACCESS_KEY"]):
             self.assertNotIn(secret, out + err + files)
 
     def test_facecheck_run_needs_no_image_hosting(self):
@@ -341,7 +342,7 @@ class CliTests(MockServerTestCase):
         code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
         self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; V3's keys are missing
         self.assertIn("SERPAPI_KEY", err)
-        os.environ.update(SERPAPI_KEY="test-serpapi-key", AWS_REGION="us-east-1", IMAGE_HOST="s3",
+        os.environ.update(SERPAPI_KEY="test-serpapi-key", TRACE_API_KEY="trk_live_test-key", AWS_REGION="us-east-1", IMAGE_HOST="s3",
                           IMAGE_BUCKET="test-bucket")
         code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
         self.assertEqual(code, BAD_CONFIG)  # no AWS credentials for Rekognition

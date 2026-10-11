@@ -1,7 +1,8 @@
-"""Backend V3 (SerpApi search + Rekognition face matching), offline (spec 1.1, 1.7).
+"""Backend V3 (Trace and SerpApi search + Rekognition face matching), offline (spec 1.1, 1.7).
 
 httpx.MockTransport stands in for SerpApi and the hosts of result images, FakeHost for
-image hosting, and FakeRekognition for boto3's Rekognition client. Result images are
+image hosting, FakeTrace for the Trace client (tests/test_trace_face.py covers its HTTP),
+and FakeRekognition for boto3's Rekognition client. Result images are
 blank JPEGs told apart by their width, which survives the backend's re-encoding. The
 socket guard from OfflineTestCase stays on throughout.
 """
@@ -25,6 +26,7 @@ from pipeline.contracts import CaptureImage, FetchedPage, UploadRecord, validate
 from pipeline.image_agent import system_prompt
 from pipeline.search.base import BackendError, parse_image_results
 from pipeline.search.rekognition_backend import (
+    TRACE_EXTRA_DEADLINE_S,
     RekognitionBackend, aws_error, best_similarity, build_rekognition_backend, face_crop, merge, require_rekognition,
     sanitize_engine, score_band,
 )
@@ -132,8 +134,10 @@ class V3TestCase(OfflineTestCase):
         (self.folder / "img-1.jpg").write_bytes(jpeg(1000, 800))
         self.serp, self.downloads = [], []
 
-    def backend(self, serp=None, *, rekognition=None, images=None, pages=None, refresh=False, **options):
-        """serp: engine -> list of (status, body) replies, used in order."""
+    def backend(self, serp=None, *, rekognition=None, images=None, pages=None, refresh=False, hosted=True,
+                **options):
+        """serp: engine -> list of (status, body) replies, used in order. hosted=False builds it
+        without a SerpApi key or image host, as for REKOGNITION_ENGINES=trace."""
         serp = {engine: list(replies) for engine, replies in (serp or {"yandex_images": [(200, YANDEX)],
                                                                        "google_lens": [(200, LENS)]}).items()}
         images = images if images is not None else {}
@@ -156,7 +160,8 @@ class V3TestCase(OfflineTestCase):
         self.host = FakeHost()
         self.rekognition = rekognition or FakeRekognition()
         backend = RekognitionBackend(
-            api_key=KEY, capture_dir=self.folder, host=self.host, rekognition=self.rekognition,
+            api_key=KEY if hosted else None, capture_dir=self.folder, host=self.host if hosted else None,
+            rekognition=self.rekognition,
             cache_dir=self.folder / "cache", refresh=refresh,
             search_client=httpx.AsyncClient(transport=httpx.MockTransport(search)),
             images=httpx.AsyncClient(transport=httpx.MockTransport(image)),
@@ -328,6 +333,152 @@ class SearchTests(V3TestCase):
         self.assertEqual(result.extras["outcomes"], {"image_unavailable": 2, "matched": 1, "no_image": 1})
         self.assertFalse([url for url in self.downloads if "127.0.0.1" in url or "10.0.0.8" in url])
 
+    def test_an_image_without_a_face_moves_on_to_the_next(self):
+        lens = {"search_metadata": {"status": "Success"}, "visual_matches": [
+            # CompareFaces finds no face in the full-size image; the thumbnail matches.
+            {"link": "https://a.example/p", "image": "https://img.example/landscape.jpg",
+             "thumbnail": "https://tbn.example/t4.jpg"},
+            # No face in either: CompareFaces refuses the first and finds none in the second.
+            {"link": "https://b.example/p", "image": "https://tbn.example/t1.jpg",
+             "thumbnail": "https://img.example/landscape.jpg"},
+            # No face, then a thumbnail that won't download: still no_face, not image_unavailable.
+            {"link": "https://c.example/p", "image": "https://img.example/landscape.jpg",
+             "thumbnail": "https://img.example/missing.jpg"},
+        ]}
+        backend = self.backend({"google_lens": [(200, lens)]}, engines=("google_lens",))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([(hit.url, hit.face_score) for hit in result.hits], [("https://a.example/p", 85)])
+        self.assertEqual(result.extras["outcomes"], {"matched": 1, "no_face": 2})
+        self.assertEqual(len(self.rekognition.compare_calls), 5)
+
+
+TRACE_MATCHES = [
+    {"score": 71, "tier": "possible", "platform": "instagram", "handle": "someone_else",
+     "url": "https://www.instagram.com/someone_else/", "preview_url": "https://traceaifacescan.app/api/v1/scans/scan-1/previews/1"},
+    {"score": 96, "tier": "near_certain", "platform": "linkedin", "handle": "patlee",
+     "url": "https://www.linkedin.com/in/patlee/", "preview_url": "https://traceaifacescan.app/api/v1/scans/scan-1/previews/0"},
+    {"score": 74, "tier": "possible", "platform": "web", "handle": None,
+     "url": "https://blog.example/pat-at-the-meetup", "preview_url": "https://evil.example/steal-the-key"},
+    {"score": 70, "tier": "possible", "platform": "x", "handle": "nopreview", "url": "https://x.com/nopreview",
+     "preview_url": "https://traceaifacescan.app/api/v1/scans/scan-1/previews/9"},
+]
+# Preview index -> width, picking a CompareFaces reply from REPLIES: LinkedIn 99.62, Instagram 61.0, and
+# the blog 85.9 (its preview URL isn't Trace's, so the backend uses Trace's path for its index, 2).
+PREVIEW_WIDTHS = {0: 101, 1: 102, 2: 105}
+
+
+class FakeTrace:
+    def __init__(self, matches=TRACE_MATCHES, error=None):
+        self.matches, self.error = matches, error
+        self.uploads, self.keys, self.previews, self.deleted, self.closed = [], [], [], [], False
+
+    async def search(self, image_id, image, *, key=None):
+        self.uploads.append(image)
+        self.keys.append(key)
+        if self.error:
+            raise self.error
+        return "scan-1", {"id": "scan-1", "status": "done", "locked": False, "matches": self.matches}
+
+    async def preview(self, url):
+        self.previews.append(url)
+        width = PREVIEW_WIDTHS.get(int(url.rsplit("/", 1)[1]))
+        if width is None:
+            raise BackendError("not_found", status_code=404)
+        return jpeg(width)
+
+    async def delete(self, image_id):
+        self.deleted.append(image_id)
+
+    async def aclose(self):
+        self.closed = True
+
+
+class TraceEngineTests(V3TestCase):
+    def test_trace_only_needs_no_serpapi_or_hosting(self):
+        fake = FakeTrace()
+        backend = self.backend({}, engines=("trace",), trace_search=fake, hosted=False)
+        self.assertEqual(backend.extra_deadline_s, TRACE_EXTRA_DEADLINE_S)
+        result = parse_image_results(self.search(backend))
+
+        self.assertEqual((self.serp, self.host.uploads), ([], []))
+        [upload] = fake.uploads
+        self.assertEqual(Image.open(io.BytesIO(upload)).size, (400, 400))  # the face crop
+        self.assertEqual([(hit.url, hit.face_score, hit.title, hit.snippet) for hit in result.hits], [
+            (LINKEDIN, 99, "patlee on linkedin", "Trace face match 96/100 (near certain)"),
+            ("https://blog.example/pat-at-the-meetup", 85, "web", "Trace face match 74/100 (possible)")])
+        self.assertEqual(result.extras["outcomes"], {"matched": 2, "below_threshold": 1, "image_unavailable": 1})
+        self.assertEqual(result.request_id, "scan-1")
+        # A preview URL off Trace's API is replaced by Trace's own path, so the key never leaves Trace.
+        self.assertTrue(all(url.startswith("https://traceaifacescan.app/api/v1/scans/scan-1/previews/")
+                            for url in fake.previews))
+        self.assertEqual(self.cached(), ["v3-trace-80.json"])  # Trace replies themselves aren't cached
+        asyncio.run(backend.release(IMAGE))
+        self.assertEqual(fake.deleted, ["img-1"])
+
+        # The Idempotency-Key comes from the photo, so another run of the same photo gets the same scan.
+        again = FakeTrace()
+        self.search(self.backend({}, engines=("trace",), trace_search=again, hosted=False, refresh=True))
+        self.assertEqual(len(fake.keys[0]), 32)
+        self.assertEqual(again.keys, fake.keys)
+
+    def test_every_trace_match_is_compared_and_the_cap_limits_the_rest(self):
+        fake = FakeTrace()
+        backend = self.backend(engines=("trace", "yandex_images", "google_lens"), trace_search=fake)
+        with patch("pipeline.search.rekognition_backend.MAX_CANDIDATES", 2):
+            result = parse_image_results(self.search(backend))
+        # All 4 Trace matches, then the first 2 SerpApi-only pages (GitHub, the lookalike). LinkedIn,
+        # also found by Yandex and Lens, is compared through Trace's preview, not a download.
+        self.assertEqual([hit.url for hit in result.hits],
+                         [LINKEDIN, GITHUB, "https://blog.example/pat-at-the-meetup"])
+        self.assertEqual(result.extras["candidates"], 8)
+        self.assertEqual(result.extras["outcomes"]["over_limit"], 2)
+        self.assertEqual(len(fake.previews), 4)
+        self.assertNotIn("https://img.example/linkedin.jpg", self.downloads)
+        self.assertEqual(len(self.serp), 2)
+
+    def test_platform_limit_drops_other_sites_before_comparing(self):
+        # V3_1: of the 8 merged pages only the LinkedIn profile is kept, compared through Trace's preview.
+        fake = FakeTrace()
+        backend = self.backend(engines=("trace", "yandex_images", "google_lens"), trace_search=fake,
+                               platforms=("linkedin", "facebook"))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([(hit.url, hit.face_score) for hit in result.hits], [(LINKEDIN, 99)])
+        self.assertEqual((result.extras["candidates"], result.extras["outcomes"]),
+                         (8, {"out_of_scope": 7, "matched": 1}))
+        self.assertEqual(result.extras["platforms"], ["linkedin", "facebook"])
+        self.assertEqual((len(self.rekognition.compare_calls), self.downloads), (1, []))
+        self.assertIn("v3-trace+yandex_images+google_lens-80-linkedin+facebook.json", self.cached())
+
+    def test_the_cap_counts_only_kept_platforms(self):
+        backend = self.backend(platforms=("github",))
+        with patch("pipeline.search.rekognition_backend.MAX_CANDIDATES", 1):
+            result = parse_image_results(self.search(backend))
+        # Without the limit the cap of 1 would compare LinkedIn, the first merged page.
+        self.assertEqual([hit.url for hit in result.hits], [GITHUB])
+        self.assertEqual(result.extras["outcomes"], {"out_of_scope": 4, "matched": 1})
+
+    def test_small_face_sends_the_whole_photo_to_trace(self):
+        small = {"BoundingBox": {"Left": 0.45, "Top": 0.45, "Width": 0.05, "Height": 0.05}}
+        fake = FakeTrace(matches=[])
+        self.search(self.backend({}, engines=("trace",), trace_search=fake, hosted=False,
+                                 rekognition=FakeRekognition(faces=(small,))))
+        self.assertEqual(Image.open(io.BytesIO(fake.uploads[0])).size, (1000, 800))
+
+    def test_trace_failure_keeps_the_serpapi_results(self):
+        fake = FakeTrace(error=BackendError("no_credits"))
+        backend = self.backend(engines=("trace", "yandex_images", "google_lens"), trace_search=fake)
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([hit.url for hit in result.hits], [LINKEDIN, GITHUB, BROKEN])
+        self.assertEqual((result.extras["engines"], result.extras["failed_engines"]),
+                         (["yandex_images", "google_lens"], ["trace"]))
+        self.assertNotIn("v3-trace+yandex_images+google_lens-80.json", self.cached())
+
+    def test_engines_need_their_clients(self):
+        with self.assertRaisesRegex(ValueError, "TraceFaceSearch"):
+            self.backend(engines=("trace",))
+        with self.assertRaisesRegex(ValueError, "SerpApi key"):
+            self.backend(engines=("google_lens",), hosted=False)
+
 
 class HelperTests(OfflineTestCase):
     def test_face_crop_pads_and_clips(self):
@@ -390,7 +541,8 @@ class HelperTests(OfflineTestCase):
 class BuildTests(OfflineTestCase):
     def settings(self, **env):
         return load_settings(backend="rekognition", dotenv_path=None,
-                             environ={"SERPAPI_KEY": KEY, "AWS_REGION": "us-east-1", **env})
+                             environ={"SERPAPI_KEY": KEY, "TRACE_API_KEY": "trk_live_test", "AWS_REGION": "us-east-1",
+                                      **env})
 
     def test_missing_credentials_stop_before_the_tunnel(self):
         capture = live_capture("img-1")
@@ -399,16 +551,30 @@ class BuildTests(OfflineTestCase):
                 build_rekognition_backend(self.settings(), capture, Path("/tmp/run"), refresh=False)
         open_host.assert_not_called()
 
+    def test_trace_only_build_opens_no_tunnel(self):
+        os.environ.update(AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY="x" * 40)
+        settings = load_settings(backend="rekognition", dotenv_path=None, environ={
+            "TRACE_API_KEY": "trk_live_test", "AWS_REGION": "us-east-2", "REKOGNITION_ENGINES": "trace"})
+        with patch("pipeline.search.rekognition_backend.open_host") as open_host, \
+                patch("pipeline.search.rekognition_backend.rekognition_client"):
+            backend = build_rekognition_backend(settings, live_capture("img-1"), Path("/tmp/run"), refresh=False)
+        self.addCleanup(lambda: asyncio.run(backend.aclose()))
+        open_host.assert_not_called()
+        self.assertIsNone(backend.host)
+        self.assertEqual((backend.engines, backend.trace_search.api_key), (("trace",), "trk_live_test"))
+
     def test_build_uses_the_settings(self):
         os.environ.update(AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY="x" * 40)
         require_rekognition(self.settings())
-        settings = self.settings(REKOGNITION_ENGINES="google_lens", REKOGNITION_MIN_SIMILARITY="90")
+        settings = self.settings(REKOGNITION_ENGINES="google_lens", REKOGNITION_MIN_SIMILARITY="90",
+                                 REKOGNITION_PLATFORMS="linkedin,facebook")
         with patch("pipeline.search.rekognition_backend.open_host", return_value=FakeHost()), \
                 patch("pipeline.search.rekognition_backend.rekognition_client") as client:
             backend = build_rekognition_backend(settings, live_capture("img-1"), Path("/tmp/run"), refresh=True)
         self.addCleanup(lambda: asyncio.run(backend.aclose()))
         client.assert_called_once_with("us-east-1")
         self.assertEqual((backend.engines, backend.min_similarity, backend.refresh), (("google_lens",), 90.0, True))
+        self.assertEqual(backend.platforms, ("linkedin", "facebook"))
         self.assertEqual(backend.cache_dir, Path("/tmp/run/cache/rekognition"))
         self.assertIn("face_score", system_prompt(backend))
         self.assertIn("under 90 were already dropped", system_prompt(backend))

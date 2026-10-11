@@ -16,10 +16,11 @@ SECRETS = {
     "OPENROUTER_API_KEY": "or-SECRET-3333",
     "ANTHROPIC_API_KEY": "sk-ant-SECRET-4444",
     "FACECHECK_API_KEY": "fc-SECRET-5555",
+    "TRACE_API_KEY": "trk_live_SECRET-6666",
 }
 FACECHECK = {"FACECHECK_API_KEY": SECRETS["FACECHECK_API_KEY"]}
 LIVE = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "IMAGE_BUCKET": "hm-bucket", "AWS_REGION": "us-east-1"}
-V3 = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "AWS_REGION": "us-east-1"}
+V3 = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "TRACE_API_KEY": SECRETS["TRACE_API_KEY"], "AWS_REGION": "us-east-1"}
 
 
 def load(env=None, **options):
@@ -59,17 +60,34 @@ class DefaultsTests(ConfigTestCase):
         self.assertTrue(settings.live)
         self.assertEqual((settings.serpapi_key, settings.aws_region), (SECRETS["SERPAPI_KEY"], "us-east-1"))
         self.assertIsNone(settings.facecheck_api_key)
-        self.assertEqual(settings.rekognition_engines, ("yandex_images", "google_lens"))
+        self.assertEqual(settings.rekognition_engines, ("trace", "yandex_images", "google_lens"))
         self.assertEqual(settings.rekognition_min_similarity, 80.0)
         self.assertEqual((settings.jev_mode, settings.llm_mode), ("fake", "off"))
         self.assertFalse(settings.models or settings.real_models_enabled)
 
-    def test_default_backend_needs_serpapi_key_and_region(self):
-        error = self.assertConfigError(
-            r"SERPAPI_KEY \(for SerpApi search\); AWS_REGION \(for Rekognition face matching\)", backend=None)
-        for hint in ("set-key serpapi", "set-key aws --region", "SEARCH_BACKEND=facecheck", "--mock"):
+    def test_default_backend_needs_its_keys_and_region(self):
+        error = self.assertConfigError(r"SERPAPI_KEY \(for SerpApi search\); TRACE_API_KEY \(for Trace face search\); "
+                                       r"AWS_REGION \(for Rekognition face matching\)", backend=None)
+        for hint in ("set-key trace", "set-key serpapi", "set-key aws --region", "REKOGNITION_ENGINES",
+                     "SEARCH_BACKEND=facecheck", "--mock"):
             self.assertIn(hint, str(error))
-        self.assertConfigError(r"missing required settings: AWS_REGION", {"SERPAPI_KEY": "k"}, backend=None)
+        self.assertConfigError(r"missing required settings: AWS_REGION", {"SERPAPI_KEY": "k", "TRACE_API_KEY": "t"},
+                               backend=None)
+
+    def test_v3_needs_only_the_keys_of_its_engines(self):
+        trace_only = load({"TRACE_API_KEY": "t", "AWS_REGION": "us-east-2", "REKOGNITION_ENGINES": "trace"},
+                          backend="rekognition")
+        self.assertEqual((trace_only.trace_api_key, trace_only.serpapi_key), ("t", None))
+        self.assertEqual((trace_only.serpapi_engines, trace_only.needs_hosting), ((), False))
+        serp_only = load({"SERPAPI_KEY": "s", "AWS_REGION": "us-east-2", "REKOGNITION_ENGINES": "google_lens"},
+                         backend="rekognition")
+        self.assertEqual((serp_only.trace_api_key, serp_only.serpapi_key), (None, "s"))
+        self.assertEqual((serp_only.serpapi_engines, serp_only.needs_hosting), (("google_lens",), True))
+        self.assertConfigError("TRACE_API_KEY", {"AWS_REGION": "us-east-2", "REKOGNITION_ENGINES": "trace"},
+                               backend="rekognition")
+        self.assertEqual(load(V3, backend="serpapi").serpapi_engines, ("yandex_images",))
+        self.assertIsNone(load(V3, backend="serpapi").trace_api_key)
+        self.assertFalse(load().needs_hosting)
 
     def test_mock_backend_is_offline(self):
         settings = load()
@@ -93,7 +111,7 @@ class DefaultsTests(ConfigTestCase):
         self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("rekognition", "fake", "off"))
         self.assertFalse(settings.facecheck_demo)
         self.assertEqual((settings.rekognition_engines, settings.rekognition_min_similarity),
-                         (("yandex_images", "google_lens"), 80.0))
+                         (("trace", "yandex_images", "google_lens"), 80.0))
         self.assertEqual((settings.mock_scenario, settings.mock_delay_ms), ("default", 0))
 
     def test_settings_are_frozen(self):
@@ -145,7 +163,7 @@ class DotenvTests(ConfigTestCase):
         settings = load(V3, backend=None, dotenv_path=example)
         self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("rekognition", "fake", "off"))
         self.assertEqual((settings.rekognition_engines, settings.rekognition_min_similarity),
-                         (("yandex_images", "google_lens"), 80.0))
+                         (("trace", "yandex_images", "google_lens"), 80.0))
         self.assertFalse(settings.facecheck_demo)
 
 
@@ -205,6 +223,18 @@ class SearchBackendTests(ConfigTestCase):
         for raw in ("bing", "yandex_images,bing", ","):
             with self.subTest(raw=raw):
                 self.assertConfigError("REKOGNITION_ENGINES", {**V3, "REKOGNITION_ENGINES": raw}, backend="rekognition")
+
+    def test_rekognition_platforms(self):
+        self.assertEqual(load(V3, backend="rekognition").rekognition_platforms, ())
+        for raw, expected in (("linkedin,facebook", ("linkedin", "facebook")),
+                              (" Facebook , linkedin,facebook ", ("facebook", "linkedin")), (" ", ())):
+            with self.subTest(raw=raw):
+                settings = load({**V3, "REKOGNITION_PLATFORMS": raw}, backend="rekognition")
+                self.assertEqual(settings.rekognition_platforms, expected)
+        for raw in ("tiktok", "linkedin,tiktok", ","):
+            with self.subTest(raw=raw):
+                self.assertConfigError("REKOGNITION_PLATFORMS", {**V3, "REKOGNITION_PLATFORMS": raw},
+                                       backend="rekognition")
 
     def test_rekognition_min_similarity(self):
         for raw, expected in (("0", 0.0), ("99.5", 99.5), ("100", 100.0)):
@@ -346,9 +376,18 @@ class JevTests(ConfigTestCase):
 class LlmTests(ConfigTestCase):
     def test_anthropic_defaults(self):
         settings = load({"LLM_MODE": "anthropic", "ANTHROPIC_API_KEY": SECRETS["ANTHROPIC_API_KEY"]}, models=True)
-        self.assertEqual(settings.llm_model, "claude-sonnet-5-5")
+        self.assertEqual((settings.llm_model, settings.llm_effort), ("claude-opus-5-5", "medium"))  # V4
         self.assertEqual(settings.anthropic_api_key, SECRETS["ANTHROPIC_API_KEY"])
         self.assertTrue(settings.real_models_enabled)
+
+    def test_effort(self):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            env = {"LLM_MODE": "anthropic", "ANTHROPIC_API_KEY": "k", "LLM_EFFORT": effort}
+            self.assertEqual(load(env, models=True).llm_effort, effort)
+        self.assertConfigError("LLM_EFFORT", {"LLM_MODE": "anthropic", "ANTHROPIC_API_KEY": "k",
+                                              "LLM_EFFORT": "extreme"}, models=True)
+        # Off runs no model, so a bad value is ignored there.
+        self.assertIsNone(load({"LLM_EFFORT": "extreme"}).llm_effort)
 
     def test_anthropic_explicit_model(self):
         env = {"LLM_MODE": "anthropic", "ANTHROPIC_API_KEY": "k", "LLM_MODEL": "claude-haiku-4-5-20251001"}
@@ -366,8 +405,9 @@ class LlmTests(ConfigTestCase):
         self.assertNotIn("ANTHROPIC_API_KEY", str(error))
 
     def test_off_has_no_model_or_key(self):
-        settings = load({**SECRETS, "LLM_MODEL": "claude-sonnet-5-5"}, models=True)
+        settings = load({**SECRETS, "LLM_MODEL": "claude-sonnet-5-5", "LLM_EFFORT": "low"}, models=True)
         self.assertIsNone(settings.llm_model)
+        self.assertIsNone(settings.llm_effort)
         self.assertIsNone(settings.anthropic_api_key)
 
 
@@ -397,14 +437,14 @@ class SecretTests(ConfigTestCase):
         summary = self.everything_enabled().describe()
         self.assertEqual(summary["search_backend"], "serpapi")
         self.assertEqual(summary["jev_model"], "jev-latest")
-        self.assertEqual(summary["llm_model"], "claude-sonnet-5-5")
+        self.assertEqual((summary["llm_model"], summary["llm_effort"]), ("claude-opus-5-5", "medium"))
         self.assertTrue(summary["real_models_enabled"])
         self.assertEqual(summary["image_bucket"], "hm-bucket")
 
     def test_secret_fields_exist_but_are_hidden(self):
         hidden = {name for name, spec in Settings.__dataclass_fields__.items() if not spec.repr}
-        self.assertEqual(hidden, {"serpapi_key", "facecheck_api_key", "typesafe_api_key", "openrouter_api_key",
-                                  "anthropic_api_key"})
+        self.assertEqual(hidden, {"serpapi_key", "facecheck_api_key", "trace_api_key", "typesafe_api_key",
+                                  "openrouter_api_key", "anthropic_api_key"})
 
     def test_errors_never_contain_secrets(self):
         cases = (

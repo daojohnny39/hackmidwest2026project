@@ -42,7 +42,8 @@ from pipeline.contracts import (
 )
 from pipeline.jev import Jev, noul
 from pipeline.names import differing_facts, looks_like_person_name, name_in_text, names_compatible, same_fact
-from pipeline.platforms import PLATFORM_LABELS, account_handle, account_url_for, is_account_url, normalize_url, platform_for
+from pipeline.platforms import PLATFORM_LABELS, account_handle, is_account_url, normalize_url, platform_for
+from pipeline.scrape import post_authors
 
 MAX_ACCOUNTS = 12  # caps pair questions at 66 (2b)
 JOIN_THRESHOLD = 0.70
@@ -303,16 +304,9 @@ def _mention(key: str, page: PageRecord, raw: RawEvidenceBundle, vias: list[Foun
 
     author_url = None
     if page.page_kind == "post":
-        labeled = [
-            raw.page_key(url) or url
-            for link in page.outbound_links
-            if link.label.strip().lower() == "author" and (url := normalize_url(link.url))
-        ]
-        from_url = account_url_for(key)
-        for candidate in labeled + ([raw.page_key(from_url) or from_url] if from_url else []):
-            if candidate in accounts:
-                author_url = candidate
-                break
+        # The first collected account among the post's possible authors (stage 1 follows the first).
+        candidates = [raw.page_key(url) or url for url in post_authors(key, page)]
+        author_url = next((candidate for candidate in candidates if candidate in accounts), None)
         subjects = [author_url] if author_url else []
     else:
         # Only a linked account whose full display name is in the title; ambiguity leaves it unattributed.

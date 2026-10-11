@@ -3,7 +3,7 @@
 import json
 
 from mock_internet.client import MockInternetClient
-from pipeline.scrape import MAX_LINKS, TEXT_LIMIT, scrape_html
+from pipeline.scrape import MAX_LINKS, TEXT_LIMIT, post_authors, scrape_html
 from tests.support import MockServerTestCase, OfflineTestCase
 
 PROFILE = "https://linkup.test/in/alexbuilds"
@@ -113,3 +113,28 @@ class HostileHtmlTests(OfflineTestCase):
                 page = self.scrape(html)
                 self.assertEqual(page.outbound_links, [])
                 self.assertEqual(page.json_ld, [])
+
+
+class PostAuthorTests(OfflineTestCase):
+    POST = "https://instagram.com/p/AbC123"
+
+    def scrape(self, head="", body="", url=POST):
+        return scrape_html(f"<html><head>{head}</head><body>{body}</body></html>", page_url=url, fetched_url=url)
+
+    def test_the_post_url_comes_first(self):
+        post = "https://x.com/pat/status/7"
+        page = self.scrape(body='<a href="https://x.com/someone">Author</a>', url=post)
+        self.assertEqual(post_authors(post, page), ["https://x.com/pat", "https://x.com/someone"])
+        self.assertEqual(post_authors(post, None), ["https://x.com/pat"])  # a post that didn't load
+
+    def test_og_url_and_canonical_name_a_hidden_author(self):
+        head = ('<meta property="og:url" content="https://www.instagram.com/pat.lee/reel/AbC123/">'
+                '<link rel="canonical" href="https://www.instagram.com/pat.lee/p/AbC123/">')
+        page = self.scrape(head, '<a href="https://instagram.com/commenter">commenter</a>')
+        self.assertEqual(post_authors(self.POST, page), ["https://instagram.com/pat.lee"])
+        self.assertEqual(post_authors(self.POST, None), [])
+
+    def test_other_platforms_and_non_accounts_are_ignored(self):
+        head = '<meta property="og:url" content="https://x.com/pat/status/7">'
+        body = '<a href="https://example.com/about">Author</a><a href="https://instagram.com/explore">Author</a>'
+        self.assertEqual(post_authors(self.POST, self.scrape(head, body)), [])

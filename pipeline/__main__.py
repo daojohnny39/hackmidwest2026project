@@ -1,10 +1,11 @@
 """CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
 
-Search uses backend V3 (SerpApi web search, faces checked by Amazon Rekognition) unless
+Search uses backend V3 (Trace face search and SerpApi web search, faces checked by Amazon
+Rekognition) unless
 SEARCH_BACKEND=facecheck picks FaceCheck face search, SEARCH_BACKEND=serpapi picks Yandex
 alone through SerpApi, or `run --mock` (or SEARCH_BACKEND=mock) picks the local mock internet.
-`set-key {facecheck,serpapi,typesafe,openrouter,anthropic}` prompts for a key with
-hidden input and saves it to .env; FaceCheck, SerpApi and TypeSafe keys are checked first.
+`set-key {trace,serpapi,facecheck,typesafe,openrouter,anthropic}` prompts for a key with
+hidden input and saves it to .env; Trace, SerpApi, FaceCheck and TypeSafe keys are checked first.
 `set-key aws` saves an AWS access key pair to ~/.aws/credentials after a free STS check.
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
@@ -31,7 +32,7 @@ from pipeline.artifacts import (
 )
 from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_consent
 from pipeline.config import (
-    DEFAULT_SEARCH_BACKEND, HOSTED_BACKENDS, LIVE_BACKENDS, REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError,
+    DEFAULT_SEARCH_BACKEND, LIVE_BACKENDS, REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError,
     Settings, load_settings, set_env_value,
 )
 from pipeline.contracts import CaptureArtifact
@@ -56,8 +57,8 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 ENV_TEMPLATE = REPO_ROOT / ".env.example"
-SERVICE_NAMES = {"facecheck": "FaceCheck", "serpapi": "SerpApi", "typesafe": "TypeSafe", "openrouter": "OpenRouter",
-                 "anthropic": "Anthropic"}
+SERVICE_NAMES = {"trace": "Trace", "facecheck": "FaceCheck", "serpapi": "SerpApi", "typesafe": "TypeSafe",
+                 "openrouter": "OpenRouter", "anthropic": "Anthropic"}
 # The .env mode that puts a saved model key to use; real modes also need --models.
 KEY_MODES = {"typesafe": "JEV_MODE=typesafe", "openrouter": "JEV_MODE=openrouter", "anthropic": "LLM_MODE=anthropic"}
 
@@ -132,6 +133,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         llm_mode=settings.llm_mode,
         jev_mode=settings.jev_mode,
         llm_model=settings.llm_model,
+        llm_effort=settings.llm_effort,
         jev_model=settings.jev_model,
     )
     with tracing(run_dir, 0, name=STAGE_NAMES[0], command="run", settings=settings.describe(), until=args.until,
@@ -144,8 +146,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"  folder: {run_dir}")
     print(f"  trace: {run_dir / TRACE_FILE}")
     print(f"  participant: {bundle.consent.participant} (consent confirmed {bundle.consent.confirmed_at.isoformat()})")
+    llm = (f"{settings.llm_mode} ({settings.llm_model}, effort {settings.llm_effort})"
+           if settings.llm_mode != "off" else "off")
     print(f"  search: {settings.search_backend}, scenario {settings.mock_scenario}; "
-          f"jev: {settings.jev_mode}; llm: {settings.llm_mode}")
+          f"jev: {settings.jev_mode}; llm: {llm}")
     for image in bundle.images:
         source = image.mock_fixture if image.mock_fixture else image.file
         print(f"  {image.image_id}: {image.angle} ({source})")
@@ -155,7 +159,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def require_search(settings: Settings) -> None:
     """Fail on missing image hosting or AWS credentials before a live search would need them."""
-    if settings.search_backend in HOSTED_BACKENDS:
+    if settings.needs_hosting:
         require_hosting(settings)
     if settings.search_backend == "rekognition":
         from pipeline.search.rekognition_backend import require_rekognition
@@ -212,7 +216,7 @@ def cmd_smoke_search(args: argparse.Namespace) -> int:
     if image is None:
         return fail(f"Refused (capture): no image {args.image_id!r} in this capture.", REFUSED)
 
-    settings = dataclasses.replace(settings, llm_mode="off", llm_model=None)
+    settings = dataclasses.replace(settings, llm_mode="off", llm_model=None, llm_effort=None)
     bundle = loaded.bundle.model_copy(update={"images": [image]})
     try:
         run_id, run_dir = create_run(args.runs_dir, bundle.session_id)
@@ -299,6 +303,17 @@ def cmd_set_key(args: argparse.Namespace) -> int:
             return fail(f"FaceCheck rejected the token ({exc}); nothing was saved.", REFUSED)
         except InfoCheckFailed as exc:
             print(f"Warning: couldn't check the token with FaceCheck ({exc}); saving it anyway.")
+    if args.service == "trace" and args.check:
+        # GET /account is free and runs no search.
+        from pipeline.search.trace_face import CheckFailed, account_info, describe_account
+        from pipeline.search.trace_face import KeyRejected as TraceKeyRejected
+
+        try:
+            print(f"Trace accepted the key: {describe_account(account_info(value))}.")
+        except TraceKeyRejected as exc:
+            return fail(f"Trace rejected the key ({exc}); nothing was saved.", REFUSED)
+        except CheckFailed as exc:
+            print(f"Warning: couldn't check the key with Trace ({exc}); saving it anyway.")
     if args.service == "serpapi" and args.check:
         try:
             print(f"SerpApi accepted the key: {describe_quota(account_quota(value))}.")
@@ -321,6 +336,11 @@ def cmd_set_key(args: argparse.Namespace) -> int:
     if args.service in KEY_MODES:
         print(f"To use it, set {KEY_MODES[args.service]} in .env and add --models to `run` or `stage`; "
               "those calls are paid.")
+    if args.service == "trace":
+        from pipeline.search.trace_face import CREDIT_PACKS
+
+        print(f"Each Trace search costs 1 credit, one per image (packs: {CREDIT_PACKS}). Backend V3 uses Trace "
+              "while REKOGNITION_ENGINES includes trace, as it does by default.")
     if args.service == "facecheck":
         print("Each FaceCheck search costs 3 credits ($0.30). Set FACECHECK_DEMO=true in .env for free demo "
               "searches, which scan only 100,000 faces.")
@@ -426,8 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                   "(aws: to ~/.aws/credentials)")
     set_key.add_argument("service", choices=[*SECRET_ENV, "aws"], help="which key to save")
     set_key.add_argument("--no-check", dest="check", action="store_false",
-                         help="save without checking the key (FaceCheck's free /api/info, SerpApi's free Account "
-                              "API, TypeSafe's model list, AWS STS GetCallerIdentity)")
+                         help="save without checking the key (Trace's free /account, FaceCheck's free /api/info, "
+                              "SerpApi's free Account API, TypeSafe's model list, AWS STS GetCallerIdentity)")
     set_key.add_argument("--region", help="aws only: also save this AWS_REGION to .env (for example us-east-1)")
     set_key.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help=argparse.SUPPRESS)
     set_key.add_argument("--credentials-file", type=Path, default=None, help=argparse.SUPPRESS)

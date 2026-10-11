@@ -37,11 +37,14 @@ def tool_results(messages):
 
 
 class ScriptedModel(Model):
-    """Search, fetch every hit, follow depth-0 profiles, then judge every fetched page."""
+    """Search, fetch every hit, follow depth-0 profiles and posts' authors, then judge every fetched page.
+    eager_follow asks to follow every hit in the same turn as fetching it, follow first."""
 
-    def __init__(self, *, exclude=(), bad_triage=False, crash=False, sneak_url=None, skip_search=False):
+    def __init__(self, *, exclude=(), bad_triage=False, crash=False, sneak_url=None, skip_search=False,
+                 eager_follow=False):
         self.exclude, self.bad_triage, self.crash, self.sneak_url = set(exclude), bad_triage, crash, sneak_url
-        self.skip_search = skip_search
+        self.skip_search, self.eager_follow = skip_search, eager_follow
+        self.follow_results: list[dict] = []
         self.phase = 0
         self.hit_urls: list[str] = []
         self.hits: list[dict] = []
@@ -67,6 +70,8 @@ class ScriptedModel(Model):
             for page in result.get("pages", [result]):
                 if "url" in page and "kind" in page:
                     self.fetched[page["url"]] = page
+            if "pages" in result or "nothing to follow" in result.get("error", ""):
+                self.follow_results.append(result)
             if self.sneak_url and result.get("error", "").startswith("not allowed"):
                 self.sneak_result = result
         self.phase += 1
@@ -76,11 +81,16 @@ class ScriptedModel(Model):
             return [("reverse_image_search", {})]
         if self.phase == 2:
             calls = [("fetch_page", {"url": url}) for url in self.hit_urls]
+            if self.eager_follow:
+                calls = [("follow_account_links", {"url": url}) for url in self.hit_urls] + calls
             return calls + ([("fetch_page", {"url": self.sneak_url})] if self.sneak_url else [])
+        if self.phase == 3 and self.eager_follow:
+            self.phase += 1
         if self.phase == 3:
-            profiles = [url for url, page in self.fetched.items() if page["kind"] == "profile" and page["depth"] == 0]
-            if profiles:
-                return [("follow_account_links", {"url": url}) for url in profiles]
+            sources = [url for url, page in self.fetched.items() if page["depth"] == 0
+                       and (page["kind"] == "profile" or page.get("author_account"))]
+            if sources:
+                return [("follow_account_links", {"url": url}) for url in sources]
             self.phase += 1
         if self.bad_triage:
             return [("ImageTriage", {"judgments": "not a list"})]
@@ -156,6 +166,35 @@ class ImageAgentTests(MockServerTestCase):
         self.assertIn("under 70 as likely lookalikes", system_prompt(FaceCheckBackend))
         self.assertIn("No hit has a face_score", system_prompt(FakeBackend({}, {})))
         self.assertNotIn("{", system_prompt(FakeBackend({}, {})))
+
+    def test_agent_follows_a_post_to_its_author(self):
+        from tests.test_stage1 import FakeBackend, live_capture, page_html, yandex
+
+        post, author = "https://instagram.com/p/AbC123", "https://instagram.com/pat.lee"
+        pages = {post: page_html(og_url="https://instagram.com/pat.lee/reel/AbC123"), author: page_html(title="Pat Lee")}
+        model = ScriptedModel()
+        bundle, _ = asyncio.run(collect_evidence(live_capture("img-1"), FakeBackend({"img-1": yandex(post)}, pages),
+                                                 agent=make_agent_runner(lambda: model)))
+        self.assertEqual(model.fetched[post]["author_account"], author)
+        self.assertEqual(model.fetched[author]["depth"], 1)
+        [via] = bundle.pages[author].found_via
+        self.assertEqual((via.depth, via.parent_url), (1, post))
+        self.assertEqual(bundle.images[0].collection_method, "agent")
+
+    def test_following_a_hit_in_the_same_turn_as_fetching_it(self):
+        # Strands runs one turn's tool calls concurrently, so the follow can start before the fetch.
+        from tests.test_stage1 import FakeBackend, live_capture, page_html, yandex
+
+        post, author = "https://instagram.com/p/AbC123", "https://instagram.com/pat.lee"
+        pages = {post: page_html(og_url="https://instagram.com/pat.lee/reel/AbC123"), author: page_html(title="Pat Lee")}
+        backend = FakeBackend({"img-1": yandex(post)}, pages, fetch_delay=0.05)
+        model = ScriptedModel(eager_follow=True)
+        bundle, _ = asyncio.run(collect_evidence(live_capture("img-1"), backend, agent=make_agent_runner(lambda: model)))
+        [follow] = model.follow_results
+        self.assertEqual([page["url"] for page in follow["pages"]], [author])
+        [via] = bundle.pages[author].found_via
+        self.assertEqual((via.depth, via.parent_url), (1, post))
+        self.assertEqual(backend.fetched.count(post), 1)  # the follow waited for the same fetch
 
     def test_tools_refuse_urls_outside_the_image(self):
         other_image_hit = "https://photogram.test/alexbuilds"  # img-2's hit, not img-1's

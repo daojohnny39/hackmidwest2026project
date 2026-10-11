@@ -1,37 +1,46 @@
-"""Backend V3: SerpApi web search with Amazon Rekognition face matching (spec 1.1, 1.7; live only).
+"""Backend V3: Trace face search and SerpApi web search, checked by Amazon Rekognition (spec 1.1, 1.7; live only).
 
 V1 (SEARCH_BACKEND=serpapi) returns what Yandex finds visually similar, which for a selfie
-is mostly lookalikes. V2 (facecheck) looks the face up in FaceCheck's own index of faces.
-V3 searches the open web through SerpApi and checks the face in every result itself with
-Rekognition. For each image:
+is mostly lookalikes. V2 (facecheck) trusts FaceCheck's own face index. V3 gathers candidates
+from Trace's face index (trace_face.py) and from SerpApi's Yandex and Google Lens, and checks
+the face in every candidate itself with Rekognition. For each image:
 
 1. DetectFaces runs on an upright JPEG copy (at most 1,600 px, EXIF stripped). The largest
    face is the participant's. An image with no face fails as no_face before any search.
-2. A crop of that face, padded by half the face's width and height on each side, is hosted
-   the way V1 hosts images (hosting.py: tunnel or s3) and searched once with each engine in
-   REKOGNITION_ENGINES (default yandex_images and google_lens). Only the crop leaves this
-   machine. The engines run at the same time. If one fails, the others' results are used and
-   failed_engines names it; if all fail, the search fails and a retry searches again.
-3. Results are merged by page URL, alternating engines by rank, and the first MAX_CANDIDATES
-   are compared. Each result's image is downloaded with the same public-address guard as page
-   fetches (the full-size image first, the engine's thumbnail if that fails), shrunk to at most
-   1,600 px, and compared with the crop by CompareFaces. face_score is the highest similarity
-   among the faces in that image, rounded down.
+2. A crop of that face, padded by half the face's width and height on each side, is searched
+   once with each engine in REKOGNITION_ENGINES (default trace, yandex_images, google_lens).
+   Trace gets the crop as an upload (the upright copy if the crop is under 200 px); the SerpApi
+   engines get it hosted the way V1 hosts images (hosting.py: tunnel or s3). Only the face
+   leaves this machine. The engines run at the same time. If one fails, the others' results are
+   used and failed_engines names it; if all fail, the search fails and a retry searches again.
+3. Results are merged by page URL: all of Trace's matches first, then the SerpApi engines
+   alternating by rank. With REKOGNITION_PLATFORMS set (V3_1 is linkedin,facebook), results on other
+   sites are dropped here, before any download or comparison, and count as out_of_scope.
+   Every Trace match left is compared, plus the first MAX_CANDIDATES of the rest. For a Trace match the image is
+   Trace's preview of the matched face; for a SerpApi result it is downloaded with the same
+   public-address guard as page fetches (the full-size image first, the engine's thumbnail if
+   that fails). Each is shrunk to at most 1,600 px and compared with the crop by CompareFaces.
+   An image that won't load or shows no face moves on to the result's next image. face_score
+   is the highest similarity among the faces in the first image with a face, rounded down.
 4. Results under REKOGNITION_MIN_SIMILARITY (default 80, CompareFaces' own default) and images
    without a face are dropped. The rest are ranked by similarity and converted to the
    Yandex-shaped payload parse_image_results() reads. search_information counts what happened
    to every result (matched, below_threshold, no_face, image_unavailable, ...).
 
 Comparing stops after COMPARE_TIMEOUT_S; results not compared by then count as not_compared.
-Each engine's sanitized SerpApi reply is cached for this run under runs/<run_id>/cache/rekognition/,
-keyed by image hash and engine, so a rerun (or a new threshold) makes no new SerpApi search.
-The final payload is cached too, keyed by image hash, engines and threshold, but only when every
-engine answered and every result was compared. --refresh skips both caches.
+The image's Trace scan, with the uploaded crop and the previews, is deleted at Trace once its
+search and comparisons are over (release); a scan that timed out is left running, and a rerun
+within 24 hours resumes it through the Idempotency-Key derived from the image hash. Each SerpApi engine's sanitized reply is cached for
+this run under runs/<run_id>/cache/rekognition/, keyed by image hash and engine, so a rerun makes
+no new SerpApi search. Trace replies aren't cached, because their previews are gone after
+release: a rerun that compares again pays one Trace credit per image. The final payload is
+cached too, keyed by image hash, engines and threshold, but only when every engine answered
+and every result was compared. --refresh skips both caches.
 
 AWS credentials come from the standard chain (`python -m pipeline set-key aws`) and the region
 from AWS_REGION; the IAM user needs rekognition:DetectFaces and rekognition:CompareFaces.
-Rekognition charges about $0.001 per image analyzed: one DetectFaces and up to MAX_CANDIDATES
-CompareFaces calls per capture image. Unless the AWS account opts out (an AWS Organizations AI
+Rekognition charges about $0.001 per image analyzed: one DetectFaces per capture image, and one
+CompareFaces per result compared, plus one more for each of its images that shows no face. Unless the AWS account opts out (an AWS Organizations AI
 services opt-out policy), AWS may keep the analyzed images and use them to improve its services.
 """
 
@@ -51,18 +60,22 @@ import httpx
 from pipeline import trace
 from pipeline.config import DEFAULT_MIN_SIMILARITY, ConfigError, Settings
 from pipeline.contracts import CaptureArtifact, CaptureImage
-from pipeline.platforms import normalize_url
+from pipeline.platforms import normalize_url, platform_for
 from pipeline.search.base import NO_RESULTS, BackendError, _thumbnail, status_error
 from pipeline.search.serpapi_backend import (
     MAX_REDIRECTS, SEARCH_TIMEOUT_S, BlockedDestination, SerpApiBackend, _write_json, check_url, open_host,
     page_client,
 )
+from pipeline.search.trace_face import MIN_SIDE as TRACE_MIN_SIDE, SCAN_TIMEOUT_S as TRACE_TIMEOUT_S
+from pipeline.search.trace_face import TraceFaceSearch, is_preview_url
 
 # SerpApi engine -> (extra request parameters, the result lists in its reply)
 ENGINES = {
     "yandex_images": ({"tab": "about"}, ("image_results",)),
     "google_lens": ({}, ("visual_matches", "exact_matches")),
 }
+TRACE = "trace"  # Trace's face index (trace_face.py); its matches are merged and compared first
+ALL_ENGINES = (TRACE, *ENGINES)
 SOURCE_MAX_SIDE = 1600  # the capture copy DetectFaces sees and the crop is cut from
 TARGET_MAX_SIDE = 1600  # result images are shrunk to this before CompareFaces (its limit is 5 MB)
 FACE_MARGIN = 0.5  # crop padding on each side, as a fraction of the face's width and height
@@ -75,6 +88,7 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_TYPES = ("image/", "application/octet-stream")  # Pillow decides whether it really is an image
 # Face detection, the searches, and comparing, on top of the usual per-image deadline.
 EXTRA_DEADLINE_S = 10.0 + SEARCH_TIMEOUT_S + COMPARE_TIMEOUT_S
+TRACE_EXTRA_DEADLINE_S = 10.0 + TRACE_TIMEOUT_S + COMPARE_TIMEOUT_S  # Trace takes 25-45 s, more if queued
 RESULT_FIELDS = ("title", "source", "snippet")
 SCORE_BANDS = ((99, "strong match"), (95, "likely match"), (90, "possible match"), (80, "weak match"),
                (0, "unlikely match"))
@@ -219,10 +233,39 @@ def _failed(clean: dict) -> bool:
     return status not in (None, "Success")
 
 
+def trace_results(scan_id: str, scan: dict) -> dict:
+    """A finished Trace scan in the sanitized engine shape: per match the page link, a title from the
+    handle and platform, Trace's score in the snippet, and the preview URL (fetched with the key)."""
+    results = []
+    for index, match in enumerate(scan.get("matches") or []):
+        if not isinstance(match, dict) or not isinstance(match.get("url"), str):
+            continue
+        score, tier = match.get("score"), match.get("tier")
+        platform = match.get("platform") if isinstance(match.get("platform"), str) else ""
+        handle = match.get("handle") if isinstance(match.get("handle"), str) else ""
+        preview = match.get("preview_url")
+        if not is_preview_url(preview):
+            preview = f"https://traceaifacescan.app/api/v1/scans/{scan_id}/previews/{index}"
+        results.append({
+            "link": match["url"],
+            "title": f"{handle} on {platform}" if handle and platform else handle or platform,
+            "source": platform if platform and platform != "web" else _domain(match["url"]),
+            "snippet": (f"Trace face match {score}/100" + (f" ({tier.replace('_', ' ')})" if isinstance(tier, str) else ""))
+                       if isinstance(score, int) and not isinstance(score, bool) else "Trace face match",
+            "thumbnail": None, "images": [], "previews": [preview],
+            "trace_score": score if isinstance(score, int) and not isinstance(score, bool) else None,
+        })
+    results.sort(key=lambda row: -(row["trace_score"] or 0))
+    return {"search_metadata": {"id": scan_id, "status": "Success"}, "results": results}
+
+
 @dataclass
 class Face:
     crop: bytes  # JPEG of the participant's padded face: what gets searched and compared
     faces: int  # how many faces DetectFaces found in the capture image
+    copy: bytes = b""  # the upright copy the crop came from; Trace gets it when the crop is under 200 px
+    crop_size: tuple[int, int] = (0, 0)
+    digest: str = ""  # SHA-256 of the capture image file
 
 
 @dataclass
@@ -231,53 +274,73 @@ class Candidate:
     row: dict  # the first engine's result for it
     full: list[str] = field(default_factory=list)  # full-size image URLs from every engine
     thumbnails: list[str] = field(default_factory=list)
+    previews: list[str] = field(default_factory=list)  # Trace previews; they need the Trace key
     engines: list[str] = field(default_factory=list)
 
     @property
     def images(self) -> list[str]:
-        """Image URLs to try in order: full-size images first, then thumbnails."""
+        """Public image URLs to try in order: full-size images first, then thumbnails."""
         return self.full + self.thumbnails
+
+    def sources(self) -> list[tuple[str, bool]]:
+        """(url, is_trace_preview) in the order to try: Trace's preview of the matched face first."""
+        return [(url, True) for url in self.previews] + [(url, False) for url in self.images]
 
 
 def merge(results: dict[str, dict]) -> list[Candidate]:
-    """One candidate per page URL, taking each engine's results in turn by rank."""
-    lists = [(engine, reply["results"]) for engine, reply in results.items()]
+    """One candidate per page URL: all of Trace's matches first, then each SerpApi engine's results
+    in turn by rank."""
     candidates: dict[str, Candidate] = {}
+
+    def add(engine: str, row: dict) -> None:
+        url = normalize_url(row["link"])
+        if url is None:
+            return
+        candidate = candidates.setdefault(url, Candidate(url=url, row=row))
+        candidate.engines.append(engine)
+        candidate.previews += [preview for preview in row.get("previews", []) if preview not in candidate.previews]
+        for image in row.get("images", []):
+            if image not in candidate.images:
+                (candidate.thumbnails if image == row.get("thumbnail") else candidate.full).append(image)
+
+    for row in results.get(TRACE, {}).get("results", []):
+        add(TRACE, row)
+    lists = [(engine, reply["results"]) for engine, reply in results.items() if engine != TRACE]
     for rank in range(max((len(rows) for _, rows in lists), default=0)):
         for engine, rows in lists:
-            if rank >= len(rows):
-                continue
-            row = rows[rank]
-            url = normalize_url(row["link"])
-            if url is None:
-                continue
-            candidate = candidates.setdefault(url, Candidate(url=url, row=row))
-            candidate.engines.append(engine)
-            for image in row.get("images", []):
-                if image not in candidate.images:
-                    (candidate.thumbnails if image == row.get("thumbnail") else candidate.full).append(image)
+            if rank < len(rows):
+                add(engine, rows[rank])
     return list(candidates.values())
 
 
 class RekognitionBackend(SerpApiBackend):
-    """SerpApi search of a face crop, filtered by Rekognition CompareFaces. Page fetches, image
-    hosting, release() and aclose() are SerpApi's (serpapi_backend.SerpApiBackend)."""
+    """Trace and SerpApi searches of a face crop, filtered by Rekognition CompareFaces. Page fetches,
+    image hosting, release() and aclose() build on SerpApi's (serpapi_backend.SerpApiBackend).
+    api_key and host are needed only for the SerpApi engines, trace_search only for Trace."""
 
     name = "rekognition"
-    extra_deadline_s = EXTRA_DEADLINE_S
 
-    def __init__(self, *, api_key: str, capture_dir: Path, host, rekognition, engines=tuple(ENGINES),
-                 min_similarity: float = DEFAULT_MIN_SIMILARITY, cache_dir: Path | None = None, refresh: bool = False,
+    def __init__(self, *, api_key: str | None, capture_dir: Path, host, rekognition, engines=tuple(ENGINES),
+                 trace_search: TraceFaceSearch | None = None, min_similarity: float = DEFAULT_MIN_SIMILARITY,
+                 platforms: tuple[str, ...] = (),
+                 cache_dir: Path | None = None, refresh: bool = False,
                  search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None,
                  images: httpx.AsyncClient | None = None, compare_timeout: float = COMPARE_TIMEOUT_S):
-        unknown = [engine for engine in engines if engine not in ENGINES]
+        unknown = [engine for engine in engines if engine not in ALL_ENGINES]
         if unknown or not engines:
-            raise ValueError(f"unsupported engines {unknown}; expected some of {', '.join(ENGINES)}")
-        super().__init__(api_key=api_key, capture_dir=capture_dir, host=host, cache_dir=cache_dir, refresh=refresh,
-                         search_client=search_client, pages=pages)
+            raise ValueError(f"unsupported engines {unknown}; expected some of {', '.join(ALL_ENGINES)}")
+        if TRACE in engines and trace_search is None:
+            raise ValueError("the trace engine needs a TraceFaceSearch")
+        if any(engine in ENGINES for engine in engines) and (not api_key or host is None):
+            raise ValueError("the SerpApi engines need a SerpApi key and an image host")
+        super().__init__(api_key=api_key or "", capture_dir=capture_dir, host=host, cache_dir=cache_dir,
+                         refresh=refresh, search_client=search_client, pages=pages)
         self.rekognition = rekognition  # a boto3 Rekognition client, or a test double with the same two methods
+        self.trace_search = trace_search
         self.engines = tuple(engines)
+        self.extra_deadline_s = TRACE_EXTRA_DEADLINE_S if TRACE in self.engines else EXTRA_DEADLINE_S
         self.min_similarity = float(min_similarity)
+        self.platforms = tuple(platforms)  # platform_for() names to keep; empty keeps every site
         self.images = images or page_client(accept="image/*")
         self.compare_timeout = compare_timeout
         self.face_score_note = FACE_SCORE_NOTE.format(minimum=self.min_similarity)  # for the per-image agent
@@ -300,7 +363,8 @@ class RekognitionBackend(SerpApiBackend):
             face = self._faces.get(image.image_id)
             if face is None:
                 face = self._faces[image.image_id] = await self._find_face(image, data)
-            results, failed = await self._search_engines(image, digest, face.crop)
+                face.digest = digest
+            results, failed = await self._search_engines(image, digest, face)
             payload, complete = await self._match(image, results, failed, face.crop)
         if final is not None and complete:
             await asyncio.to_thread(_write_json, final, payload)
@@ -309,7 +373,8 @@ class RekognitionBackend(SerpApiBackend):
     def _final_path(self, digest: str) -> Path | None:
         if self.cache_dir is None:
             return None
-        return self.cache_dir / f"{digest}-v3-{'+'.join(self.engines)}-{self.min_similarity:g}.json"
+        scope = f"-{'+'.join(self.platforms)}" if self.platforms else ""
+        return self.cache_dir / f"{digest}-v3-{'+'.join(self.engines)}-{self.min_similarity:g}{scope}.json"
 
     def _engine_path(self, digest: str, engine: str) -> Path | None:
         return None if self.cache_dir is None else self.cache_dir / f"{digest}-{engine}.json"
@@ -342,16 +407,18 @@ class RekognitionBackend(SerpApiBackend):
             crop = await asyncio.to_thread(face_crop, copy, largest["BoundingBox"])
         except (KeyError, TypeError, ValueError):
             raise BackendError("invalid_response") from None
+        crop_size = await asyncio.to_thread(_size, crop)
         trace.event("capture_face", image=image.image_id, faces=len(faces), confidence=largest.get("Confidence"),
-                    crop_bytes=len(crop))
-        return Face(crop=crop, faces=len(faces))
+                    crop_bytes=len(crop), crop_size=list(crop_size))
+        return Face(crop=crop, faces=len(faces), copy=copy, crop_size=crop_size)
 
-    async def _search_engines(self, image: CaptureImage, digest: str, crop: bytes) -> tuple[dict[str, dict], list[str]]:
+    async def _search_engines(self, image: CaptureImage, digest: str, face: Face) -> tuple[dict[str, dict], list[str]]:
         """Each engine's sanitized reply, in REKOGNITION_ENGINES order, and the engines that failed.
-        Engines that already answered for this image, in this run or its cache, aren't searched again."""
+        Engines that already answered for this image, in this run or (SerpApi only) its cache,
+        aren't searched again."""
         answered = self._results.setdefault(image.image_id, {})
         for engine in self.engines:
-            if engine not in answered:
+            if engine not in answered and engine != TRACE:
                 cached = await asyncio.to_thread(self._read_cache, self._engine_path(digest, engine), image)
                 if cached is not None and isinstance(cached.get("results"), list):
                     answered[engine] = cached
@@ -359,8 +426,7 @@ class RekognitionBackend(SerpApiBackend):
         missing = [engine for engine in self.engines if engine not in answered]
         failures: dict[str, BackendError] = {}
         if missing:
-            url = await self._hosted_url(image, crop)
-            outcomes = await asyncio.gather(*(self._search_engine(image, engine, url) for engine in missing),
+            outcomes = await asyncio.gather(*(self._search_engine(image, engine, face) for engine in missing),
                                             return_exceptions=True)
             for engine, outcome in zip(missing, outcomes):
                 if isinstance(outcome, BackendError):
@@ -369,7 +435,7 @@ class RekognitionBackend(SerpApiBackend):
                     raise outcome
                 else:
                     answered[engine] = outcome
-                    path = self._engine_path(digest, engine)
+                    path = self._engine_path(digest, engine) if engine != TRACE else None
                     if path is not None:
                         await asyncio.to_thread(_write_json, path, outcome)
             if failures:
@@ -380,7 +446,10 @@ class RekognitionBackend(SerpApiBackend):
             raise next((error for error in errors if error.retryable), errors[0])
         return {engine: answered[engine] for engine in self.engines if engine in answered}, list(failures)
 
-    async def _search_engine(self, image: CaptureImage, engine: str, url: str) -> dict:
+    async def _search_engine(self, image: CaptureImage, engine: str, face: Face) -> dict:
+        if engine == TRACE:
+            return await self._search_trace(image, face)
+        url = await self._hosted_url(image, face.crop)  # once per image; a hosting failure fails only SerpApi
         extra, _ = ENGINES[engine]
         clean = sanitize_engine(engine, await self._get(image, {"engine": engine, "url": url, **extra}))
         if _failed(clean):
@@ -393,6 +462,21 @@ class RekognitionBackend(SerpApiBackend):
                     request_id=clean.get("search_metadata", {}).get("id"), results=len(clean["results"]))
         return clean
 
+    async def _search_trace(self, image: CaptureImage, face: Face) -> dict:
+        upload = face.crop if min(face.crop_size) >= TRACE_MIN_SIDE else face.copy
+        # The same photo within 24 hours gets the same scan: a rerun after a timeout resumes it unpaid.
+        key = hashlib.sha256(f"hackmidwest-v3-trace:{face.digest}".encode()).hexdigest()[:32]
+        scan_id, scan = await self.trace_search.search(image.image_id, upload, key=key)
+        clean = trace_results(scan_id, scan)
+        trace.event("trace_search", image=image.image_id, scan=scan_id, results=len(clean["results"]),
+                    best_score=max((row["trace_score"] or 0 for row in clean["results"]), default=None))
+        return clean
+
+    async def release(self, image: CaptureImage) -> None:
+        await super().release(image)
+        if self.trace_search is not None:
+            await self.trace_search.delete(image.image_id)  # the uploaded crop and the previews
+
     # Face matching
 
     async def _match(self, image: CaptureImage, results: dict[str, dict], failed: list[str],
@@ -400,10 +484,16 @@ class RekognitionBackend(SerpApiBackend):
         """The Yandex-shaped payload of the results whose face matches, and whether it's complete
         enough to cache (every engine answered, every result compared)."""
         candidates = merge(results)
-        compared = candidates[:MAX_CANDIDATES]
         outcomes: Counter[str] = Counter()
-        if len(candidates) > len(compared):
-            outcomes["over_limit"] = len(candidates) - len(compared)
+        in_scope = [candidate for candidate in candidates
+                    if not self.platforms or platform_for(candidate.url) in self.platforms]
+        if len(candidates) > len(in_scope):
+            outcomes["out_of_scope"] = len(candidates) - len(in_scope)
+        # Every Trace match is compared (Trace returns at most 50); the cap limits the SerpApi results.
+        from_trace = [candidate for candidate in in_scope if TRACE in candidate.engines]
+        compared = from_trace + [candidate for candidate in in_scope if TRACE not in candidate.engines][:MAX_CANDIDATES]
+        if len(in_scope) > len(compared):
+            outcomes["over_limit"] = len(in_scope) - len(compared)
         matches = []
         for candidate, (outcome, similarity) in zip(compared, await self._compare_all(image, crop, compared)):
             outcomes[outcome] += 1
@@ -424,7 +514,8 @@ class RekognitionBackend(SerpApiBackend):
         ids = [request_id for request_id in ids if isinstance(request_id, str)]
         metadata = {"status": "Success", **({"id": ",".join(ids)} if ids else {})}
         info = {"total_results": len(rows), "engines": list(results), "failed_engines": failed,
-                "min_similarity": self.min_similarity, "candidates": len(candidates), "outcomes": dict(outcomes)}
+                "min_similarity": self.min_similarity, "candidates": len(candidates), "outcomes": dict(outcomes),
+                **({"platforms": list(self.platforms)} if self.platforms else {})}
         trace.event("face_matching", image=image.image_id, **info)
         complete = not failed and not outcomes["not_compared"] and not outcomes["compare_error"]
         return {"search_metadata": metadata, "search_information": info, "image_results": rows}, complete
@@ -459,13 +550,16 @@ class RekognitionBackend(SerpApiBackend):
         return scored
 
     async def _score(self, image: CaptureImage, crop: bytes, candidate: Candidate) -> tuple[str, float | None]:
-        if not candidate.images:
+        """Compare the crop with the candidate's images in order until one shows a face. An image
+        that won't load or has no face moves on to the next, usually the engine's thumbnail."""
+        if not candidate.sources():
             return "no_image", None
-        for url in candidate.images:
+        outcome = "image_unavailable"  # becomes no_face once an image loads but shows no face
+        for url, is_preview in candidate.sources():
             try:
-                target = await self._download_image(url)
+                target = await (self._preview_image(url) if is_preview else self._download_image(url))
             except BackendError:
-                continue  # try the next image, usually the engine's thumbnail
+                continue
             try:
                 reply = await self._aws("CompareFaces", image, SourceImage={"Bytes": crop},
                                         TargetImage={"Bytes": target}, SimilarityThreshold=0.0)
@@ -473,15 +567,17 @@ class RekognitionBackend(SerpApiBackend):
                 if error.reason == "unauthorized":
                     raise
                 if error.reason == "no_face":
-                    return "no_face", None
+                    outcome = "no_face"
+                    continue
                 if error.reason in ("unsupported_image", "image_too_large"):
                     continue
                 return "compare_error", None
             similarity = best_similarity(reply)
             if similarity is None:
-                return "no_face", None
+                outcome = "no_face"
+                continue
             return ("matched" if similarity >= self.min_similarity else "below_threshold"), similarity
-        return "image_unavailable", None
+        return outcome, None
 
     async def _aws(self, operation: str, image: CaptureImage, **params) -> dict:
         methods = {"DetectFaces": self.rekognition.detect_faces, "CompareFaces": self.rekognition.compare_faces}
@@ -503,16 +599,21 @@ class RekognitionBackend(SerpApiBackend):
 
     async def _download_image(self, url: str) -> bytes:
         """One result image as a JPEG CompareFaces accepts; raises BackendError."""
-        from pipeline.hosting import search_copy
-
         try:
             data = await asyncio.wait_for(self._download(url), timeout=DOWNLOAD_TIMEOUT_S)
         except TimeoutError:
             raise BackendError("timeout") from None
+        return await _comparable(data)
+
+    async def _preview_image(self, url: str) -> bytes:
+        """Trace's preview of a matched face, as a JPEG CompareFaces accepts; raises BackendError."""
+        if self.trace_search is None:
+            raise BackendError("unsupported_content")
         try:
-            return await asyncio.to_thread(search_copy, data, TARGET_MAX_SIDE)
-        except Exception:  # untrusted bytes: any decoder failure (HostingError or worse) costs this result only
-            raise BackendError("unsupported_image") from None
+            data = await asyncio.wait_for(self.trace_search.preview(url), timeout=DOWNLOAD_TIMEOUT_S)
+        except TimeoutError:
+            raise BackendError("timeout") from None
+        return await _comparable(data)
 
     async def _download(self, url: str) -> bytes:
         """GET a public image, checking every redirect hop like page fetches; at most MAX_IMAGE_BYTES."""
@@ -547,6 +648,25 @@ class RekognitionBackend(SerpApiBackend):
             await super().aclose()
         finally:
             await self.images.aclose()
+            if self.trace_search is not None:
+                await self.trace_search.aclose()  # deletes any scan still at Trace
+
+
+async def _comparable(data: bytes) -> bytes:
+    """Untrusted image bytes as a JPEG of at most TARGET_MAX_SIDE px for CompareFaces."""
+    from pipeline.hosting import search_copy
+
+    try:
+        return await asyncio.to_thread(search_copy, data, TARGET_MAX_SIDE)
+    except Exception:  # untrusted bytes: any decoder failure (HostingError or worse) costs this result only
+        raise BackendError("unsupported_image") from None
+
+
+def _size(data: bytes) -> tuple[int, int]:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as opened:
+        return opened.size
 
 
 def _area(box: dict) -> float:
@@ -564,13 +684,21 @@ def _domain(url: str) -> str:
 
 def build_rekognition_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *,
                               refresh: bool) -> RekognitionBackend:
-    """Backend V3 for a run: needs SERPAPI_KEY, AWS_REGION, AWS credentials, and an image host.
-    Credentials are looked up before the tunnel opens, so a run without them stops before any search."""
-    if not settings.serpapi_key:
+    """Backend V3 for a run: AWS_REGION and AWS credentials, TRACE_API_KEY for the trace engine, and
+    SERPAPI_KEY plus an image host for the SerpApi engines. Credentials are looked up before the
+    tunnel opens, so a run without them stops before any search."""
+    engines = settings.rekognition_engines
+    if settings.serpapi_engines and not settings.serpapi_key:
         raise ConfigError("SERPAPI_KEY is missing; save it with `python -m pipeline set-key serpapi`, or pass --mock")
+    if TRACE in engines and not settings.trace_api_key:
+        raise ConfigError("TRACE_API_KEY is missing; save it with `python -m pipeline set-key trace`, "
+                          "or drop trace from REKOGNITION_ENGINES")
     require_rekognition(settings)
     client = rekognition_client(settings.aws_region)
     return RekognitionBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir),
-                              host=open_host(settings, run_dir), rekognition=client,
-                              engines=settings.rekognition_engines, min_similarity=settings.rekognition_min_similarity,
+                              host=open_host(settings, run_dir) if settings.needs_hosting else None,
+                              rekognition=client, engines=engines,
+                              trace_search=TraceFaceSearch(settings.trace_api_key) if TRACE in engines else None,
+                              min_similarity=settings.rekognition_min_similarity,
+                              platforms=settings.rekognition_platforms,
                               cache_dir=Path(run_dir) / "cache" / "rekognition", refresh=refresh)

@@ -6,6 +6,9 @@ with their labels, and visible text cut to 4,000 characters. Page content is
 untrusted data: every field is bounded, and every URL (links, canonical, JSON-LD
 url/sameAs) goes through platforms.normalize_url, so mock pages yield original
 https URLs instead of local /web/ ones. No network access.
+
+post_authors() reads a post's author accounts from those fields. Stage 1 follows the
+first one at depth 1, and stage 2 ties the post to it.
 """
 
 from __future__ import annotations
@@ -17,8 +20,8 @@ from dataclasses import dataclass, field
 
 from bs4 import BeautifulSoup
 
-from pipeline.contracts import LinkRef
-from pipeline.platforms import normalize_url
+from pipeline.contracts import LinkRef, PageRecord
+from pipeline.platforms import account_url_for, is_account_url, normalize_url, platform_for
 
 TEXT_LIMIT = 4000
 TITLE_LIMIT = 300
@@ -90,6 +93,20 @@ def scrape_html(html: str, *, page_url: str, fetched_url: str, mock_origin: str 
         text=_visible_text(soup),
         person=person,
     )
+
+
+def post_authors(post_url: str, page: Scraped | PageRecord | None) -> list[str]:
+    """Account URLs that may be a post's author, most trusted first: the handle in the post's own
+    URL, the handle in the post URL the page gives for itself (og:url, then canonical) on the same
+    platform, then links labeled "Author". page is None when the post couldn't be fetched."""
+    found = [account_url_for(post_url)]
+    if page is not None:
+        platform = platform_for(post_url)
+        found += [account_url_for(url) for url in (page.og.get("og:url"), page.canonical_url)
+                  if url and platform_for(url) == platform]
+        found += [link.url for link in page.outbound_links
+                  if link.label.strip().lower() == "author" and is_account_url(link.url)]
+    return [url for url in dict.fromkeys(found) if url and url != post_url]
 
 
 def _resolve(href: str, base: str) -> str | None:

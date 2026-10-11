@@ -1,6 +1,6 @@
-"""`python -m pipeline set-key`, the .env writer, and the FaceCheck, SerpApi, TypeSafe, and AWS key checks.
+"""`python -m pipeline set-key`, the .env writer, and the Trace, FaceCheck, SerpApi, TypeSafe, and AWS key checks.
 
-The prompt, FaceCheck, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
+The prompt, Trace, FaceCheck, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
 """
 
 import configparser
@@ -28,6 +28,7 @@ from pipeline.__main__ import BAD_CONFIG, OK, REFUSED, main
 from pipeline.config import REPO_ROOT, load_settings, set_env_value
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected
 from pipeline.search.facecheck_backend import InfoCheckFailed, TokenRejected
+from pipeline.search.trace_face import CheckFailed as TraceCheckFailed, KeyRejected as TraceKeyRejected
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 from tests.support import OfflineTestCase
 
@@ -221,6 +222,46 @@ class SetKeyCommandTests(EnvFileCase):
         self.assertEqual(code, OK)
         info.assert_not_called()
         self.assertEqual(self.facecheck_saved(), KEY)
+
+    def trace_account(self, result=None):
+        result = {"email": "pat@example.com", "credits": 5, "key": {"name": "laptop"}} if result is None else result
+        return patch("pipeline.search.trace_face.account_info",
+                     side_effect=result if isinstance(result, BaseException) else None, return_value=result)
+
+    def trace_saved(self):
+        return dotenv_values(self.env_file).get("TRACE_API_KEY") if self.env_file.exists() else None
+
+    def test_saves_a_checked_trace_key(self):
+        with self.trace_account() as account:
+            code, out, _, checked = self.set_key("trace")
+        self.assertEqual(code, OK)
+        account.assert_called_once_with(KEY)
+        checked.assert_not_called()
+        self.assertIn("Trace accepted the key: credits: 5.", out)
+        self.assertNotIn("pat@example.com", out)  # only credit counts are printed
+        self.assertIn("Each Trace search costs 1 credit", out)
+        self.assertEqual(self.trace_saved(), KEY)
+
+    def test_rejected_trace_key_is_not_saved(self):
+        with self.trace_account(TraceKeyRejected("unauthenticated")):
+            code, _, err, _ = self.set_key("trace")
+        self.assertEqual(code, REFUSED)
+        self.assertIn("Trace rejected the key (unauthenticated)", err)
+        self.assertIsNone(self.trace_saved())
+
+    def test_unreachable_trace_check_still_saves(self):
+        with self.trace_account(TraceCheckFailed("ConnectError")):
+            code, out, _, _ = self.set_key("trace")
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the key with Trace", out)
+        self.assertEqual(self.trace_saved(), KEY)
+
+    def test_no_check_skips_trace(self):
+        with self.trace_account() as account:
+            code, _, _, _ = self.set_key("trace", "--no-check")
+        self.assertEqual(code, OK)
+        account.assert_not_called()
+        self.assertEqual(self.trace_saved(), KEY)
 
     def test_other_services_are_saved_without_a_check(self):
         for service, name, mode in (("openrouter", "OPENROUTER_API_KEY", "JEV_MODE=openrouter"),
