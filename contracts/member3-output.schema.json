@@ -1,0 +1,527 @@
+{
+  "$defs": {
+    "AnalyzedCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "sourceId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sourceid"
+        },
+        "imageUrl": {
+          "title": "Imageurl",
+          "type": "string"
+        },
+        "sourceUrl": {
+          "title": "Sourceurl",
+          "type": "string"
+        },
+        "assetId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assetid"
+        },
+        "disposition": {
+          "default": "candidate",
+          "enum": [
+            "candidate",
+            "duplicate",
+            "invalid"
+          ],
+          "title": "Disposition",
+          "type": "string"
+        },
+        "duplicateOf": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duplicateof"
+        },
+        "imageAnalysis": {
+          "$ref": "#/$defs/ImageAnalysis"
+        },
+        "classification": {
+          "$ref": "#/$defs/Classification"
+        },
+        "reviewRequired": {
+          "default": true,
+          "title": "Reviewrequired",
+          "type": "boolean"
+        },
+        "reviewReasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reviewreasons",
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/Failure"
+          },
+          "title": "Errors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "imageUrl",
+        "sourceUrl"
+      ],
+      "title": "AnalyzedCandidate",
+      "type": "object"
+    },
+    "Classification": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "default": "skipped",
+          "enum": [
+            "ok",
+            "skipped",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "relevance": {
+          "default": "unknown",
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "unknown"
+          ],
+          "title": "Relevance",
+          "type": "string"
+        },
+        "sourceType": {
+          "default": "unknown",
+          "enum": [
+            "professional_profile",
+            "social_media",
+            "news_article",
+            "personal_website",
+            "forum",
+            "unknown"
+          ],
+          "title": "Sourcetype",
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "rubricVersion": {
+          "const": "context-v1",
+          "default": "context-v1",
+          "title": "Rubricversion",
+          "type": "string"
+        }
+      },
+      "title": "Classification",
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "maxLength": 400,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt"
+        },
+        "method": {
+          "default": "rule",
+          "enum": [
+            "rule",
+            "model",
+            "operational"
+          ],
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "Evidence",
+      "type": "object"
+    },
+    "FaceCrop": {
+      "additionalProperties": false,
+      "properties": {
+        "assetId": {
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "title": "Assetid",
+          "type": "string"
+        },
+        "faceIndex": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Faceindex",
+          "type": "integer"
+        },
+        "box": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Box",
+          "type": "array"
+        },
+        "coordinateSpace": {
+          "const": "oriented_image_pixels",
+          "default": "oriented_image_pixels",
+          "title": "Coordinatespace",
+          "type": "string"
+        }
+      },
+      "required": [
+        "assetId",
+        "faceIndex",
+        "box"
+      ],
+      "title": "FaceCrop",
+      "type": "object"
+    },
+    "Failure": {
+      "additionalProperties": false,
+      "properties": {
+        "stage": {
+          "enum": [
+            "retrieval",
+            "validation",
+            "image",
+            "classification",
+            "pipeline",
+            "storage"
+          ],
+          "title": "Stage",
+          "type": "string"
+        },
+        "code": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stage",
+        "code",
+        "message"
+      ],
+      "title": "Failure",
+      "type": "object"
+    },
+    "ImageAnalysis": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "default": "unavailable",
+          "enum": [
+            "ok",
+            "invalid",
+            "unavailable",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "valid": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid"
+        },
+        "mimeType": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mimetype"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height"
+        },
+        "byteLength": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bytelength"
+        },
+        "contentSha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Contentsha256"
+        },
+        "faceCount": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Facecount"
+        },
+        "maxFaces": {
+          "const": 2,
+          "default": 2,
+          "title": "Maxfaces",
+          "type": "integer"
+        },
+        "atDetectorLimit": {
+          "default": false,
+          "title": "Atdetectorlimit",
+          "type": "boolean"
+        },
+        "crops": {
+          "items": {
+            "$ref": "#/$defs/FaceCrop"
+          },
+          "title": "Crops",
+          "type": "array"
+        },
+        "quality": {
+          "default": "unknown",
+          "enum": [
+            "good",
+            "poor",
+            "unknown"
+          ],
+          "title": "Quality",
+          "type": "string"
+        },
+        "qualityMetrics": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Qualitymetrics",
+          "type": "object"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Flags",
+          "type": "array"
+        },
+        "detectorVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detectorversion"
+        }
+      },
+      "title": "ImageAnalysis",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "default": 1,
+      "title": "Schemaversion",
+      "type": "integer"
+    },
+    "pipelineVersion": {
+      "const": "member3-v1",
+      "default": "member3-v1",
+      "title": "Pipelineversion",
+      "type": "string"
+    },
+    "requestId": {
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "title": "Requestid",
+      "type": "string"
+    },
+    "captureId": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Captureid"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/AnalyzedCandidate"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "rankedCandidateIds": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rankedcandidateids",
+      "type": "array"
+    },
+    "reviewCandidateIds": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reviewcandidateids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "requestId",
+    "candidates",
+    "rankedCandidateIds",
+    "reviewCandidateIds"
+  ],
+  "title": "BatchResult",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "FaceTrace Member 3 v1 structural schema. Cross-field and state validation also runs in candidate_processing.contracts."
+}
