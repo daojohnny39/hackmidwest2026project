@@ -12,7 +12,7 @@ export interface UseCamera {
   /** The deviceId of the camera currently streaming, if any. */
   activeDeviceId: string | undefined
   /** Start the camera, optionally a specific device. Restarts if already running. */
-  start: (deviceId?: string) => Promise<void>
+  start: (deviceId?: string) => Promise<boolean>
   stop: () => void
   /** Grab the current frame as an image. Rejects if the camera isn't active. */
   capture: (type?: string, quality?: number) => Promise<Blob>
@@ -35,7 +35,7 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : 'Could not start the camera.'
 }
 
-export function useCamera(): UseCamera {
+export function useCamera(onDisconnected?: (message: string) => void): UseCamera {
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   // Bumped on every start/stop so a slow getUserMedia call that's been superseded
@@ -85,7 +85,7 @@ export function useCamera(): UseCamera {
             : 'Camera access requires HTTPS or localhost.',
         )
         setStatus('error')
-        return
+        return false
       }
 
       setStatus('starting')
@@ -94,11 +94,11 @@ export function useCamera(): UseCamera {
           audio: false,
           video: deviceId
             ? { deviceId: { exact: deviceId } }
-            : { facingMode: { ideal: 'environment' } },
+            : { facingMode: { ideal: 'user' } },
         })
         if (request !== requestRef.current) {
           stream.getTracks().forEach((track) => track.stop())
-          return
+          return false
         }
 
         streamRef.current = stream
@@ -118,24 +118,28 @@ export function useCamera(): UseCamera {
           setActiveDeviceId(undefined)
           setError('The camera disconnected.')
           setStatus('error')
+          // Invalidate pending capture synchronously, before React renders the error.
+          onDisconnected?.('The camera disconnected.')
         })
 
         // Wait for playback before allowing a capture. Autoplay timing differs
         // between browsers, especially Safari on mobile devices.
         await video.play()
-        if (request !== requestRef.current) return
+        if (request !== requestRef.current) return false
         setStatus('active')
         // Device labels only become visible once permission has been granted.
-        await refreshDevices()
+        void refreshDevices()
+        return request === requestRef.current
       } catch (err) {
-        if (request !== requestRef.current) return
+        if (request !== requestRef.current) return false
         releaseStream()
         setActiveDeviceId(undefined)
         setError(describeError(err))
         setStatus('error')
+        return false
       }
     },
-    [releaseStream, refreshDevices],
+    [releaseStream, refreshDevices, onDisconnected],
   )
 
   const capture = useCallback(

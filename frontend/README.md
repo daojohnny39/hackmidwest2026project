@@ -1,7 +1,9 @@
 # Frontend
 
-React + TypeScript + Vite app that streams from the device camera and captures photos.
-Each captured photo is analyzed locally with MediaPipe Face Landmarker in the browser.
+React + TypeScript + Vite app with front-facing automatic capture by default and
+a separate manual camera checkpoint. The camera page consumes `useAutoCapture`;
+the same guidance/state contract supports later UI integration.
+MediaPipe runs locally; the app does not upload images.
 
 First download `models/face_landmarker.task` in the project root using Step 3 of
 the [project README](../README.md). Then run these commands from `frontend/`:
@@ -13,12 +15,73 @@ npm run build     # type-check + production build into dist/
 npm run lint
 ```
 
-`npm run dev` and `npm run build` automatically copy the model and the installed
+`npm run dev` and `npm run build` verify the pinned SDK version and model checksum, then copy the model and the installed
 MediaPipe WebAssembly files to `public/mediapipe/`. That generated directory is
 ignored by Git. Production builds include these assets in `dist/`; no CDN or
 Python analysis service is needed at runtime.
 
-## Photo analysis
+## Automatic capture
+
+Open the local Vite URL (or `?mode=front`), choose **Start camera**, and allow
+camera access. Follow the live instruction and hold steady. The app takes one
+photo automatically after every angle and framing check passes for 400 ms, then
+stops the camera. No shutter click is needed. Choose **Retake front photo** to
+start again. The page stays simple, with no mode selector.
+
+`src/CameraCapture.tsx` attaches `camera.videoRef` to the video and invokes
+`useAutoCapture().start()` from the Start action. The hook never starts on mount.
+
+Render `state.guidanceCode` through `guidance(state)`, the hold progress and
+framing/pose state, and `troubleshooting(state)` when `state.troubleshooting` is
+true. The hook exposes pause/resume/stop/retry/retake/changeCamera actions and the
+latest `result`. The component owns Blob URLs for previews and downloads and must
+revoke them when replacing/deleting images or unmounting.
+
+The engine still requires **±5° on each axis** and a **400 ms** qualifying hold.
+It saves the exact qualifying full-resolution, unmirrored JPEG, stops the camera,
+and preserves the previous result until a successful retake. Framing remains one
+face, a 4% edge margin, 35–75% face height, and 40–60% box center on both axes.
+
+Reset diagnostics remain in `state.diagnostics`: cumulative reason counts, the
+latest 50 events, and aggregate blocked-check counts. The troubleshooting flag
+activates after three failed holds or 10 seconds of active guidance. These values
+drive the live instructions and troubleshooting. Expand **Capture diagnostics**
+to see estimated angles, face height/center, current failed checks, and reset
+counts, or download the reset log. Tolerances never relax automatically. Pause/resume, camera
+switching, and retry preserve the session log; a new Start after Stop or a retake
+begins a new session. Successful metadata includes that session's diagnostics.
+
+Pause, Stop, a hidden page, camera loss/change, or unmount cancels pending work.
+Model loading, inference, and encoding cannot publish a late image after cancellation.
+
+Implementation boundaries:
+
+- `src/capture/engine.ts`: UI-independent rules, hold timing, reset diagnostics,
+  one-shot commit, and `onState` / `onCaptured` / `onError` callbacks.
+- `src/capture/pose.ts` and `gates.ts`: validated column-major matrix conversion
+  and face-oval framing. No first-frame neutral calibration or angle smoothing.
+- `src/capture/browserSource.ts`: one local VIDEO detector, two-face capacity,
+  at most 10 sampled frames/sec, inference at up to 640 px on the longest edge.
+  Each full-resolution frame is frozen before deriving its inference canvas.
+- `src/hooks/useAutoCapture.ts`: React adapter with state, latest result, and
+  start/pause/resume/stop/retake/retry/changeCamera actions. Camera ownership stays
+  in `useCamera.ts`; UI components own and revoke download URLs.
+- `src/CameraCapture.tsx`: guidance, hold progress, camera controls, diagnostics,
+  photo preview and downloads; capture decisions remain in the engine.
+- `src/capture/types.ts`: centralized defaults and the versioned
+  `FrontCaptureResult` (`image: Blob` plus JSON metadata).
+
+The future Stage 2 adapter can receive `onCaptured(result)` and send image bytes
+and metadata through an authenticated backend to the AWS Strands workflow. No
+backend, AWS credentials, or Strands execution is included here. A browser Blob URL
+is only a local preview reference. See the [active spec](../docs/front-capture-spec.md).
+
+Photos, metadata, and diagnostics stay in page memory. Download any results or
+reset logs you need before refreshing or leaving the page.
+
+## Manual photo checkpoint
+
+Open the local Vite URL with `?mode=manual` to use this separate checkpoint.
 
 1. Click **Start camera** and allow camera access.
 2. Click **Take photo**. The exact JPEG from `useCamera.capture()` is decoded and
@@ -28,9 +91,9 @@ Python analysis service is needed at runtime.
 
 The detector loads on the first photo and is reused for later photos. It uses
 `IMAGE` mode, up to two faces, transformation matrices enabled, and blendshapes
-disabled. One photo is analyzed at a time. This is a per-photo checkpoint, not
-continuous video analysis. Inference runs synchronously in the browser for each
-photo; continuous processing would need a separate scheduling/worker design.
+disabled. One photo is analyzed at a time. This checkpoint uses per-photo analysis independently of the automatic flow.
+Both paths currently run inference synchronously on the main browser thread;
+worker execution is deferred pending device measurements.
 
 Each JSON report includes a unique `frame_id`, image dimensions, face count,
 normalized `x/y/z` landmarks, and transformation matrices. The browser keeps
@@ -43,7 +106,7 @@ Camera photos stay in browser memory until deleted or the page is closed. Analys
 does not upload them. Deleting a snapshot releases its download URLs, and leaving
 the page releases the camera and detector resources.
 
-The integration lives in `src/faceAnalysis.ts` and `src/App.tsx`; the existing
+The manual integration lives in `src/faceAnalysis.ts` and `src/ManualCapture.tsx`; the existing
 `src/hooks/useCamera.ts` still owns the camera stream and capture behavior.
 
 ## Browser tests
@@ -67,28 +130,41 @@ Playwright WebKit, Safari's engine, rather than the installed Safari app. This
 does not replace physical-device testing in Safari or on iPhone/iPad. The Firefox
 project uses Playwright's Firefox build.
 
-Production-build verification on October 10, 2026 (macOS 27.0.1), including the
-optional personal-photo checkpoint:
+Verification after connecting automatic capture to the camera page (October 11, 2026):
 
-| Test browser | Result |
+| Check | Result |
 | --- | --- |
-| Google Chrome 154.0.8037.98 | 8 scenarios passed |
-| Playwright Firefox 157.0 | 8 scenarios passed |
-| Playwright WebKit 27.2 | 8 scenarios passed |
-| Microsoft Edge 155.0.4283.45 | Unverified: browser exits before loading the app |
+| Build and lint | Passed |
+| `npm run test:unit` | 21 engine/geometry tests passed |
+| `npm run test:auto-ui` | 9 automatic scenarios passed in Chrome |
+| `npm run test:auto-real -- --project=chrome` | 3 real local-model scenarios passed |
+| `npm test -- --project=chrome` | 7 manual scenarios passed; optional personal-photo test skipped |
 
-The temporary Edge copy reported `Failed to get the path for 1001` at startup;
-macOS also denied creation of its application-data directory. This is a test
-environment limitation, not a passing Edge result. Run the `edge` project on a
-machine where Microsoft Edge can launch. Installed Safari and physical mobile
-devices have not yet been manually verified.
+Firefox and WebKit passed earlier camera checks; this latest application integration
+was verified in Chrome. Edge has not been reverified.
 
-Eight scenarios per browser cover capture, result association, downloads,
-detector reuse, deletion during loading, model-load recovery, operation without
-ImageBitmap/OffscreenCanvas, restricted device enumeration, permission denial,
-playback-failure cleanup, and the optional positive photo checkpoint. The capture
-flow also checks for uploads and external requests. The tests use simulated camera
-inputs and the actual local model; they do not turn on the physical webcam.
+`npm test` covers the separate manual checkpoint. Both automatic browser suites
+mount the actual application, including its default route. The simulated-detector
+suite verifies successful capture, frozen pixels, reset logs, retakes,
+cancellation, and layout. The real-model suite verifies no-face guidance,
+troubleshooting, model-load recovery, and cancellation with local MediaPipe assets.
+The mock detector is excluded from normal development and production builds.
+
+```bash
+npm run test:unit
+npm run test:auto-ui
+npm run test:auto-real -- --project=chrome
+npm test -- --project=chrome
+```
+
+Run the two automatic browser suites sequentially: they share a test output
+bundle and port 4174. The production app uses port 4173 during tests.
+
+These tests never turn on the physical webcam. Physical-device trials are still
+needed to validate pose direction, tolerance usability, angle jitter, and captured
+image quality. The current two-face setting does not use MediaPipe's single-face
+smoothing; CPU inference may stall on slower devices. Neither sharpness/exposure
+nor liveness/identity checks are part of capture qualification.
 
 Optionally verify a personal JPEG through a simulated camera source:
 
@@ -113,9 +189,10 @@ The local verification used the downloaded Firefox engine with separate
 it did not use the personal Firefox profile.
 
 For a manual hardware check, open the app in each installed browser, allow camera
-access, capture a photo, confirm the overlay alignment, download the results,
+access, use the manual checkpoint to confirm landmark alignment and download results,
 switch cameras if available, and stop the camera. Camera permission is separate
-for each browser. Test iPhone/iPad camera switching and orientation on the device.
+for each browser. On the default automatic page, test directions, retakes,
+and reset guidance on the actual camera. Test mobile orientation on-device.
 
 ## Camera access
 
