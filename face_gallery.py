@@ -6,6 +6,7 @@ Works on the AWS Free plan (RecognizeCelebrities does not). Folder layout:
       names.json            optional: {"person_a": "Display Name", ...}
       person_a/ 1.jpg 2.jpg one folder per person; the folder name is their ID
       person_b/ 1.jpg
+      _test/                folders starting with "_" are skipped (test photos)
 
 Commands (run from the repo root, venv on):
 
@@ -30,6 +31,7 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from pipeline.rekognition import best_per_person, index_face, make_client, search_face
@@ -93,28 +95,57 @@ def cmd_add(client, args) -> None:
                  f"not {args.collection} in {region}. Use the same --collection and --region.")
     index["collection"], index["region"] = args.collection, region
 
-    added = skipped = no_face = 0
-    for person_dir in sorted(p for p in gallery.iterdir() if p.is_dir()):
+    # Folders starting with "_" (like _test/) are never indexed.
+    todo, skipped = [], 0
+    for person_dir in sorted(p for p in gallery.iterdir() if p.is_dir() and not p.name.startswith("_")):
         for photo in sorted(p for p in person_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES):
             key = photo.relative_to(gallery).as_posix()
             if key in index["photos"]:
                 skipped += 1
-                continue
+            else:
+                todo.append((key, person_dir.name, photo))
+    total, verbose = len(todo), len(todo) <= 300
+    print(f"{total} photos to add, {skipped} already there, {args.workers} at a time")
+
+    def work(item):
+        key, person, photo = item
+        face_id = index_face(client, args.collection, photo.read_bytes(), person)
+        time.sleep(args.delay)  # new accounts get a low request rate
+        return key, person, face_id
+
+    added = no_face = done = 0
+    started = time.monotonic()
+    pool = ThreadPoolExecutor(max_workers=args.workers)
+    futures = [pool.submit(work, item) for item in todo]
+    try:
+        for future in as_completed(futures):
             try:
-                face_id = index_face(client, args.collection, photo.read_bytes(), person_dir.name)
+                key, person, face_id = future.result()
             except Exception as exc:
+                pool.shutdown(wait=True, cancel_futures=True)
                 save_index(gallery, index)  # keep what worked so far
-                sys.exit(f"stopped at {key} ({aws_error(exc)}). Run add again to continue.")
+                sys.exit(f"stopped after {done} photos ({aws_error(exc)}). Run add again to continue.")
+            index["photos"][key] = {"person": person, "face_id": face_id}
+            done += 1
             if face_id is None:
                 no_face += 1
-                print(f"  no clear face: {key}")
-                index["photos"][key] = {"person": person_dir.name, "face_id": None}
+                if verbose:
+                    print(f"  no clear face: {key}")
             else:
                 added += 1
-                print(f"  added {key}")
-                index["photos"][key] = {"person": person_dir.name, "face_id": face_id}
-            save_index(gallery, index)
-            time.sleep(args.delay)  # new accounts get a low request rate
+                if verbose:
+                    print(f"  added {key}")
+            if done % 50 == 0:
+                save_index(gallery, index)
+            if not verbose and done % 100 == 0:
+                rate = done / (time.monotonic() - started)
+                print(f"  {done}/{total}  ({rate:.1f}/s, about {(total - done) / rate / 60:.0f} min left)")
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        save_index(gallery, index)
+        sys.exit(f"\nstopped by you after {done} photos; progress saved. Run add again to continue.")
+    pool.shutdown()
+    save_index(gallery, index)
     print(f"\nadded {added}, already there {skipped}, no face {no_face}  (collection {args.collection}, {region})")
 
 
@@ -135,7 +166,8 @@ def cmd_search(client, args) -> None:
         print("no face found in the frame, or the collection is empty")
     for match in matches:
         name = names.get(match.person_id, match.person_id)
-        print(f"  {match.similarity:5.1f}  {label(match.similarity):12} {name}")
+        shown = f"{name} ({match.person_id})" if name != match.person_id else name
+        print(f"  {match.similarity:5.1f}  {label(match.similarity):12} {shown}")
     if args.save:
         print(f"saved: {save_annotated(image, _NoBoxes(), REPO_ROOT / 'runs' / 'rekognition')}")
 
@@ -175,7 +207,8 @@ def main() -> None:
     parser.add_argument("--region")
     parser.add_argument("--consent", action="store_true")
     parser.add_argument("--yes", action="store_true")
-    parser.add_argument("--delay", type=float, default=0.3, help="seconds between adds (default 0.3)")
+    parser.add_argument("--delay", type=float, default=0.3, help="seconds each worker waits between adds (default 0.3)")
+    parser.add_argument("--workers", type=int, default=1, help="photos added at the same time (try 4 for big galleries)")
     parser.add_argument("--image", type=Path)
     parser.add_argument("--camera", action="store_true")
     parser.add_argument("--camera-index", type=int, default=0)
