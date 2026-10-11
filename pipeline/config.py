@@ -1,9 +1,10 @@
 """Pipeline settings from the environment, .env, and CLI switches (spec 0.3).
 
 Precedence is CLI options, then exported variables, then .env; empty values count
-as unset. Search defaults to backend V3 (rekognition): Trace face search and SerpApi web
-search, every result checked by Amazon Rekognition. It needs TRACE_API_KEY for Trace,
-SERPAPI_KEY for the SerpApi engines, AWS_REGION, and AWS credentials.
+as unset. Search defaults to backend V3 (rekognition) with V5's engines: Trace face search and
+SerpApi's Yandex and Bing, every result checked by Amazon Rekognition. It needs TRACE_API_KEY for
+Trace, SERPAPI_KEY for the SerpApi engines, GOOGLE_VISION_API_KEY for Cloud Vision (V6), AWS_REGION,
+and AWS credentials.
 FaceCheck (needs FACECHECK_API_KEY) and SerpApi's Yandex alone (needs SERPAPI_KEY) are
 the other live backends. The mock internet is opt-in (`backend="mock"`, `--mock`, or
 SEARCH_BACKEND=mock). Real Jev/LLM modes still need `models=True`. Secrets stay out of repr, describe(), and every error
@@ -38,9 +39,13 @@ DEFAULT_SEARCH_BACKEND = "rekognition"
 # Search the real internet; the run needs external_processing consent.
 LIVE_BACKENDS = ("rekognition", "facecheck", "serpapi")
 IMAGE_HOSTS = ("tunnel", "s3")  # how SerpApi runs give the search engine a public image URL (hosting.py)
-# Engines backend V3 can search: Trace takes an upload; the SerpApi engines need a hosted image URL.
-SERPAPI_ENGINES = ("yandex_images", "google_lens")
-REKOGNITION_ENGINES = ("trace", *SERPAPI_ENGINES)
+# Engines backend V3 can search: Trace takes an upload, the SerpApi engines need a hosted image URL,
+# and Cloud Vision takes the image's bytes.
+SERPAPI_ENGINES = ("yandex_images", "google_lens", "bing_reverse_image")
+REKOGNITION_ENGINES = ("trace", *SERPAPI_ENGINES, "cloud_vision")
+# V5 replaces V3's Google Lens with Bing. V6 is trace,yandex_images,cloud_vision; V3 and V4 were
+# trace,yandex_images,google_lens.
+DEFAULT_REKOGNITION_ENGINES = ("trace", "yandex_images", "bing_reverse_image")
 DEFAULT_MIN_SIMILARITY = 80.0  # CompareFaces' own default
 # Platforms REKOGNITION_PLATFORMS may keep; unset keeps every site. V3_1 is linkedin,facebook.
 SEARCH_PLATFORMS = tuple(dict.fromkeys(PLATFORM_DOMAINS.values()))
@@ -57,8 +62,8 @@ MAX_MOCK_DELAY_MS = 5000
 
 ENV_VARS = (
     "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "SERPAPI_KEY",
-    "FACECHECK_API_KEY", "FACECHECK_DEMO", "TRACE_API_KEY", "REKOGNITION_ENGINES", "REKOGNITION_MIN_SIMILARITY",
-    "REKOGNITION_PLATFORMS",
+    "FACECHECK_API_KEY", "FACECHECK_DEMO", "TRACE_API_KEY", "GOOGLE_VISION_API_KEY", "REKOGNITION_ENGINES",
+    "REKOGNITION_MIN_SIMILARITY", "REKOGNITION_PLATFORMS",
     "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
     "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "LLM_EFFORT", "ANTHROPIC_API_KEY",
 )
@@ -69,6 +74,7 @@ SECRET_ENV = {
     "serpapi": "SERPAPI_KEY",
     "facecheck": "FACECHECK_API_KEY",
     "trace": "TRACE_API_KEY",
+    "google-vision": "GOOGLE_VISION_API_KEY",
     "typesafe": "TYPESAFE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -91,6 +97,7 @@ class Settings:
     facecheck_api_key: str | None = field(repr=False)
     facecheck_demo: bool
     trace_api_key: str | None = field(repr=False)
+    google_vision_api_key: str | None = field(repr=False)
     rekognition_engines: tuple[str, ...]
     rekognition_min_similarity: float
     rekognition_platforms: tuple[str, ...]  # empty: every site
@@ -115,7 +122,7 @@ class Settings:
 
     @property
     def serpapi_engines(self) -> tuple[str, ...]:
-        """The SerpApi engines this run searches: Yandex alone for V1, the configured ones for V3."""
+        """The SerpApi engines this run searches: Yandex alone for V1, the configured ones for V3-V6."""
         if self.search_backend == "serpapi":
             return ("yandex_images",)
         if self.search_backend == "rekognition":
@@ -179,7 +186,7 @@ def load_settings(
     delay = _delay(env.get("MOCK_DELAY_MS", "0"))
     image_host = _choice(env, "IMAGE_HOST", IMAGE_HOSTS, DEFAULT_IMAGE_HOST)
     facecheck_demo = _flag(env, "FACECHECK_DEMO")
-    engines = _engines(env.get("REKOGNITION_ENGINES", ",".join(REKOGNITION_ENGINES)))
+    engines = _engines(env.get("REKOGNITION_ENGINES", ",".join(DEFAULT_REKOGNITION_ENGINES)))
     min_similarity = _similarity(env.get("REKOGNITION_MIN_SIMILARITY", str(DEFAULT_MIN_SIMILARITY)))
     platforms = _platforms(env.get("REKOGNITION_PLATFORMS", ""))
 
@@ -200,10 +207,13 @@ def load_settings(
     # rekognition_backend.require_rekognition, not here.
     uses_serpapi = backend == "serpapi" or (backend == "rekognition" and any(e in SERPAPI_ENGINES for e in engines))
     uses_trace = backend == "rekognition" and "trace" in engines
+    uses_vision = backend == "rekognition" and "cloud_vision" in engines
     if uses_serpapi:
         required.setdefault("SERPAPI_KEY", []).append("SerpApi search")
     if uses_trace:
         required.setdefault("TRACE_API_KEY", []).append("Trace face search")
+    if uses_vision:
+        required.setdefault("GOOGLE_VISION_API_KEY", []).append("Cloud Vision web detection")
     if backend == "rekognition":
         required.setdefault("AWS_REGION", []).append("Rekognition face matching")
     elif backend == "facecheck":
@@ -221,8 +231,10 @@ def load_settings(
     if missing:
         hint = ""
         if backend == "rekognition":
-            saves = [f"the {service} key with `python -m pipeline set-key {service.lower()}`"
-                     for service, name in (("Trace", "TRACE_API_KEY"), ("SerpApi", "SERPAPI_KEY"))
+            saves = [f"the {service} key with `python -m pipeline set-key {command}`"
+                     for service, command, name in (("Trace", "trace", "TRACE_API_KEY"),
+                                                    ("SerpApi", "serpapi", "SERPAPI_KEY"),
+                                                    ("Google Cloud Vision", "google-vision", "GOOGLE_VISION_API_KEY"))
                      if name in required and name not in env]
             if "AWS_REGION" not in env:
                 saves.append("AWS keys with `python -m pipeline set-key aws --region <region>`")
@@ -247,6 +259,7 @@ def load_settings(
         facecheck_api_key=env.get("FACECHECK_API_KEY") if backend == "facecheck" else None,
         facecheck_demo=facecheck_demo,
         trace_api_key=env.get("TRACE_API_KEY") if uses_trace else None,
+        google_vision_api_key=env.get("GOOGLE_VISION_API_KEY") if uses_vision else None,
         rekognition_engines=engines,
         rekognition_min_similarity=min_similarity,
         rekognition_platforms=platforms,

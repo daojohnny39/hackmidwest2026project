@@ -1,6 +1,6 @@
 """Trace reverse face search (https://traceaifacescan.app), backend V3's face-index engine.
 
-Yandex and Google Lens find images that look like the participant; Trace, like FaceCheck,
+Yandex, Bing, Google Lens and Cloud Vision find images that look like the participant; Trace, like FaceCheck,
 matches the face against faces it has indexed from public pages and social profiles, and it
 takes card payments. One search per image (API v1, openapi.json checked 2026-10-10):
 

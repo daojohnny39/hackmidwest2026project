@@ -49,6 +49,8 @@ _SECRET_PATTERNS = [
     (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), REDACTED),
     # Image tunnel hosts and paths (hosting.py): hosted URLs are never logged
     (re.compile(r"(?i)(?<![a-z0-9-])[a-z0-9-]+\.lhr\.life(?:/[^\s\"']*)?"), f"{REDACTED}.lhr.life"),
+    # Public S3 image keys (hosting.py): the random key is all it takes to fetch the image
+    (re.compile(r"(?i)\bhackmidwest-faces/[^\s\"'?#]+"), f"hackmidwest-faces/{REDACTED}"),
     # Any remaining URL query string, e.g. the rest of a presigned URL
     (re.compile(r"""(?i)\b([a-z][a-z0-9+.-]*://[^\s?#"']*)\?[^\s#"']*"""), rf"\1?{REDACTED}"),
 ]

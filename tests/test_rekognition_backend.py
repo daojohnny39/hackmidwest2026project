@@ -8,6 +8,7 @@ socket guard from OfflineTestCase stays on throughout.
 """
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -25,6 +26,7 @@ from pipeline.config import ConfigError, load_settings
 from pipeline.contracts import CaptureImage, FetchedPage, UploadRecord, validate_references
 from pipeline.image_agent import system_prompt
 from pipeline.search.base import BackendError, parse_image_results
+from pipeline.search.cloud_vision import VISION_URL, CloudVisionSearch
 from pipeline.search.rekognition_backend import (
     TRACE_EXTRA_DEADLINE_S,
     RekognitionBackend, aws_error, best_similarity, build_rekognition_backend, face_crop, merge, require_rekognition,
@@ -66,6 +68,42 @@ LENS = {
         {"position": 3, "title": "Pat at the meetup", "link": BROKEN, "source": "broken.example",
          "thumbnail": "https://tbn.example/t4.jpg", "image": "https://img.example/missing.jpg"},
     ],
+}
+# V5's engine, in the shape of SerpApi's documented sample (checked 2026-10-11): link is Bing's own
+# image-detail page, source the page with the image, original the image, cdn_original Bing's copy.
+BING = {
+    "search_metadata": {"id": "b-1", "status": "Success"},
+    "search_parameters": {"engine": "bing_reverse_image", "image_url": HOSTED},
+    "image_info": {"link": "https://www.bing.com/images/search?view=detailv2", "source": HOSTED, "original": HOSTED},
+    "pages_with_this_image": [
+        {"title": "Pat Lee | LinkedIn", "link": "https://www.bing.com/images/search?view=detailv2&id=A1",
+         "thumbnail": "https://tse1.mm.bing.net/th?id=t1", "source": "https://www.linkedin.com/in/patlee/",
+         "original": "https://img.example/linkedin.jpg", "cdn_original": "https://th.bing.example/R.1",
+         "domain": "www.linkedin.com", "size": "400 x 400"},
+    ],
+    "related_content": [
+        {"position": 1, "title": "patlee (Pat Lee) - GitHub",
+         "link": "https://www.bing.com/images/search?view=detailv2&id=B2", "thumbnail": "https://tse2.mm.bing.net/th?id=t3",
+         "source": GITHUB, "original": "https://img.example/hotlink-blocked.jpg",
+         "cdn_original": "https://th.bing.example/github.png", "domain": "github.com"},
+        {"position": 2, "title": "Someone else", "link": "https://www.bing.com/images/search?view=detailv2&id=C3",
+         "source": LOOKALIKE, "original": "https://img.example/lookalike.jpg", "domain": "lookalike.example"},
+        {"position": 3, "title": "No page", "link": "https://www.bing.com/images/search?view=detailv2&id=D4"},
+    ],
+}
+VISION_KEY = "AIza-vision-test-key-not-real"
+# V6's engine: a Cloud Vision webDetection object.
+VISION = {
+    "webEntities": [{"entityId": "/m/0", "score": 0.4, "description": "Pat Lee"}],
+    "bestGuessLabels": [{"label": "pat lee", "languageCode": "en"}],
+    "pagesWithMatchingImages": [
+        {"url": "https://www.linkedin.com/in/patlee/", "pageTitle": "Pat Lee | <b>LinkedIn</b> &amp; more",
+         "fullMatchingImages": [{"url": "https://img.example/linkedin.jpg"}]},
+        {"url": GITHUB, "pageTitle": "patlee", "partialMatchingImages": [{"url": "https://img.example/github.png"}]},
+        {"url": "javascript:alert(1)", "fullMatchingImages": [{"url": "https://img.example/x.jpg"}]},
+    ],
+    "fullMatchingImages": [{"url": "https://img.example/linkedin.jpg"}, {"url": "https://img.example/t4.jpg"}],
+    "visuallySimilarImages": [{"url": "https://img.example/lookalike.jpg"}, {"url": "https://img.example/landscape.jpg"}],
 }
 # Result image path -> width; width -> CompareFaces reply (or exception).
 WIDTHS = {"/linkedin.jpg": 101, "/lookalike.jpg": 102, "/landscape.jpg": 103, "/github.png": 104, "/t4.jpg": 105,
@@ -137,7 +175,8 @@ class V3TestCase(OfflineTestCase):
     def backend(self, serp=None, *, rekognition=None, images=None, pages=None, refresh=False, hosted=True,
                 **options):
         """serp: engine -> list of (status, body) replies, used in order. hosted=False builds it
-        without a SerpApi key or image host, as for REKOGNITION_ENGINES=trace."""
+        without a SerpApi key or image host, as for REKOGNITION_ENGINES=trace. Engines default to
+        V3's SerpApi pair, yandex_images and google_lens."""
         serp = {engine: list(replies) for engine, replies in (serp or {"yandex_images": [(200, YANDEX)],
                                                                        "google_lens": [(200, LENS)]}).items()}
         images = images if images is not None else {}
@@ -159,6 +198,7 @@ class V3TestCase(OfflineTestCase):
 
         self.host = FakeHost()
         self.rekognition = rekognition or FakeRekognition()
+        options.setdefault("engines", ("yandex_images", "google_lens"))
         backend = RekognitionBackend(
             api_key=KEY if hosted else None, capture_dir=self.folder, host=self.host if hosted else None,
             rekognition=self.rekognition,
@@ -480,6 +520,105 @@ class TraceEngineTests(V3TestCase):
             self.backend(engines=("google_lens",), hosted=False)
 
 
+class V5Tests(V3TestCase):
+    """V5: Bing reverse image search through SerpApi instead of Google Lens."""
+
+    def test_bing_gets_the_hosted_crop_as_image_url_and_its_pages_are_compared(self):
+        backend = self.backend({"yandex_images": [(200, YANDEX)], "bing_reverse_image": [(200, BING)]},
+                               engines=("yandex_images", "bing_reverse_image"))
+        result = parse_image_results(self.search(backend))
+        self.assertIn({"engine": "bing_reverse_image", "image_url": HOSTED, "mkt": "en-US", "api_key": KEY}, self.serp)
+        self.assertEqual(len(self.host.uploads), 1)  # one hosted crop for both engines
+
+        # Hits link to the pages (Bing's source), never to Bing's own detail pages.
+        self.assertEqual([(hit.url, hit.face_score, hit.title, hit.source) for hit in result.hits], [
+            (LINKEDIN, 99, "Pat Lee | LinkedIn", "linkedin.com"),
+            (GITHUB, 93, "patlee (Pat Lee) - GitHub", "github.com")])
+        self.assertEqual(result.extras["engines"], ["yandex_images", "bing_reverse_image"])
+        self.assertEqual((result.extras["candidates"], result.extras["outcomes"]),
+                         (4, {"matched": 2, "below_threshold": 1, "no_face": 1}))
+        # The page's own image refused the download, so Bing's copy of it was compared.
+        self.assertIn("https://img.example/hotlink-blocked.jpg", self.downloads)
+        self.assertIn("https://th.bing.example/github.png", self.downloads)
+        for text in [json.dumps(self.search(backend))] + [path.read_text() for path in (self.folder / "cache").iterdir()]:
+            self.assertNotIn(KEY, text)
+            self.assertNotIn("lhr.life", text)
+            self.assertNotIn("bing.com/images/search", text)
+        self.assertEqual(self.cached(), ["bing_reverse_image.json", "v3-yandex_images+bing_reverse_image-80.json",
+                                         "yandex_images.json"])
+
+    def test_bing_failing_keeps_yandex(self):
+        failed = {"search_metadata": {"id": "b-2", "status": "Error"}, "error": "Bing Reverse Image failed"}
+        backend = self.backend({"yandex_images": [(200, YANDEX)], "bing_reverse_image": [(200, failed)]},
+                               engines=("yandex_images", "bing_reverse_image"))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([hit.url for hit in result.hits], [LINKEDIN])
+        self.assertEqual(result.extras["failed_engines"], ["bing_reverse_image"])
+
+
+class V6Tests(V3TestCase):
+    """V6: Google Cloud Vision web detection instead of Google Lens."""
+
+    def vision(self, *replies):
+        """A CloudVisionSearch whose requests go to these (status, body) replies in order."""
+        self.vision_requests = []
+        queue = list(replies)
+
+        def annotate(request):
+            self.vision_requests.append(request)
+            status, body = queue.pop(0)
+            return httpx.Response(status, json=body)
+
+        return CloudVisionSearch(VISION_KEY, client=httpx.AsyncClient(transport=httpx.MockTransport(annotate)))
+
+    def test_cloud_vision_gets_the_crop_itself_and_needs_no_hosting(self):
+        vision = self.vision((200, {"responses": [{"webDetection": VISION}]}))
+        backend = self.backend({}, engines=("cloud_vision",), vision_search=vision, hosted=False)
+        result = parse_image_results(self.search(backend))
+
+        self.assertEqual((self.serp, self.host.uploads), ([], []))
+        [request] = self.vision_requests
+        self.assertEqual((str(request.url), request.headers["x-goog-api-key"]), (VISION_URL, VISION_KEY))
+        [body] = json.loads(request.content)["requests"]
+        self.assertEqual(body["features"], [{"type": "WEB_DETECTION", "maxResults": 50}])
+        crop = base64.b64decode(body["image"]["content"])
+        self.assertEqual(crop, self.rekognition.compare_calls[0]["SourceImage"]["Bytes"])
+        self.assertEqual(Image.open(io.BytesIO(crop)).size, (400, 400))
+
+        # Pages first (HTML stripped from titles), then an image Google gave without a page.
+        self.assertEqual([(hit.url, hit.face_score, hit.title, hit.snippet) for hit in result.hits], [
+            (LINKEDIN, 99, "Pat Lee | LinkedIn & more", "Cloud Vision: page showing the same image"),
+            (GITHUB, 93, "patlee", "Cloud Vision: page showing part of the image"),
+            ("https://img.example/t4.jpg", 85, "", "Cloud Vision: the same image, page not given")])
+        self.assertEqual(result.hits[2].source, "img.example")
+        self.assertEqual((result.extras["engines"], result.extras["candidates"], result.extras["outcomes"]),
+                         (["cloud_vision"], 5, {"matched": 3, "below_threshold": 1, "no_face": 1}))
+        for text in [json.dumps(self.search(backend))] + [path.read_text() for path in (self.folder / "cache").iterdir()]:
+            self.assertNotIn(VISION_KEY, text)
+            self.assertNotIn("Pat Lee\"", text)  # webEntities and bestGuessLabels aren't kept
+        self.assertEqual(self.cached(), ["cloud_vision.json", "v3-cloud_vision-80.json"])
+
+        # A rerun reads Cloud Vision's cached reply instead of asking again.
+        rerun = self.backend({}, engines=("cloud_vision",), vision_search=self.vision(), hosted=False, min_similarity=60)
+        self.assertEqual(len(parse_image_results(self.search(rerun)).hits), 4)
+        self.assertEqual(self.vision_requests, [])
+
+    def test_cloud_vision_failing_keeps_the_other_engines(self):
+        disabled = {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Cloud Vision API has not been used",
+                              "details": [{"reason": "SERVICE_DISABLED"}]}}
+        backend = self.backend({"yandex_images": [(200, YANDEX)]}, engines=("yandex_images", "cloud_vision"),
+                               vision_search=self.vision((403, disabled)))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([hit.url for hit in result.hits], [LINKEDIN])
+        self.assertEqual((result.extras["engines"], result.extras["failed_engines"]),
+                         (["yandex_images"], ["cloud_vision"]))
+        self.assertEqual(self.cached(), ["yandex_images.json"])
+
+    def test_cloud_vision_needs_its_client(self):
+        with self.assertRaisesRegex(ValueError, "CloudVisionSearch"):
+            self.backend({}, engines=("cloud_vision",), hosted=False)
+
+
 class HelperTests(OfflineTestCase):
     def test_face_crop_pads_and_clips(self):
         source = jpeg(1000, 800)
@@ -522,6 +661,20 @@ class HelperTests(OfflineTestCase):
             "images": ["https://img.example/linkedin.jpg", "https://avatars.example/t1.jpg"]})
         signed = {"visual_matches": [{"link": "https://a.example", "image": "https://s3.example/a.jpg?X-Amz-Signature=1"}]}
         self.assertEqual(sanitize_engine("google_lens", signed)["results"][0]["images"], [])
+
+    def test_sanitize_bing_keeps_the_page_not_bings_detail_link(self):
+        clean = sanitize_engine("bing_reverse_image", BING)
+        self.assertEqual(clean["results"][0], {
+            "title": "Pat Lee | LinkedIn", "source": "www.linkedin.com", "link": "https://www.linkedin.com/in/patlee/",
+            "thumbnail": "https://tse1.mm.bing.net/th?id=t1",
+            "images": ["https://img.example/linkedin.jpg", "https://th.bing.example/R.1",
+                       "https://tse1.mm.bing.net/th?id=t1"]})
+        # The result without a source page is dropped.
+        self.assertEqual([row["link"] for row in clean["results"]],
+                         ["https://www.linkedin.com/in/patlee/", GITHUB, LOOKALIKE])
+        dumped = json.dumps(clean)
+        self.assertNotIn(HOSTED, dumped)  # image_info and search_parameters echo the hosted crop
+        self.assertNotIn("bing.com/images/search", dumped)
 
     def test_merge_alternates_engines_and_puts_full_images_first(self):
         results = {"yandex_images": sanitize_engine("yandex_images", YANDEX),
@@ -578,6 +731,27 @@ class BuildTests(OfflineTestCase):
         self.assertEqual(backend.cache_dir, Path("/tmp/run/cache/rekognition"))
         self.assertIn("face_score", system_prompt(backend))
         self.assertIn("under 90 were already dropped", system_prompt(backend))
+
+
+    def test_v6_build_gets_a_cloud_vision_client(self):
+        os.environ.update(AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY="x" * 40)
+        settings = self.settings(REKOGNITION_ENGINES="trace,yandex_images,cloud_vision",
+                                 GOOGLE_VISION_API_KEY=VISION_KEY)
+        with patch("pipeline.search.rekognition_backend.open_host", return_value=FakeHost()) as open_host, \
+                patch("pipeline.search.rekognition_backend.rekognition_client"):
+            backend = build_rekognition_backend(settings, live_capture("img-1"), Path("/tmp/run"), refresh=False)
+        self.addCleanup(lambda: asyncio.run(backend.aclose()))
+        open_host.assert_called_once()  # for Yandex; Cloud Vision gets the crop's bytes
+        self.assertEqual(backend.engines, ("trace", "yandex_images", "cloud_vision"))
+        self.assertEqual(backend.vision_search.api_key, VISION_KEY)
+
+        v5 = self.settings()
+        with patch("pipeline.search.rekognition_backend.open_host", return_value=FakeHost()), \
+                patch("pipeline.search.rekognition_backend.rekognition_client"):
+            backend = build_rekognition_backend(v5, live_capture("img-1"), Path("/tmp/run"), refresh=False)
+        self.addCleanup(lambda: asyncio.run(backend.aclose()))
+        self.assertEqual(backend.engines, ("trace", "yandex_images", "bing_reverse_image"))
+        self.assertIsNone(backend.vision_search)
 
 
 class CollectTests(V3TestCase):

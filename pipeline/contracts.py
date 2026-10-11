@@ -53,7 +53,7 @@ def safe_id(value: str, what: str) -> str:
 
 class Consent(Contract):
     confirmed: StrictBool
-    participant: str = Field(min_length=1)
+    participant: str = ""  # may be empty; only the consent gate reads it, never search or models
     confirmed_at: AwareDatetime
     external_processing: StrictBool = False  # required true for live search or --models
 

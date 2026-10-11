@@ -1,5 +1,5 @@
-"""Image hosting (spec 1.2, 0.5). S3 with a fake client: keys recorded before upload, cleanup,
-purge. The tunnel with a fake ssh: images served on loopback only, then stopped."""
+"""Image hosting (spec 1.2, 0.5). S3 with a fake client: keys recorded before upload, plain
+public URLs, the bucket check, cleanup, purge. The tunnel with a fake ssh: images served on loopback only, then stopped."""
 
 import io
 import sys
@@ -23,13 +23,13 @@ from pipeline.trace import TRACE_FILE, tracing
 from tests.support import OfflineTestCase, read_trace
 
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 32
-PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
 
 
 class FakeS3:
     def __init__(self, run_dir, *, version=None, fail_put=False):
         self.run_dir, self.version, self.fail_put = run_dir, version, fail_put
         self.calls = []
+        self.objects = {}  # key -> body, for a fake public GET
 
     def put_object(self, **params):
         # The key must already be in uploads.json when the upload starts.
@@ -37,14 +37,16 @@ class FakeS3:
         self.calls.append(("put", params["Key"], params["Key"] in recorded, params["ContentType"]))
         if self.fail_put:
             raise RuntimeError("AccessDenied https://faces.s3.amazonaws.com/?X-Amz-Signature=x")
+        self.objects[params["Key"]] = params["Body"]
         return {"VersionId": self.version} if self.version else {}
-
-    def generate_presigned_url(self, operation, Params, ExpiresIn):
-        self.calls.append(("presign", Params["Key"], ExpiresIn))
-        return f"https://{Params['Bucket']}.s3.amazonaws.com/{Params['Key']}?X-Amz-Signature=abc"
 
     def delete_object(self, **params):
         self.calls.append(("delete", params["Key"], params.get("VersionId")))
+        self.objects.pop(params["Key"], None)
+
+    def public_get(self, url, timeout):
+        """Stands in for an anonymous GET of the object's public URL."""
+        return self.objects.get(url.removeprefix("https://faces.s3.us-east-1.amazonaws.com/"))
 
 
 class HostingTests(OfflineTestCase):
@@ -54,31 +56,71 @@ class HostingTests(OfflineTestCase):
         self.run_dir = self.runs / "session-0000abcd"
         self.run_dir.mkdir()
 
-    def host(self, **options):
+    def host(self, *, probe=None, **options):
         self.s3 = FakeS3(self.run_dir, **options)
-        return S3ImageHost(bucket="faces", region="us-east-1", run_dir=self.run_dir, client=self.s3)
+        return S3ImageHost(bucket="faces", region="us-east-1", run_dir=self.run_dir, client=self.s3,
+                           probe=probe or self.s3.public_get)
 
-    def test_upload_records_first_and_presigns_for_ten_minutes(self):
-        url, record = self.host().upload(JPEG)
-        self.assertTrue(url.startswith("https://faces.s3.amazonaws.com/hackmidwest-faces/"))
-        self.assertTrue(record.key.endswith(".jpg"))
-        self.assertEqual(self.s3.calls[0], ("put", record.key, True, "image/jpeg"))
-        self.assertEqual(self.s3.calls[1], ("presign", record.key, 600))
+    def test_upload_records_first_and_hands_out_a_plain_public_url(self):
+        url, record = self.host().upload(photo(orientation=6))
+        # No query string: SerpApi passes the URL to Yandex unencoded, which cut presigned URLs short.
+        self.assertEqual(url, f"https://faces.s3.us-east-1.amazonaws.com/{record.key}")
+        self.assertRegex(record.key, r"^hackmidwest-faces/[0-9a-f]{32}\.jpg$")
+        self.assertEqual(self.s3.calls, [("put", record.key, True, "image/jpeg")])
+        # The public object is the small upright copy, with no EXIF.
+        with Image.open(io.BytesIO(self.s3.objects[record.key])) as hosted:
+            self.assertEqual((hosted.format, hosted.size), ("JPEG", (600, 800)))
+            self.assertEqual(dict(hosted.getexif()), {})
         stored = (self.run_dir / UPLOADS_FILE).read_text()
-        self.assertNotIn("X-Amz", stored)
         self.assertNotIn("://", stored)
 
     def test_keys_are_random_and_typed(self):
         host = self.host()
-        keys = {host.upload(JPEG)[1].key for _ in range(3)} | {host.upload(PNG)[1].key}
+        keys = {host.upload(photo())[1].key for _ in range(3)} | {host.upload(photo(fmt="PNG"))[1].key}
         self.assertEqual(len(keys), 4)
+        self.assertTrue(all(key.endswith(".jpg") for key in keys))
         self.assertEqual(len(read_uploads(self.run_dir).objects), 4)
         with self.assertRaises(HostingError):
             image_type(b"GIF89a")
 
+    def test_start_checks_the_bucket_end_to_end(self):
+        host = self.host()
+        with tracing(self.run_dir, 1):
+            host.start()
+        [put, delete] = self.s3.calls
+        self.assertTrue(put[1].startswith("hackmidwest-faces/") and put[1].endswith(".txt"))
+        self.assertEqual(delete[:2], ("delete", put[1]))
+        [record] = read_uploads(self.run_dir).objects
+        self.assertTrue(record.deleted)
+        self.assertEqual(self.s3.objects, {})
+        self.assertNotIn(put[1], (self.run_dir / TRACE_FILE).read_text())
+
+    def test_private_bucket_fails_start_and_still_deletes_the_probe(self):
+        host = self.host(probe=lambda url, timeout: None)  # e.g. 403: no public-read bucket policy
+        with tracing(self.run_dir, 1), self.assertRaises(HostingError) as caught:
+            host.start()
+        self.assertEqual(str(caught.exception), "bucket_not_public")
+        self.assertEqual(self.s3.objects, {})
+        [record] = read_uploads(self.run_dir).objects
+        self.assertTrue(record.deleted)
+        [failure] = [event for event in read_trace(self.run_dir) if event.get("event") == "bucket_not_public"]
+        self.assertEqual(failure["bucket"], "faces")
+
+    def test_backend_reports_a_bucket_that_fails_its_check_as_config(self):
+        settings = load_settings(backend="serpapi", environ={"SERPAPI_KEY": "k", "IMAGE_HOST": "s3",
+                                                             "IMAGE_BUCKET": "faces", "AWS_REGION": "us-east-1"},
+                                 dotenv_path=None)
+        capture = SimpleNamespace(capture_dir=str(self.run_dir))
+        s3 = FakeS3(self.run_dir)
+        with patch("pipeline.hosting.s3_client", return_value=s3), \
+                patch("pipeline.hosting._probe", return_value=None):
+            with self.assertRaisesRegex(ConfigError, "bucket_not_public.*s3:GetObject"):
+                build_serpapi_backend(settings, capture, self.run_dir, refresh=False)
+        self.assertEqual(s3.objects, {})
+
     def test_delete_marks_deleted_and_handles_versions(self):
         host = self.host(version="v7")
-        _, record = host.upload(JPEG)
+        _, record = host.upload(photo())
         host.delete(record)
         self.assertEqual(self.s3.calls[-1], ("delete", record.key, "v7"))
         [stored] = read_uploads(self.run_dir).objects
@@ -87,7 +129,7 @@ class HostingTests(OfflineTestCase):
 
     def test_failed_upload_stays_listed_for_purge(self):
         with self.assertRaises(HostingError) as caught:
-            self.host(fail_put=True).upload(JPEG)
+            self.host(fail_put=True).upload(photo())
         self.assertEqual(str(caught.exception), "hosting_error")
         [record] = read_uploads(self.run_dir).objects
         self.assertFalse(record.deleted)

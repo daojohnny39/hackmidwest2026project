@@ -1,11 +1,12 @@
 """CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
 
-Search uses backend V3 (Trace face search and SerpApi web search, faces checked by Amazon
-Rekognition) unless
+Search uses backend V3 with V5's engines (Trace face search and SerpApi's Yandex and Bing, faces
+checked by Amazon Rekognition) unless
 SEARCH_BACKEND=facecheck picks FaceCheck face search, SEARCH_BACKEND=serpapi picks Yandex
 alone through SerpApi, or `run --mock` (or SEARCH_BACKEND=mock) picks the local mock internet.
-`set-key {trace,serpapi,facecheck,typesafe,openrouter,anthropic}` prompts for a key with
-hidden input and saves it to .env; Trace, SerpApi, FaceCheck and TypeSafe keys are checked first.
+`set-key {trace,serpapi,google-vision,facecheck,typesafe,openrouter,anthropic}` prompts for a key with
+hidden input and saves it to .env; Trace, SerpApi, Google Cloud Vision, FaceCheck and TypeSafe keys
+are checked first.
 `set-key aws` saves an AWS access key pair to ~/.aws/credentials after a free STS check.
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
@@ -57,8 +58,8 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 ENV_TEMPLATE = REPO_ROOT / ".env.example"
-SERVICE_NAMES = {"trace": "Trace", "facecheck": "FaceCheck", "serpapi": "SerpApi", "typesafe": "TypeSafe",
-                 "openrouter": "OpenRouter", "anthropic": "Anthropic"}
+SERVICE_NAMES = {"trace": "Trace", "facecheck": "FaceCheck", "serpapi": "SerpApi", "google-vision": "Google Cloud",
+                 "typesafe": "TypeSafe", "openrouter": "OpenRouter", "anthropic": "Anthropic"}
 # The .env mode that puts a saved model key to use; real modes also need --models.
 KEY_MODES = {"typesafe": "JEV_MODE=typesafe", "openrouter": "JEV_MODE=openrouter", "anthropic": "LLM_MODE=anthropic"}
 
@@ -145,10 +146,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Run {run_id}")
     print(f"  folder: {run_dir}")
     print(f"  trace: {run_dir / TRACE_FILE}")
-    print(f"  participant: {bundle.consent.participant} (consent confirmed {bundle.consent.confirmed_at.isoformat()})")
+    print(f"  participant: {bundle.consent.participant or '(not recorded)'} (consent confirmed {bundle.consent.confirmed_at.isoformat()})")
     llm = (f"{settings.llm_mode} ({settings.llm_model}, effort {settings.llm_effort})"
            if settings.llm_mode != "off" else "off")
-    print(f"  search: {settings.search_backend}, scenario {settings.mock_scenario}; "
+    engines = f" ({', '.join(settings.rekognition_engines)})" if settings.search_backend == "rekognition" else ""
+    print(f"  search: {settings.search_backend}{engines}, scenario {settings.mock_scenario}; "
           f"jev: {settings.jev_mode}; llm: {llm}")
     for image in bundle.images:
         source = image.mock_fixture if image.mock_fixture else image.file
@@ -314,6 +316,18 @@ def cmd_set_key(args: argparse.Namespace) -> int:
             return fail(f"Trace rejected the key ({exc}); nothing was saved.", REFUSED)
         except CheckFailed as exc:
             print(f"Warning: couldn't check the key with Trace ({exc}); saving it anyway.")
+    if args.service == "google-vision" and args.check:
+        # An empty annotate request: Google checks the key but analyzes no image.
+        from pipeline.search.cloud_vision import CheckFailed as VisionCheckFailed, KeyRejected as VisionKeyRejected
+        from pipeline.search.cloud_vision import check_key
+
+        try:
+            print(f"Google accepted the key; {check_key(value)}.")
+        except VisionKeyRejected as exc:
+            return fail(f"Google rejected the key ({exc}); nothing was saved.", REFUSED)
+        except VisionCheckFailed as exc:
+            print(f"Warning: couldn't check the key with Google ({exc}); saving it anyway. If the Cloud Vision "
+                  "API isn't enabled for the key's project, enable it in the Google Cloud console.")
     if args.service == "serpapi" and args.check:
         try:
             print(f"SerpApi accepted the key: {describe_quota(account_quota(value))}.")
@@ -341,6 +355,9 @@ def cmd_set_key(args: argparse.Namespace) -> int:
 
         print(f"Each Trace search costs 1 credit, one per image (packs: {CREDIT_PACKS}). Backend V3 uses Trace "
               "while REKOGNITION_ENGINES includes trace, as it does by default.")
+    if args.service == "google-vision":
+        print("V6 uses it: set REKOGNITION_ENGINES=trace,yandex_images,cloud_vision in .env. Each image is one "
+              "web detection request; the first 1,000 a month are free, then $3.50 per 1,000.")
     if args.service == "facecheck":
         print("Each FaceCheck search costs 3 credits ($0.30). Set FACECHECK_DEMO=true in .env for free demo "
               "searches, which scan only 100,000 faces.")

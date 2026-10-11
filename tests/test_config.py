@@ -17,6 +17,7 @@ SECRETS = {
     "ANTHROPIC_API_KEY": "sk-ant-SECRET-4444",
     "FACECHECK_API_KEY": "fc-SECRET-5555",
     "TRACE_API_KEY": "trk_live_SECRET-6666",
+    "GOOGLE_VISION_API_KEY": "AIza-SECRET-7777",
 }
 FACECHECK = {"FACECHECK_API_KEY": SECRETS["FACECHECK_API_KEY"]}
 LIVE = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "IMAGE_BUCKET": "hm-bucket", "AWS_REGION": "us-east-1"}
@@ -54,13 +55,13 @@ class ConfigTestCase(OfflineTestCase):
 
 
 class DefaultsTests(ConfigTestCase):
-    def test_default_backend_is_v3(self):
+    def test_default_backend_is_v3_with_v5_engines(self):
         settings = load({**V3, **FACECHECK}, backend=None)
         self.assertEqual(settings.search_backend, "rekognition")
         self.assertTrue(settings.live)
         self.assertEqual((settings.serpapi_key, settings.aws_region), (SECRETS["SERPAPI_KEY"], "us-east-1"))
         self.assertIsNone(settings.facecheck_api_key)
-        self.assertEqual(settings.rekognition_engines, ("trace", "yandex_images", "google_lens"))
+        self.assertEqual(settings.rekognition_engines, ("trace", "yandex_images", "bing_reverse_image"))
         self.assertEqual(settings.rekognition_min_similarity, 80.0)
         self.assertEqual((settings.jev_mode, settings.llm_mode), ("fake", "off"))
         self.assertFalse(settings.models or settings.real_models_enabled)
@@ -89,6 +90,22 @@ class DefaultsTests(ConfigTestCase):
         self.assertIsNone(load(V3, backend="serpapi").trace_api_key)
         self.assertFalse(load().needs_hosting)
 
+    def test_v6_needs_the_google_vision_key(self):
+        v6 = {**V3, "REKOGNITION_ENGINES": "trace,yandex_images,cloud_vision"}
+        error = self.assertConfigError(r"missing required settings: GOOGLE_VISION_API_KEY \(for Cloud Vision web "
+                                       r"detection\)", v6, backend="rekognition")
+        self.assertIn("set-key google-vision", str(error))
+        settings = load({**v6, "GOOGLE_VISION_API_KEY": SECRETS["GOOGLE_VISION_API_KEY"]}, backend="rekognition")
+        self.assertEqual(settings.google_vision_api_key, SECRETS["GOOGLE_VISION_API_KEY"])
+        self.assertEqual((settings.serpapi_engines, settings.needs_hosting), (("yandex_images",), True))
+        # Cloud Vision takes the crop's bytes, so without a SerpApi engine nothing is hosted.
+        alone = load({"GOOGLE_VISION_API_KEY": "g", "AWS_REGION": "us-east-2", "REKOGNITION_ENGINES": "cloud_vision"},
+                     backend="rekognition")
+        self.assertEqual((alone.serpapi_key, alone.trace_api_key, alone.needs_hosting), (None, None, False))
+        # The key is dropped when no engine uses it.
+        self.assertIsNone(load({**V3, "GOOGLE_VISION_API_KEY": "g"}, backend="rekognition").google_vision_api_key)
+        self.assertConfigError("REKOGNITION_ENGINES='bing'", {**V3, "REKOGNITION_ENGINES": "bing"}, backend="rekognition")
+
     def test_mock_backend_is_offline(self):
         settings = load()
         self.assertEqual(settings.search_backend, "mock")
@@ -111,7 +128,7 @@ class DefaultsTests(ConfigTestCase):
         self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("rekognition", "fake", "off"))
         self.assertFalse(settings.facecheck_demo)
         self.assertEqual((settings.rekognition_engines, settings.rekognition_min_similarity),
-                         (("trace", "yandex_images", "google_lens"), 80.0))
+                         (("trace", "yandex_images", "bing_reverse_image"), 80.0))
         self.assertEqual((settings.mock_scenario, settings.mock_delay_ms), ("default", 0))
 
     def test_settings_are_frozen(self):
@@ -163,7 +180,7 @@ class DotenvTests(ConfigTestCase):
         settings = load(V3, backend=None, dotenv_path=example)
         self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("rekognition", "fake", "off"))
         self.assertEqual((settings.rekognition_engines, settings.rekognition_min_similarity),
-                         (("trace", "yandex_images", "google_lens"), 80.0))
+                         (("trace", "yandex_images", "bing_reverse_image"), 80.0))
         self.assertFalse(settings.facecheck_demo)
 
 
@@ -443,8 +460,8 @@ class SecretTests(ConfigTestCase):
 
     def test_secret_fields_exist_but_are_hidden(self):
         hidden = {name for name, spec in Settings.__dataclass_fields__.items() if not spec.repr}
-        self.assertEqual(hidden, {"serpapi_key", "facecheck_api_key", "trace_api_key", "typesafe_api_key",
-                                  "openrouter_api_key", "anthropic_api_key"})
+        self.assertEqual(hidden, {"serpapi_key", "facecheck_api_key", "trace_api_key", "google_vision_api_key",
+                                  "typesafe_api_key", "openrouter_api_key", "anthropic_api_key"})
 
     def test_errors_never_contain_secrets(self):
         cases = (

@@ -222,8 +222,8 @@ uv pip install --python .venv/bin/python -r requirements.txt
 Search uses backend V3 by default (`SEARCH_BACKEND=rekognition`). For each photo,
 [Amazon Rekognition](https://aws.amazon.com/rekognition/) finds the face. A crop of it
 goes to [Trace](https://traceaifacescan.app/ai-face-scan-api/), a face search index
-that returns pages showing the same face, and through SerpApi to Yandex and Google
-Lens. Rekognition then compares the participant's face with every face in every
+that returns pages showing the same face, and through SerpApi to Yandex and Bing
+(V5; V3 and V4 used Google Lens instead of Bing). Rekognition then compares the participant's face with every face in every
 result image; for Trace matches, that's Trace's preview of the matched face. Results
 whose best face scores under `REKOGNITION_MIN_SIMILARITY` (default 80) are dropped,
 and the rest are ranked by similarity. The older backends stay selectable. V1, Yandex
@@ -245,6 +245,23 @@ Yandex and Google Lens alone can't find a person from a new photo: they find peo
 who look alike (checked on Johnny's selfie, run `johnny-1-1e241523`: 164 results, none
 of them him). Trace is the engine that can.
 
+V5 and V6 replace Google Lens. V5, the default, searches Bing through SerpApi instead
+(`REKOGNITION_ENGINES=trace,yandex_images,bing_reverse_image`). It uses the same SerpApi
+key and hosted crop as Yandex, and costs one SerpApi search per photo. V6 searches
+Google Cloud Vision web detection instead
+(`REKOGNITION_ENGINES=trace,yandex_images,cloud_vision`). Cloud Vision gets the crop
+itself, not a hosted URL, and needs a Google Cloud API key with the Cloud Vision API
+enabled. The first 1,000 photos a month are free, then $3.50 per 1,000:
+
+```bash
+.venv/bin/python -m pipeline set-key google-vision
+SEARCH_BACKEND=rekognition REKOGNITION_ENGINES=trace,yandex_images,cloud_vision \
+  .venv/bin/python -m pipeline run --capture captures/<session_id> --models
+```
+
+V3 and V4's engines are `trace,yandex_images,google_lens`. Bing and Cloud Vision, like
+Lens, find copies of the same photo and images that look alike, so expect lookalikes.
+
 V3 needs a Trace key, a SerpApi key, and AWS keys. Each prompt hides what you type,
 checks the key first (Trace's free `/account`, SerpApi's free Account API, AWS STS),
 and saves it outside git: the Trace and SerpApi keys in `.env`, created from
@@ -261,7 +278,7 @@ $50, paid by card). Every Trace match is compared (the 40-result cap applies onl
 photo's scan, with the uploaded crop and the previews, is deleted at Trace once the
 comparisons are over (Trace deletes it after 30 days otherwise). Trace replies aren't
 cached, so rerunning stage 1 pays again. `REKOGNITION_ENGINES=trace` skips SerpApi and
-the tunnel entirely; `yandex_images,google_lens` skips Trace.
+the tunnel entirely; `yandex_images,bing_reverse_image` skips Trace.
 
 The AWS user needs `rekognition:DetectFaces` and `rekognition:CompareFaces`. An account
 on AWS's Free plan only allows some services in some regions: Johnny's project allows
@@ -362,11 +379,17 @@ briefly (spec 1.2); V3 hosts only the face crop. `IMAGE_HOST` picks how:
   served as a JPEG copy at most 800 px on its longest side, with EXIF stripped.
   Yandex refuses Cloudflare quick-tunnel (`trycloudflare.com`) URLs, so that option
   isn't offered.
-- `s3` uploads each image to a private bucket: set `IMAGE_BUCKET` and `AWS_REGION` in
-  `.env`, with AWS credentials from `set-key aws` (or `aws configure`/`AWS_PROFILE`).
-  Each image is uploaded under a random key, shared through a presigned URL valid for
-  10 minutes, and deleted after its search. `uploads.json` in the run folder tracks
-  it until then, and `purge` deletes anything left over.
+- `s3` uploads each image to a bucket: set `IMAGE_BUCKET` and `AWS_REGION` in `.env`
+  (the team bucket is `hmw2026` in `us-east-2`), with AWS credentials from `set-key aws`
+  (or `aws configure`/`AWS_PROFILE`) that can put and delete objects under
+  `hackmidwest-faces/`. The bucket policy must let anyone `s3:GetObject` under
+  `hackmidwest-faces/*`, and nothing else. Each image goes up as the same small
+  EXIF-free JPEG the tunnel serves, under a random key, and the search engine gets its
+  plain URL. Presigned URLs don't work: SerpApi passes the URL to Yandex unencoded, so
+  the signature was cut off. Stage 1 checks the bucket with a throwaway file before
+  searching. Each object is deleted after its search; `uploads.json` in the run folder
+  tracks it until then, `purge` deletes anything left over, and a 1-day lifecycle rule
+  on the prefix catches the rest.
 
 Try one consenting teammate's photo first. With V3 it costs two SerpApi searches and
 about 40 Rekognition calls (3 FaceCheck credits with `--backend facecheck`, one SerpApi

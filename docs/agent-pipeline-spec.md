@@ -71,7 +71,7 @@ Project Directory/
       serpapi_backend.py      SerpApi yandex_images + bounded live HTTP fetch (LivePages)
       facecheck_backend.py    FaceCheck.ID face search; reuses LivePages for page fetches
       rekognition_backend.py  backend V3: SerpApi search of a face crop, Rekognition CompareFaces on every result
-    hosting.py                live only: upload image, presigned URL, delete
+    hosting.py                live only: host image (tunnel, or public S3 key), delete
     jev.py                    Jev wrapper with modes typesafe | openrouter | fake | off
     llm.py                    Strands model factory (one provider first)
     stage1_collect.py
@@ -105,7 +105,8 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `FACECHECK_DEMO` | `true`/`false`; true searches only 100,000 faces, free | `false` | facecheck backend |
 | `SERPAPI_KEY` | key; save with `set-key serpapi` | none | rekognition and serpapi backends |
 | `TRACE_API_KEY` | key (`trk_live_…`); save with `set-key trace` | none | rekognition backend, `trace` engine |
-| `REKOGNITION_ENGINES` | comma-separated: `trace`, `yandex_images`, `google_lens` | all three | rekognition backend |
+| `GOOGLE_VISION_API_KEY` | Google Cloud API key with the Cloud Vision API enabled; save with `set-key google-vision` | none | rekognition backend, `cloud_vision` engine (V6) |
+| `REKOGNITION_ENGINES` | comma-separated: `trace`, `yandex_images`, `google_lens`, `bing_reverse_image`, `cloud_vision`. V6 is `trace,yandex_images,cloud_vision`; V3 and V4 were `trace,yandex_images,google_lens` | `trace,yandex_images,bing_reverse_image` (V5) | rekognition backend |
 | `REKOGNITION_MIN_SIMILARITY` | CompareFaces similarity 0–100; results under it are dropped | `80` | rekognition backend |
 | `REKOGNITION_PLATFORMS` | Platforms to keep, comma-separated (`linkedin`, `x`, `instagram`, `github`, `facebook`, `blog`, `news`); results on other sites are dropped before comparing. `linkedin,facebook` is V3_1 | unset: every site | rekognition backend |
 | `IMAGE_HOST` | `tunnel` or `s3` | `tunnel` | `hosting.py` (live only) |
@@ -160,7 +161,7 @@ captures/<session_id>/
 ```python
 class Consent(BaseModel):
     confirmed: bool
-    participant: str
+    participant: str = ""             # may be empty; never sent to search or models
     confirmed_at: datetime
     external_processing: bool = False  # required true for live search or --models
 
@@ -270,7 +271,7 @@ The backend owns fixture lookup or image hosting and cleanup. The pipeline uses 
 
 | | Mock (`--mock`; tests) | SerpApi (default) |
 |---|---|---|
-| Image reference | bare fixture ID, e.g. `alex-front` | presigned S3 URL from `hosting.py` |
+| Image reference | bare fixture ID, e.g. `alex-front` | hosted image URL from `hosting.py` (tunnel or S3) |
 | Reverse search | `client.reverse_image(image.mock_fixture, scenario=scenario, delay_ms=delay)` | `GET https://serpapi.com/search.json` with `engine=yandex_images`, `url`, `tab=about`, `api_key` |
 | Page fetch | `client.fetch(original_url, scenario=scenario)` uses loopback HTTP; the server reads SQLite | async HTTP client, 10 s timeout, identifiable User-Agent, no cookies |
 | Failure tests | adapter passes `MOCK_SCENARIO`; `MOCK_DELAY_MS` delays searches only | injected adapter failures; optional live smoke |
@@ -312,9 +313,13 @@ Rules:
 - **Agent.** The per-image agent sees `face_score` and V3's bands: 99+ strong, 95–98 likely, 90–94 possible, lower weak. These bands are ours, not AWS's. AWS recommends 99 or higher for public-safety uses, says even 99 doesn't guarantee a match, and asks for human review ([thresholds](https://docs.aws.amazon.com/rekognition/latest/dg/thresholds-collections.html), [public safety](https://docs.aws.amazon.com/rekognition/latest/dg/considerations-public-safety-use-cases.html)).
 - **Privacy.** Unless the AWS account opts out with an AWS Organizations AI services opt-out policy, AWS may keep the analyzed images and use them to improve its services ([Rekognition FAQ](https://aws.amazon.com/rekognition/faqs/)). Consent must cover that.
 - **Checked live 2026-10-10 (run `johnny-1-8c9c0190`, Johnny's own photo):** Johnny's account is a Free-plan "project" from AWS's new sign-up. Its sandbox SCP allows Rekognition only in us-east-2 (us-east-1 and us-west-2 are denied), so `AWS_REGION=us-east-2`. DetectFaces found 2 faces and kept the largest. Yandex returned 104 results and Google Lens 60; of the first 40 compared, 39 scored under 80 (best 56.6) and 1 had no face, so V3 returned no hits, where V1 had passed lookalikes on. Stage 1 took 38 s. Still unknown: whether comparing all 164 results, or more images per person, finds the participant's own pages.
+- **V5 and V6 (2026-10-11).** Johnny asked for two versions that replace Google Lens. Across all saved runs, Lens had 329 results compared, best similarity 65.5, none at 80; every match at 80 or above (29) came from Trace alone. Both keep V4's agents (Opus 5.5 at medium) and change only `REKOGNITION_ENGINES`.
+  - **V5 (the default engines):** `trace,yandex_images,bing_reverse_image`. SerpApi's [Bing Reverse Image API](https://serpapi.com/bing-reverse-image-api) gets the hosted crop as `image_url`, with `mkt=en-US`. Results come from `pages_with_this_image`, then `related_content`. Bing's `link` is its own image-detail page, so the result's page is `source`, its site `domain`, and its images `original`, then `cdn_original` (Bing's copy, for sites that refuse the download), then `thumbnail`. A row without `source` is dropped. One SerpApi search per image. Making V5 the default was Claude's call; Johnny should confirm.
+  - **V6:** `trace,yandex_images,cloud_vision`. [Cloud Vision web detection](https://docs.cloud.google.com/vision/docs/detecting-web) (`cloud_vision.py`) is Google's own API over the same image index as Lens. It gets the crop's bytes (`POST https://vision.googleapis.com/v1/images:annotate`, `WEB_DETECTION`, `maxResults` 50), so it needs no hosting, and the key goes in the `X-Goog-Api-Key` header. `pagesWithMatchingImages` become results with their full, then partial, matching images; `pageTitle` HTML is stripped. Matching and visually similar images that no listed page shows become results whose link is the image URL, with a snippet saying the page wasn't given. `webEntities` and `bestGuessLabels` are dropped. The reply is cached like a SerpApi engine's. Errors: `API_KEY_INVALID` is `unauthorized` (checked live with a made-up key), `SERVICE_DISABLED` and `BILLING_DISABLED` are `forbidden`, and a per-image error is `provider_error`. `set-key google-vision` checks the key with an empty annotate request, which analyzes no image; a 403 saves it with a warning to enable the API. Pricing (checked 2026-10-11): 1,000 images a month free, then $3.50 per 1,000. Checked with a real key on 2026-10-11: `check_key` passed once billing was active (before that it got 403 `BILLING_DISABLED`), and one web detection of the macOS Sonoma wallpaper returned 50 pages with matching images, 50 full matches and 20 visually similar images, which `vision_results` turned into 97 results. A request whose bytes aren't an image came back as a per-image error (`provider_error`). No person run yet.
+  - Both are expected to return lookalikes the way Lens did, since none of these engines matches a face across different photos.
 - **Trace engine (added 2026-10-10, `trace_face.py`).** The live runs above showed that Yandex and Lens can't find a person from a new photo, and Johnny ruled out FaceCheck, so V3 got Trace's face index ([API](https://traceaifacescan.app/ai-face-scan-api/), [OpenAPI](https://traceaifacescan.app/openapi.json)) as a third engine, on by default. The crop is uploaded (`POST /api/v1/scans`, multipart `image`, at least 200 px; the upright copy goes instead when the crop is smaller) with an Idempotency-Key derived from the capture image's hash, then `GET /scans/{id}` is polled every 3 s for at most 300 s (Trace says 25-45 s; the first live scan was at 87% after 90 s, timed out under the old 90 s limit, and cost a credit). A locked scan (no credits when made) is revealed with `POST /scans/{id}/reveal`; 402 becomes `no_credits`. Problem-document codes and failed-scan `error_code`s map to the codes in 1.7. Each match's page URL, platform, handle and score become a result titled `<handle> on <platform>` with the snippet `Trace face match 96/100 (near certain)`. Rekognition compares the crop with the match's preview (`/scans/{id}/previews/{index}`, fetched with the key, which is sent only to that path). Trace's matches are merged first and every one is compared; the 40-result cap applies only to the SerpApi results (until 2026-10-11 it covered Trace too, and the first groupmate run compared only 40 of Trace's 50 matches). `release()` deletes a finished scan (`DELETE /scans/{id}`), so Trace replies aren't cached and a rerun pays again. A scan that timed out is left running; a rerun of the same photo within 24 hours sends the same key, gets the same scan back, and pays nothing. With Trace on, the image deadline is 35 s plus 355 s. Cost: one credit per image, in packs of 5 for $4, 40 for $22, or 100 for $50, by card. `set-key trace` checks the key with the free `GET /account` (a bad key gets 401 `unauthenticated`, checked live 2026-10-10) and prints only credit counts. Not yet checked live: a paid search, its result quality, and the preview format.
 
-### 1.2 Image hosting (live only; default changed to a tunnel, see below)
+### 1.2 Image hosting (live only; tunnel by default, S3 with plain public URLs since 2026-10-11, see below)
 
 SerpApi's Yandex and Google Lens engines require an image `url`; they document no file upload parameter. V3 hosts only the face crop, the same way. The URL must be fetchable without our credentials. **Unverified integration:** whether Yandex can fetch this team's presigned S3 URLs. Test that early. `hosting.py`'s S3 route does the following:
 
@@ -326,7 +331,16 @@ Use a dedicated bucket/prefix with public listing disabled and a cleanup lifecyc
 
 Mock mode skips hosting.
 
-Built as specified in `hosting.py` as `IMAGE_HOST=s3`. It reads `IMAGE_BUCKET` and `AWS_REGION` from `.env`, with credentials from the standard AWS chain. `run` and `smoke-search` refuse to start a SerpApi run without them, before creating a run folder. Keys look like `hackmidwest-faces/<32 hex>.jpg`. `purge` deletes leftovers when `AWS_REGION` is set. Still unverified: whether Yandex can fetch the presigned URLs. Johnny's AWS organization denies S3 by SCP, so this route can't run in his account.
+Built as specified in `hosting.py` as `IMAGE_HOST=s3`. It reads `IMAGE_BUCKET` and `AWS_REGION` from `.env`, with credentials from the standard AWS chain. `run` and `smoke-search` refuse to start a SerpApi run without them, before creating a run folder. Keys look like `hackmidwest-faces/<32 hex>.jpg`. `purge` deletes leftovers when `AWS_REGION` is set.
+
+**Changed 2026-10-11: plain public URLs instead of presigned ones.** Presigned URLs don't work with Yandex. SerpApi builds Yandex's request as `yandex.com/images/search/?url=<image url>&rpt=imageview` without encoding the image URL, so the `&X-Amz-Credential=…&X-Amz-Signature=…` parameters became Yandex's own and Yandex fetched an unsigned URL. Google Lens encodes it and was unaffected. The S3 route now:
+
+1. Uploads the same EXIF-free JPEG copy (at most 800 px) the tunnel serves, under `hackmidwest-faces/<32 hex>.jpg`, recording the key in `uploads.json` first.
+2. Hands out `https://<bucket>.s3.<region>.amazonaws.com/<key>`, with no query string. The bucket policy lets anyone `s3:GetObject` under `hackmidwest-faces/*` only; listing and the rest of the bucket stay private. The 128-bit random key is the only secret, so traces redact `hackmidwest-faces/<key>`.
+3. Checks the bucket before any image's deadline starts (`S3ImageHost.start()`): uploads a throwaway file, fetches it at its public URL without credentials, deletes it. A failure is a configuration error, and no search is made.
+4. Deletes each object after its search, as before. A lifecycle rule (`expire-hackmidwest-faces`) expires anything under the prefix after 1 day, so a crash leaves a photo public for a day at most.
+
+The team bucket is `hmw2026` in us-east-2 (account 331535243741; the S3 SCP no longer blocks it). IAM user `BedrockAPIKey-ue2o` has inline policy `hackmidwest-s3-hosting`: `s3:PutObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` on `hmw2026/hackmidwest-faces/*`. Checked live on 2026-10-11 with a macOS wallpaper, not a person: the check passed, Yandex returned 46 results, and the object returned 403 after deletion.
 
 **Default since 2026-10-10: `IMAGE_HOST=tunnel`** (`TunnelImageHost` in `hosting.py`). Johnny asked for real-internet search, and S3 is blocked. A `ThreadingHTTPServer` on 127.0.0.1 serves only registered random paths. `ssh -T -R 80:127.0.0.1:<port> nokey@localhost.run` (BatchMode, no key offered, host key pinned on first use) publishes it as `https://<random>.lhr.life`. `build_serpapi_backend` opens the tunnel and checks it end to end with a throwaway file before any image's 35 s deadline starts. A failure there is a configuration error, and no search is made. Each image is served as a JPEG copy at most 800 px on its longest side, with EXIF stripped, at `/<32 hex>.jpg`. The path is removed by `release()`, and the tunnel and server stop in `aclose()`. Nothing is stored remotely, so `uploads.json` stays empty. `run` and `smoke-search` need only `ssh` on PATH. Checked live on 2026-10-10 with a landmark photo, not a person:
 - Yandex refuses `*.trycloudflare.com` (Cloudflare quick tunnel) URLs without fetching them.
@@ -1121,7 +1135,7 @@ Every default in this table is a **Proposal**, not a recorded team decision.
 | What Jev decides | Grouping (2b) and confidence (3); defer consistency score | Johnny |
 | Merge per-image results before or after Jev | Before, at the end of Section 1, keeping per-image provenance | Johnny |
 | Which agent runs verification and summary | One synthesis agent after the per-image agents | Johnny |
-| Image hosting for Yandex | Private S3 bucket, 10-minute presigned URL, delete in `finally`; verify Yandex can fetch it | Johnny |
+| Image hosting for Yandex | Tunnel by default; `IMAGE_HOST=s3` serves a plain public URL under `hackmidwest-faces/` (presigned URLs lost their signature on the way to Yandex), deleted after the search, 1-day lifecycle expiry | Johnny |
 | Trust formula | Table: 0 → 0, 1 → 50, 2 → 95, 3+ → 99 | Johnny |
 | Trust → confidence and live acceptance | **Decided 2026-10-10:** accept at ≥ 0.80 with a ≥ 0.20 lead, and a live run whose real Jev call failed returns `review_required` (narrowed 2026-10-11 from every live run on the formula). Still proposals: the Jev `noul` plus `best` mechanism and the uncalibrated formula weights in 3.2. | Johnny |
 | Strands model | **V4, 2026-10-11:** Anthropic `claude-opus-5-5` at medium effort (`LLM_EFFORT`). Earlier runs (V3) used `claude-sonnet-5-5` at low effort, still selectable; Haiku `claude-haiku-4-5-20251001` is a documented alternative. Use Bedrock only with confirmed model access and its own ID. One provider first. | Johnny |

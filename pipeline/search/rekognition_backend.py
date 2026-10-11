@@ -1,23 +1,25 @@
-"""Backend V3: Trace face search and SerpApi web search, checked by Amazon Rekognition (spec 1.1, 1.7; live only).
+"""Backend V3: Trace face search and web image search, checked by Amazon Rekognition (spec 1.1, 1.7; live only).
 
 V1 (SEARCH_BACKEND=serpapi) returns what Yandex finds visually similar, which for a selfie
 is mostly lookalikes. V2 (facecheck) trusts FaceCheck's own face index. V3 gathers candidates
 from Trace's face index (trace_face.py) and from SerpApi's Yandex and Google Lens, and checks
-the face in every candidate itself with Rekognition. For each image:
+the face in every candidate itself with Rekognition. V5 (the default engines) searches Bing
+through SerpApi instead of Lens; V6 searches Google Cloud Vision web detection (cloud_vision.py)
+instead of Lens. For each image:
 
 1. DetectFaces runs on an upright JPEG copy (at most 1,600 px, EXIF stripped). The largest
    face is the participant's. An image with no face fails as no_face before any search.
 2. A crop of that face, padded by half the face's width and height on each side, is searched
-   once with each engine in REKOGNITION_ENGINES (default trace, yandex_images, google_lens).
-   Trace gets the crop as an upload (the upright copy if the crop is under 200 px); the SerpApi
-   engines get it hosted the way V1 hosts images (hosting.py: tunnel or s3). Only the face
-   leaves this machine. The engines run at the same time. If one fails, the others' results are
+   once with each engine in REKOGNITION_ENGINES (default trace, yandex_images, bing_reverse_image).
+   Trace gets the crop as an upload (the upright copy if the crop is under 200 px) and Cloud
+   Vision gets its bytes; the SerpApi engines get it hosted the way V1 hosts images (hosting.py:
+   tunnel or s3). Only the face leaves this machine. The engines run at the same time. If one fails, the others' results are
    used and failed_engines names it; if all fail, the search fails and a retry searches again.
-3. Results are merged by page URL: all of Trace's matches first, then the SerpApi engines
+3. Results are merged by page URL: all of Trace's matches first, then the other engines
    alternating by rank. With REKOGNITION_PLATFORMS set (V3_1 is linkedin,facebook), results on other
    sites are dropped here, before any download or comparison, and count as out_of_scope.
    Every Trace match left is compared, plus the first MAX_CANDIDATES of the rest. For a Trace match the image is
-   Trace's preview of the matched face; for a SerpApi result it is downloaded with the same
+   Trace's preview of the matched face; for any other result it is downloaded with the same
    public-address guard as page fetches (the full-size image first, the engine's thumbnail if
    that fails). Each is shrunk to at most 1,600 px and compared with the crop by CompareFaces.
    An image that won't load or shows no face moves on to the result's next image. face_score
@@ -30,9 +32,9 @@ the face in every candidate itself with Rekognition. For each image:
 Comparing stops after COMPARE_TIMEOUT_S; results not compared by then count as not_compared.
 The image's Trace scan, with the uploaded crop and the previews, is deleted at Trace once its
 search and comparisons are over (release); a scan that timed out is left running, and a rerun
-within 24 hours resumes it through the Idempotency-Key derived from the image hash. Each SerpApi engine's sanitized reply is cached for
+within 24 hours resumes it through the Idempotency-Key derived from the image hash. Each other engine's sanitized reply is cached for
 this run under runs/<run_id>/cache/rekognition/, keyed by image hash and engine, so a rerun makes
-no new SerpApi search. Trace replies aren't cached, because their previews are gone after
+no new SerpApi or Cloud Vision search. Trace replies aren't cached, because their previews are gone after
 release: a rerun that compares again pays one Trace credit per image. The final payload is
 cached too, keyed by image hash, engines and threshold, but only when every engine answered
 and every result was compared. --refresh skips both caches.
@@ -62,6 +64,7 @@ from pipeline.config import DEFAULT_MIN_SIMILARITY, ConfigError, Settings
 from pipeline.contracts import CaptureArtifact, CaptureImage
 from pipeline.platforms import normalize_url, platform_for
 from pipeline.search.base import NO_RESULTS, BackendError, _thumbnail, status_error
+from pipeline.search.cloud_vision import CloudVisionSearch, vision_results
 from pipeline.search.serpapi_backend import (
     MAX_REDIRECTS, SEARCH_TIMEOUT_S, BlockedDestination, SerpApiBackend, _write_json, check_url, open_host,
     page_client,
@@ -69,13 +72,15 @@ from pipeline.search.serpapi_backend import (
 from pipeline.search.trace_face import MIN_SIDE as TRACE_MIN_SIDE, SCAN_TIMEOUT_S as TRACE_TIMEOUT_S
 from pipeline.search.trace_face import TraceFaceSearch, is_preview_url
 
-# SerpApi engine -> (extra request parameters, the result lists in its reply)
+# SerpApi engine -> (the hosted image URL's parameter, extra request parameters, the result lists in its reply)
 ENGINES = {
-    "yandex_images": ({"tab": "about"}, ("image_results",)),
-    "google_lens": ({}, ("visual_matches", "exact_matches")),
+    "yandex_images": ("url", {"tab": "about"}, ("image_results",)),
+    "google_lens": ("url", {}, ("visual_matches", "exact_matches")),
+    "bing_reverse_image": ("image_url", {"mkt": "en-US"}, ("pages_with_this_image", "related_content")),
 }
 TRACE = "trace"  # Trace's face index (trace_face.py); its matches are merged and compared first
-ALL_ENGINES = (TRACE, *ENGINES)
+CLOUD_VISION = "cloud_vision"  # Google Cloud Vision web detection (cloud_vision.py); takes the crop's bytes
+ALL_ENGINES = (TRACE, *ENGINES, CLOUD_VISION)
 SOURCE_MAX_SIDE = 1600  # the capture copy DetectFaces sees and the crop is cut from
 TARGET_MAX_SIDE = 1600  # result images are shrunk to this before CompareFaces (its limit is 5 MB)
 FACE_MARGIN = 0.5  # crop padding on each side, as a fraction of the face's width and height
@@ -199,8 +204,8 @@ def best_similarity(reply: dict) -> float | None:
 
 
 def sanitize_engine(engine: str, payload: dict) -> dict:
-    """Keep what V3 uses from one engine's reply: its id, status and error text, and for each result
-    the page link, title, source, snippet, thumbnail and image URLs (full-size first). Drops
+    """Keep what V3 uses from one SerpApi engine's reply: its id, status and error text, and for each
+    result the page link, title, source, snippet, thumbnail and image URLs (full-size first). Drops
     search_parameters, which echoes the hosted image URL, and everything else SerpApi adds."""
     clean: dict = {}
     metadata = payload.get("search_metadata")
@@ -210,16 +215,25 @@ def sanitize_engine(engine: str, payload: dict) -> dict:
     if isinstance(payload.get("error"), str):
         clean["error"] = payload["error"][:300]
     results = []
-    for key in ENGINES[engine][1]:
+    for key in ENGINES[engine][2]:
         rows = payload.get(key)
         for row in rows if isinstance(rows, list) else []:
-            if not isinstance(row, dict) or not isinstance(row.get("link"), str):
+            if not isinstance(row, dict):
                 continue
-            full = _thumbnail(row.get("original_image") if engine == "yandex_images" else row.get("image"))
+            if engine == "bing_reverse_image":
+                # Bing's link is its own image-detail page. source is the page that shows the image,
+                # domain that page's site, original the image, and cdn_original Bing's copy of it.
+                full = [row.get("original"), row.get("cdn_original")]
+                row = {"link": row.get("source"), "title": row.get("title"), "source": row.get("domain"),
+                       "thumbnail": row.get("thumbnail")}
+            else:
+                full = [row.get("original_image") if engine == "yandex_images" else row.get("image")]
+            if not isinstance(row.get("link"), str):
+                continue
             thumbnail = _thumbnail(row.get("thumbnail"))
             result = {name: row[name] for name in RESULT_FIELDS if isinstance(row.get(name), str)}
             result.update(link=row["link"], thumbnail=thumbnail,
-                          images=[url for url in dict.fromkeys((full, thumbnail)) if url])
+                          images=[url for url in dict.fromkeys((*map(_thumbnail, full), thumbnail)) if url])
             results.append(result)
     clean["results"] = results
     return clean
@@ -270,7 +284,7 @@ class Face:
 
 @dataclass
 class Candidate:
-    url: str  # normalized page URL, the merge key
+    url: str  # normalized page URL (for a Cloud Vision image without a page, the image URL), the merge key
     row: dict  # the first engine's result for it
     full: list[str] = field(default_factory=list)  # full-size image URLs from every engine
     thumbnails: list[str] = field(default_factory=list)
@@ -288,7 +302,7 @@ class Candidate:
 
 
 def merge(results: dict[str, dict]) -> list[Candidate]:
-    """One candidate per page URL: all of Trace's matches first, then each SerpApi engine's results
+    """One candidate per page URL: all of Trace's matches first, then each other engine's results
     in turn by rank."""
     candidates: dict[str, Candidate] = {}
 
@@ -297,7 +311,8 @@ def merge(results: dict[str, dict]) -> list[Candidate]:
         if url is None:
             return
         candidate = candidates.setdefault(url, Candidate(url=url, row=row))
-        candidate.engines.append(engine)
+        if engine not in candidate.engines:  # Lens and Bing can list a page twice
+            candidate.engines.append(engine)
         candidate.previews += [preview for preview in row.get("previews", []) if preview not in candidate.previews]
         for image in row.get("images", []):
             if image not in candidate.images:
@@ -314,14 +329,16 @@ def merge(results: dict[str, dict]) -> list[Candidate]:
 
 
 class RekognitionBackend(SerpApiBackend):
-    """Trace and SerpApi searches of a face crop, filtered by Rekognition CompareFaces. Page fetches,
-    image hosting, release() and aclose() build on SerpApi's (serpapi_backend.SerpApiBackend).
-    api_key and host are needed only for the SerpApi engines, trace_search only for Trace."""
+    """Trace, SerpApi and Cloud Vision searches of a face crop, filtered by Rekognition CompareFaces.
+    Page fetches, image hosting, release() and aclose() build on SerpApi's (serpapi_backend.SerpApiBackend).
+    api_key and host are needed only for the SerpApi engines, trace_search only for Trace, and
+    vision_search only for Cloud Vision."""
 
     name = "rekognition"
 
-    def __init__(self, *, api_key: str | None, capture_dir: Path, host, rekognition, engines=tuple(ENGINES),
-                 trace_search: TraceFaceSearch | None = None, min_similarity: float = DEFAULT_MIN_SIMILARITY,
+    def __init__(self, *, api_key: str | None, capture_dir: Path, host, rekognition, engines: tuple[str, ...],
+                 trace_search: TraceFaceSearch | None = None, vision_search: CloudVisionSearch | None = None,
+                 min_similarity: float = DEFAULT_MIN_SIMILARITY,
                  platforms: tuple[str, ...] = (),
                  cache_dir: Path | None = None, refresh: bool = False,
                  search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None,
@@ -331,12 +348,15 @@ class RekognitionBackend(SerpApiBackend):
             raise ValueError(f"unsupported engines {unknown}; expected some of {', '.join(ALL_ENGINES)}")
         if TRACE in engines and trace_search is None:
             raise ValueError("the trace engine needs a TraceFaceSearch")
+        if CLOUD_VISION in engines and vision_search is None:
+            raise ValueError("the cloud_vision engine needs a CloudVisionSearch")
         if any(engine in ENGINES for engine in engines) and (not api_key or host is None):
             raise ValueError("the SerpApi engines need a SerpApi key and an image host")
         super().__init__(api_key=api_key or "", capture_dir=capture_dir, host=host, cache_dir=cache_dir,
                          refresh=refresh, search_client=search_client, pages=pages)
         self.rekognition = rekognition  # a boto3 Rekognition client, or a test double with the same two methods
         self.trace_search = trace_search
+        self.vision_search = vision_search
         self.engines = tuple(engines)
         self.extra_deadline_s = TRACE_EXTRA_DEADLINE_S if TRACE in self.engines else EXTRA_DEADLINE_S
         self.min_similarity = float(min_similarity)
@@ -414,7 +434,7 @@ class RekognitionBackend(SerpApiBackend):
 
     async def _search_engines(self, image: CaptureImage, digest: str, face: Face) -> tuple[dict[str, dict], list[str]]:
         """Each engine's sanitized reply, in REKOGNITION_ENGINES order, and the engines that failed.
-        Engines that already answered for this image, in this run or (SerpApi only) its cache,
+        Engines that already answered for this image, in this run or (all but Trace) its cache,
         aren't searched again."""
         answered = self._results.setdefault(image.image_id, {})
         for engine in self.engines:
@@ -449,9 +469,11 @@ class RekognitionBackend(SerpApiBackend):
     async def _search_engine(self, image: CaptureImage, engine: str, face: Face) -> dict:
         if engine == TRACE:
             return await self._search_trace(image, face)
+        if engine == CLOUD_VISION:
+            return await self._search_vision(image, face)
         url = await self._hosted_url(image, face.crop)  # once per image; a hosting failure fails only SerpApi
-        extra, _ = ENGINES[engine]
-        clean = sanitize_engine(engine, await self._get(image, {"engine": engine, "url": url, **extra}))
+        parameter, extra, _ = ENGINES[engine]
+        clean = sanitize_engine(engine, await self._get(image, {"engine": engine, parameter: url, **extra}))
         if _failed(clean):
             trace.error("serpapi_error", image=image.image_id, engine=engine,
                         status=clean.get("search_metadata", {}).get("status"), message=clean.get("error"))
@@ -472,6 +494,12 @@ class RekognitionBackend(SerpApiBackend):
                     best_score=max((row["trace_score"] or 0 for row in clean["results"]), default=None))
         return clean
 
+    async def _search_vision(self, image: CaptureImage, face: Face) -> dict:
+        clean = vision_results(await self.vision_search.search(image.image_id, face.crop))
+        pages = sum(1 for row in clean["results"] if row["link"] not in row["images"])  # the rest are bare images
+        trace.event("cloud_vision_search", image=image.image_id, results=len(clean["results"]), pages=pages)
+        return clean
+
     async def release(self, image: CaptureImage) -> None:
         await super().release(image)
         if self.trace_search is not None:
@@ -489,7 +517,7 @@ class RekognitionBackend(SerpApiBackend):
                     if not self.platforms or platform_for(candidate.url) in self.platforms]
         if len(candidates) > len(in_scope):
             outcomes["out_of_scope"] = len(candidates) - len(in_scope)
-        # Every Trace match is compared (Trace returns at most 50); the cap limits the SerpApi results.
+        # Every Trace match is compared (Trace returns at most 50); the cap limits the other engines' results.
         from_trace = [candidate for candidate in in_scope if TRACE in candidate.engines]
         compared = from_trace + [candidate for candidate in in_scope if TRACE not in candidate.engines][:MAX_CANDIDATES]
         if len(in_scope) > len(compared):
@@ -650,6 +678,8 @@ class RekognitionBackend(SerpApiBackend):
             await self.images.aclose()
             if self.trace_search is not None:
                 await self.trace_search.aclose()  # deletes any scan still at Trace
+            if self.vision_search is not None:
+                await self.vision_search.aclose()
 
 
 async def _comparable(data: bytes) -> bytes:
@@ -684,21 +714,26 @@ def _domain(url: str) -> str:
 
 def build_rekognition_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *,
                               refresh: bool) -> RekognitionBackend:
-    """Backend V3 for a run: AWS_REGION and AWS credentials, TRACE_API_KEY for the trace engine, and
-    SERPAPI_KEY plus an image host for the SerpApi engines. Credentials are looked up before the
-    tunnel opens, so a run without them stops before any search."""
+    """Backend V3 for a run: AWS_REGION and AWS credentials, TRACE_API_KEY for the trace engine,
+    GOOGLE_VISION_API_KEY for cloud_vision, and SERPAPI_KEY plus an image host for the SerpApi engines.
+    Credentials are looked up before the tunnel opens, so a run without them stops before any search."""
     engines = settings.rekognition_engines
     if settings.serpapi_engines and not settings.serpapi_key:
         raise ConfigError("SERPAPI_KEY is missing; save it with `python -m pipeline set-key serpapi`, or pass --mock")
     if TRACE in engines and not settings.trace_api_key:
         raise ConfigError("TRACE_API_KEY is missing; save it with `python -m pipeline set-key trace`, "
                           "or drop trace from REKOGNITION_ENGINES")
+    if CLOUD_VISION in engines and not settings.google_vision_api_key:
+        raise ConfigError("GOOGLE_VISION_API_KEY is missing; save it with `python -m pipeline set-key google-vision`, "
+                          "or drop cloud_vision from REKOGNITION_ENGINES")
     require_rekognition(settings)
     client = rekognition_client(settings.aws_region)
     return RekognitionBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir),
                               host=open_host(settings, run_dir) if settings.needs_hosting else None,
                               rekognition=client, engines=engines,
                               trace_search=TraceFaceSearch(settings.trace_api_key) if TRACE in engines else None,
+                              vision_search=(CloudVisionSearch(settings.google_vision_api_key)
+                                             if CLOUD_VISION in engines else None),
                               min_similarity=settings.rekognition_min_similarity,
                               platforms=settings.rekognition_platforms,
                               cache_dir=Path(run_dir) / "cache" / "rekognition", refresh=refresh)

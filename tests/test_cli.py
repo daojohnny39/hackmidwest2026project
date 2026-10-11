@@ -225,9 +225,10 @@ class CliTests(MockServerTestCase):
                 patch("pipeline.stage1_collect.make_backend", return_value=backend) as make_backend:
             code, out, err = self.cli("run", "--capture", str(capture), "--until", "1")
         self.assertEqual(code, OK, err)
-        self.assertIn("search: rekognition", out)
+        self.assertIn("search: rekognition (trace, yandex_images, bing_reverse_image)", out)
         self.assertIn(f"1. face  97/100 Hit 1  {url}", out)
-        self.assertEqual(make_backend.call_args.args[0].rekognition_engines, ("trace", "yandex_images", "google_lens"))
+        self.assertEqual(make_backend.call_args.args[0].rekognition_engines,
+                         ("trace", "yandex_images", "bing_reverse_image"))
         [run_dir] = self.run_dirs()
         self.assertEqual(read_artifact(run_dir, 0).backend, "rekognition")
         self.assertEqual(read_artifact(run_dir, 1).images[0].backend, "rekognition")

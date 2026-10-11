@@ -109,12 +109,13 @@ class TraceTests(OfflineTestCase):
 
     def test_secrets_are_scrubbed_everywhere(self):
         secrets = ["serp-secret-123", "sk-ant-abcdef123456", "AKIAABCDEFGHIJKLMNOP", "bearer-token-xyz",
-                   "0f1e2d3c4b5a69", "0123456789abcdef0123456789abcdef", "sig-value"]
+                   "0f1e2d3c4b5a69", "0123456789abcdef0123456789abcdef", "sig-value", "fedcba9876543210fedcba9876543210"]
         with tracing(self.folder, 1):
             trace.event("search", url="https://serpapi.com/search.json?api_key=serp-secret-123&engine=yandex_images",
                         headers={"Authorization": "Bearer bearer-token-xyz", "x-api-key": "sk-ant-abcdef123456"},
                         note="AWS key AKIAABCDEFGHIJKLMNOP",
                         tunnel="0f1e2d3c4b5a69.lhr.life tunneled, https://0f1e2d3c4b5a69.lhr.life/0123456789abcdef0123456789abcdef.jpg",
+                        s3="https://faces.s3.us-east-2.amazonaws.com/hackmidwest-faces/fedcba9876543210fedcba9876543210.jpg",
                         content=[{"reasoningText": {"text": "thinking", "signature": "sig-value"}}])
             logging.getLogger("httpx").info("HTTP Request: GET %s", "https://serpapi.com/search.json?api_key=serp-secret-123")
         text = (self.folder / TRACE_FILE).read_text()
@@ -123,6 +124,7 @@ class TraceTests(OfflineTestCase):
         [line] = self.events("search")
         self.assertEqual(line["content"][0]["reasoningText"]["text"], "thinking")
         self.assertIn("[REDACTED].lhr.life", line["tunnel"])
+        self.assertEqual(line["s3"], "https://faces.s3.us-east-2.amazonaws.com/hackmidwest-faces/[REDACTED]")
 
     def test_long_strings_are_cut(self):
         with tracing(self.folder, 2):
