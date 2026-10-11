@@ -94,9 +94,24 @@ class NarrowTests(unittest.TestCase):
         self.assertEqual(len(seen), 2)  # each picture checked once, not again after the name step
 
     def test_face_limit_is_respected(self):
-        s, _ = session(face=lambda f, u: 50.0, face_limit=1)
+        s, _ = session(face=lambda f, u: 50.0, face_limit=2)
         s.add_photos([("front", b"F")])
-        self.assertEqual(s.face_checks, 1)
+        self.assertEqual(s.face_checks, 1)  # photo-only pages get half of 2
+
+    def test_photo_only_pages_use_at_most_half_the_face_checks(self):
+        many = [{"link": f"https://look{i}.example/p", "title": "random", "thumbnail": f"https://img.example/{i}.jpg"}
+                for i in range(20)]
+        named = [{"link": "https://www.linkedin.com/in/janedoe", "title": "Jane Doe - UMKC",
+                  "thumbnail": "https://img.example/jane.jpg"}]
+        checked = []
+        s = NarrowSession(image_search=lambda d: many, text_search=lambda q: named,
+                          face_compare=lambda f, u: checked.append(u) or (96.0 if "jane" in u else 5.0), face_limit=10)
+        s.add_photos([("front", b"F")])
+        self.assertEqual(s.face_checks, 5)  # half the budget for lookalike candidates
+        s.add_name("Jane Doe")
+        self.assertIn("https://img.example/jane.jpg", checked)  # budget left for the real page
+        top = s.ranked()[0]
+        self.assertEqual(top.level, "confirmed")
 
     def test_bad_links_are_skipped(self):
         s = NarrowSession(image_search=lambda d: [{"link": "javascript:alert(1)"}, {"title": "no link"}],

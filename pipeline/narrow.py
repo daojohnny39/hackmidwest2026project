@@ -96,6 +96,7 @@ class NarrowSession:
         self.front_photo: bytes | None = None
         self.searches = 0  # SerpApi credits used
         self.face_checks = 0  # Rekognition CompareFaces calls
+        self.photo_only_checks = 0  # of those, on pages found only by the photo search
 
     # --- steps -----------------------------------------------------------------
 
@@ -130,11 +131,28 @@ class NarrowSession:
         """Step 3: CompareFaces on the best unchecked pages that have a picture."""
         if not self.face_compare or self.front_photo is None:
             return
-        todo = [r.candidate for r in self.ranked() if r.candidate.thumbnail and not r.candidate.face_checked]
-        for cand in todo[: max(0, self.face_limit - self.face_checks)]:
+        # Pages that already match the name or a detail go first. Pages found only by the
+        # photo search (often lookalikes) may use at most half of the budget, so checks are
+        # left for the name and detail steps.
+        ranked = [r for r in self.ranked() if r.candidate.thumbnail and not r.candidate.face_checked]
+        evidence = [r.candidate for r in ranked if r.candidate.queries or self._name_or_detail_hit(r.candidate)]
+        photo_only = [r.candidate for r in ranked if r.candidate not in evidence]
+        for cand in evidence + photo_only:
+            if self.face_checks >= self.face_limit:
+                break
+            if cand in photo_only and self.photo_only_checks >= self.face_limit // 2:
+                continue
             cand.face_checked = True
             cand.face_similarity = self.face_compare(self.front_photo, cand.thumbnail)
             self.face_checks += 1
+            if cand in photo_only:
+                self.photo_only_checks += 1
+
+    def _name_or_detail_hit(self, cand: Candidate) -> bool:
+        text = cand.text
+        if self.name and all(t in text for t in _fold(self.name).split() if len(t) >= 2):
+            return True
+        return any(d and _fold(d) in text for d in self.details)
 
     # --- ranking ---------------------------------------------------------------
 
