@@ -160,3 +160,25 @@ def best_per_person(matches: list[FaceMatch]) -> list[FaceMatch]:
         if match.person_id not in best or match.similarity > best[match.person_id].similarity:
             best[match.person_id] = match
     return sorted(best.values(), key=lambda m: -m.similarity)
+
+
+# --- Face to face (CompareFaces) ---------------------------------------------------
+
+
+def compare_face(client, source: bytes, target: bytes) -> float | None:
+    """Similarity (0-100) of the best face in `target` to the largest face in `source`.
+
+    Returns 0.0 when target has faces but none look alike, and None when either image
+    has no usable face (Rekognition raises InvalidParameterException for that).
+    """
+    src, _ = prepare_image(source)
+    tgt, _ = prepare_image(target)
+    try:
+        response = client.compare_faces(SourceImage={"Bytes": src}, TargetImage={"Bytes": tgt},
+                                        SimilarityThreshold=0.0, QualityFilter="NONE")
+    except client.exceptions.InvalidParameterException:
+        return None
+    matches = response.get("FaceMatches", [])
+    if matches:
+        return max(float(m.get("Similarity", 0.0)) for m in matches)
+    return 0.0 if response.get("UnmatchedFaces") else None
