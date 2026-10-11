@@ -65,7 +65,7 @@ The commands below use a macOS/Linux shell.
   installed Vite version.
 - A browser and a camera for the interactive capture flow.
 - `curl` for the model download, or download the file manually from the URL below.
-- Python **3.13** if you want to use the optional Python tools.
+- Python **3.12+ (tested on Python 3.12)** if you want to use the optional Python tools.
 
 ### Step 2: Install frontend dependencies
 
@@ -114,17 +114,18 @@ additional browser-test instructions.
 
 ## Optional Python development tools
 
-From the repository root, create a Python 3.13 virtual environment and install
-the pinned dependencies:
+From the repository root, confirm that `python3 --version` reports Python 3.12
+or newer, then create a virtual environment and install the pinned dependencies:
 
 ```bash
-python3.13 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Windows PowerShell, create the environment with `py -3.13 -m venv .venv` and
-activate it with `.venv\Scripts\Activate.ps1`.
+On Windows PowerShell, confirm the version with `py -3 --version`, create the
+environment with `py -3 -m venv .venv`, and activate it with
+`.venv\Scripts\Activate.ps1`.
 
 Use only `opencv-contrib-python` in this environment; the other OpenCV package
 variants share its `cv2` module. If migrating an environment with an older
