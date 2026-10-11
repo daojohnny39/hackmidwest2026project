@@ -1,16 +1,18 @@
 """Pipeline settings from the environment, .env, and CLI switches (spec 0.3).
 
 Precedence is CLI options, then exported variables, then .env; empty values count
-as unset. Search defaults to FaceCheck and needs FACECHECK_API_KEY; SerpApi
-(Yandex) is the other live backend and needs SERPAPI_KEY. The mock internet is
-opt-in (`backend="mock"`, `--mock`, or SEARCH_BACKEND=mock). Real Jev/LLM modes
-still need `models=True`. Secrets stay out of repr, describe(), and every error
+as unset. Search defaults to backend V3 (rekognition): SerpApi web search with Amazon
+Rekognition face matching, which needs SERPAPI_KEY, AWS_REGION and AWS credentials.
+FaceCheck (needs FACECHECK_API_KEY) and SerpApi's Yandex alone (needs SERPAPI_KEY) are
+the other live backends. The mock internet is opt-in (`backend="mock"`, `--mock`, or
+SEARCH_BACKEND=mock). Real Jev/LLM modes still need `models=True`. Secrets stay out of repr, describe(), and every error
 message. No model or AWS SDK is imported here.
 """
 
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 import tempfile
@@ -29,10 +31,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MOCK_SCENARIOS = ("default", "ambiguous", "stale", "duplicates", "empty", "rate_limited", "server_error")
 TRUST_TABLE = {0: 0, 1: 50, 2: 95, 3: 99}  # key 3 means "3 or more" (spec 2c)
 
-SEARCH_BACKENDS = ("facecheck", "serpapi", "mock")
-DEFAULT_SEARCH_BACKEND = "facecheck"
-LIVE_BACKENDS = ("facecheck", "serpapi")  # search the real internet; the run needs external_processing consent
-IMAGE_HOSTS = ("tunnel", "s3")  # how SerpApi runs give Yandex a public image URL (hosting.py)
+SEARCH_BACKENDS = ("rekognition", "facecheck", "serpapi", "mock")
+DEFAULT_SEARCH_BACKEND = "rekognition"
+# Search the real internet; the run needs external_processing consent.
+LIVE_BACKENDS = ("rekognition", "facecheck", "serpapi")
+HOSTED_BACKENDS = ("rekognition", "serpapi")  # search through SerpApi, so each image needs a public URL
+IMAGE_HOSTS = ("tunnel", "s3")  # how SerpApi runs give the search engine a public image URL (hosting.py)
+# SerpApi engines backend V3 can search, and its default threshold (CompareFaces' own default).
+REKOGNITION_ENGINES = ("yandex_images", "google_lens")
+DEFAULT_MIN_SIMILARITY = 80.0
 DEFAULT_IMAGE_HOST = "tunnel"
 JEV_MODES = ("fake", "typesafe", "openrouter", "off")
 LLM_MODES = ("off", "anthropic", "bedrock")
@@ -42,7 +49,8 @@ MAX_MOCK_DELAY_MS = 5000
 
 ENV_VARS = (
     "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "SERPAPI_KEY",
-    "FACECHECK_API_KEY", "FACECHECK_DEMO", "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
+    "FACECHECK_API_KEY", "FACECHECK_DEMO", "REKOGNITION_ENGINES", "REKOGNITION_MIN_SIMILARITY",
+    "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
     "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
 )
 
@@ -65,13 +73,15 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Settings:
-    search_backend: Literal["mock", "serpapi", "facecheck"]
+    search_backend: Literal["mock", "serpapi", "facecheck", "rekognition"]
     mock_internet_url: str
     mock_scenario: str
     mock_delay_ms: int
     serpapi_key: str | None = field(repr=False)
     facecheck_api_key: str | None = field(repr=False)
     facecheck_demo: bool
+    rekognition_engines: tuple[str, ...]
+    rekognition_min_similarity: float
     image_host: Literal["tunnel", "s3"]
     image_bucket: str | None
     aws_region: str | None
@@ -142,6 +152,8 @@ def load_settings(
     delay = _delay(env.get("MOCK_DELAY_MS", "0"))
     image_host = _choice(env, "IMAGE_HOST", IMAGE_HOSTS, DEFAULT_IMAGE_HOST)
     facecheck_demo = _flag(env, "FACECHECK_DEMO")
+    engines = _engines(env.get("REKOGNITION_ENGINES", ",".join(REKOGNITION_ENGINES)))
+    min_similarity = _similarity(env.get("REKOGNITION_MIN_SIMILARITY", str(DEFAULT_MIN_SIMILARITY)))
 
     jev_mode = _choice(env, "JEV_MODE", JEV_MODES, "fake")
     llm_mode = _choice(env, "LLM_MODE", LLM_MODES, "off")
@@ -156,9 +168,12 @@ def load_settings(
 
     required: dict[str, list[str]] = {}
     # Hosting settings (ssh for tunnel, IMAGE_BUCKET for s3) are checked by
-    # hosting.require_hosting before a SerpApi search, not here.
-    if backend == "serpapi":
+    # hosting.require_hosting before a SerpApi search, and AWS credentials by
+    # rekognition_backend.require_rekognition, not here.
+    if backend in HOSTED_BACKENDS:
         required.setdefault("SERPAPI_KEY", []).append("SerpApi search")
+    if backend == "rekognition":
+        required.setdefault("AWS_REGION", []).append("Rekognition face matching")
     elif backend == "facecheck":
         required.setdefault("FACECHECK_API_KEY", []).append("FaceCheck search")
     if jev_mode == "typesafe":
@@ -173,11 +188,15 @@ def load_settings(
     missing = [f"{name} (for {', '.join(why)})" for name, why in required.items() if name not in env]
     if missing:
         hint = ""
-        if "SERPAPI_KEY" in required and "SERPAPI_KEY" not in env:
+        if backend == "rekognition" and not {"SERPAPI_KEY", "AWS_REGION"} <= env.keys():
+            hint = (" Save the SerpApi key with `python -m pipeline set-key serpapi` and AWS keys with "
+                    "`python -m pipeline set-key aws --region us-east-1`, set SEARCH_BACKEND=facecheck or "
+                    "serpapi for another backend, or pass --mock for the mock internet.")
+        elif "SERPAPI_KEY" in required and "SERPAPI_KEY" not in env:
             hint = " Save the SerpApi key with `python -m pipeline set-key serpapi`, or pass --mock for the mock internet."
         elif "FACECHECK_API_KEY" in required and "FACECHECK_API_KEY" not in env:
             hint = (" Save the FaceCheck API token with `python -m pipeline set-key facecheck`, set "
-                    "SEARCH_BACKEND=serpapi for Yandex, or pass --mock for the mock internet.")
+                    "SEARCH_BACKEND=rekognition or serpapi for another backend, or pass --mock for the mock internet.")
         raise ConfigError(
             f"missing required settings: {'; '.join(missing)}. Set them in the environment or .env.{hint}"
         )
@@ -188,9 +207,11 @@ def load_settings(
         mock_internet_url=mock_url.rstrip("/"),
         mock_scenario=mock_scenario,
         mock_delay_ms=delay,
-        serpapi_key=env.get("SERPAPI_KEY") if backend == "serpapi" else None,
+        serpapi_key=env.get("SERPAPI_KEY") if backend in HOSTED_BACKENDS else None,
         facecheck_api_key=env.get("FACECHECK_API_KEY") if backend == "facecheck" else None,
         facecheck_demo=facecheck_demo,
+        rekognition_engines=engines,
+        rekognition_min_similarity=min_similarity,
         image_host=image_host,
         image_bucket=env.get("IMAGE_BUCKET"),
         aws_region=env.get("AWS_REGION"),
@@ -233,6 +254,24 @@ def _flag(env: Mapping[str, str], name: str) -> bool:
     if value not in ("true", "false", "1", "0", "yes", "no"):
         raise ConfigError(f"{name}={value!r} is not supported; expected true or false")
     return value in ("true", "1", "yes")
+
+
+def _engines(raw: str) -> tuple[str, ...]:
+    names = tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
+    if not names or any(name not in REKOGNITION_ENGINES for name in names):
+        raise ConfigError(f"REKOGNITION_ENGINES={raw!r} is not supported; expected a comma-separated list of "
+                          f"{', '.join(REKOGNITION_ENGINES)}")
+    return names
+
+
+def _similarity(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not 0 <= value <= 100:  # also false for NaN
+        raise ConfigError(f"REKOGNITION_MIN_SIMILARITY must be a number from 0 to 100, got {raw!r}")
+    return value
 
 
 def _delay(raw: str) -> int:

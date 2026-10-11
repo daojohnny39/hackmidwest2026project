@@ -27,7 +27,7 @@ from pydantic import (
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 Angle = Literal["front", "left", "right", "up", "down", "unknown"]
-Backend = Literal["mock", "serpapi", "facecheck"]
+Backend = Literal["mock", "serpapi", "facecheck", "rekognition"]
 LlmMode = Literal["off", "anthropic", "bedrock"]
 JevMode = Literal["fake", "typesafe", "openrouter", "off"]
 
@@ -246,7 +246,8 @@ class ImageHit(Contract):
     source: str
     snippet: str = ""
     thumbnail_url: str | None = None
-    face_score: int | None = Field(default=None, ge=0, le=100)  # FaceCheck's face match, 0-100; None for Yandex
+    # Face match, 0-100: FaceCheck's score, or Rekognition's similarity (backend V3); None for Yandex alone
+    face_score: int | None = Field(default=None, ge=0, le=100)
 
 
 class FetchError(Contract):

@@ -510,6 +510,10 @@ def make_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *,
         from pipeline.search.mock_backend import MockSearchBackend
 
         return MockSearchBackend(settings.mock_internet_url, scenario=capture.scenario, delay_ms=settings.mock_delay_ms)
+    if capture.backend == "rekognition":
+        from pipeline.search.rekognition_backend import build_rekognition_backend
+
+        return build_rekognition_backend(settings, capture, run_dir, refresh=refresh)
     if capture.backend == "facecheck":
         from pipeline.search.facecheck_backend import build_facecheck_backend
 
@@ -538,7 +542,8 @@ def run_stage1(run_dir: Path, settings: Settings, *, refresh: bool = False, back
         raise ConfigError(f"this run searches with {capture.backend}; load settings with the {capture.backend} backend")
     backend = backend or make_backend(settings, capture, run_dir, refresh=refresh)
     agent = agent or make_agent(settings)
-    # FaceCheck can queue a search for minutes, so its images get that much longer.
+    # FaceCheck can queue a search for minutes, and backend V3 compares every result's face after
+    # searching, so their images get that much longer.
     deadline_s = IMAGE_DEADLINE_S + getattr(backend, "extra_deadline_s", 0.0)
 
     def log(**fields: object) -> None:
@@ -571,7 +576,9 @@ def format_hits(bundle: RawEvidenceBundle) -> str:
             status += ", errors: " + ", ".join(sorted({error.reason for error in image.errors}))
         lines.append(f"  {image.image_id} ({image.angle}): {status}")
         for hit in image.hits:
-            label = f"face {hit.face_score:>3}/100" if hit.face_score is not None else hit.title[:60]
+            label = hit.title[:60]
+            if hit.face_score is not None:
+                label = f"face {hit.face_score:>3}/100" + (f" {hit.title[:50]}" if hit.title else "")
             lines.append(f"    {hit.position:>2}. {label}  {hit.url}")
     html = sum(page.extraction == "html" for page in bundle.pages.values())
     lines.append(f"Pages: {len(bundle.pages)} ({html} HTML, {len(bundle.pages) - html} snippet-only)")

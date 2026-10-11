@@ -54,7 +54,7 @@ class BackendError(Exception):
 
 
 class SearchBackend(Protocol):
-    name: str  # "mock", "serpapi" or "facecheck"
+    name: str  # "mock", "serpapi", "facecheck" or "rekognition"
     origin: str | None  # mock server origin for normalize_url; None when live
     search_endpoint: str  # endpoint paths for run_log.jsonl; never a page URL
     fetch_endpoint: str
@@ -140,8 +140,8 @@ async def with_retries(
 
 
 def parse_image_results(payload: object, *, mock_origin: str | None = None) -> SearchResult:
-    """Normalize a Yandex-shaped reverse-image response (SerpApi, the mock, or FaceCheck's
-    converted results) into ImageHits.
+    """Normalize a Yandex-shaped reverse-image response (SerpApi, the mock, or the converted
+    results of FaceCheck or backend V3) into ImageHits.
 
     A provider error or a non-success status is a failure even on HTTP 200, except
     SerpApi's "hasn't returned any results", which is zero hits. Missing
@@ -193,6 +193,18 @@ def parse_image_results(payload: object, *, mock_origin: str | None = None) -> S
             extras["demo"] = info["demo"]
         if isinstance(info.get("searched_faces"), int):
             extras["searched_faces"] = info["searched_faces"]
+        # Backend V3: the engines that answered or failed, the similarity threshold, the number of
+        # merged results, and how many of them ended each way (matched, no_face, ...).
+        for name in ("engines", "failed_engines"):
+            if isinstance(info.get(name), list) and all(isinstance(item, str) for item in info[name]):
+                extras[name] = info[name]
+        if isinstance(info.get("min_similarity"), (int, float)) and not isinstance(info["min_similarity"], bool):
+            extras["min_similarity"] = info["min_similarity"]
+        if isinstance(info.get("candidates"), int):
+            extras["candidates"] = info["candidates"]
+        outcomes = info.get("outcomes")
+        if isinstance(outcomes, dict) and all(isinstance(count, int) for count in outcomes.values()):
+            extras["outcomes"] = {str(name): count for name, count in outcomes.items()}
     if skipped:
         extras["skipped_hits"] = skipped
     request_id = metadata.get("id")

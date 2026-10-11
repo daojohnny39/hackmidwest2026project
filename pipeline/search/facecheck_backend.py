@@ -75,6 +75,11 @@ class FaceCheckBackend(LivePages):
     origin = None
     search_endpoint = SEARCH_PATH
     extra_deadline_s = SEARCH_TIMEOUT_S
+    face_score_note = (  # for the per-image agent
+        "Each hit has a face_score from 0 to 100: FaceCheck's estimate that the face on that page is the "
+        "participant's (90+ certain, 83-89 confident, 70-82 uncertain, under 70 weak). Prefer high scores, treat "
+        "hits under 70 as likely lookalikes, and remember that even a high score is not proof: different people "
+        "look alike.")
 
     def __init__(self, *, api_key: str, capture_dir: Path, demo: bool = False, cache_dir: Path | None = None,
                  refresh: bool = False, client: httpx.AsyncClient | None = None,

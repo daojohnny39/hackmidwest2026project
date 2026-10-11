@@ -213,15 +213,43 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-Search uses [FaceCheck.ID](https://facecheck.id/en/Face-Search/API) face search by
-default. FaceCheck matches the face itself against faces it has indexed from public
-web pages, and scores each match from 0 to 100 (90+ certain, 83-89 confident, 70-82
-uncertain, 50-69 weak). Yandex, the other live backend (`SEARCH_BACKEND=serpapi`),
-only finds visually similar images, which for a selfie are mostly lookalikes. Save
-your FaceCheck API token once; the prompt hides what you type, checks the token
-with FaceCheck's free `/api/info` call (it shows the credit balance and runs no
-search), and writes it to the gitignored `.env`, creating it from `.env.example`
-if needed:
+Search uses backend V3 by default (`SEARCH_BACKEND=rekognition`). For each photo,
+[Amazon Rekognition](https://aws.amazon.com/rekognition/) finds the face, SerpApi
+searches the open web for a crop of it with Yandex and Google Lens, and Rekognition
+then compares the participant's face with every face in every result image. Results
+whose best face scores under `REKOGNITION_MIN_SIMILARITY` (default 80) are dropped,
+and the rest are ranked by similarity. The older backends stay selectable. V1, Yandex
+alone (`SEARCH_BACKEND=serpapi`), returns every visually similar image, which for a
+selfie means mostly lookalikes. V2, FaceCheck (`SEARCH_BACKEND=facecheck`), looks the
+face up in FaceCheck's own index of faces instead of searching the web.
+
+V3 needs a SerpApi key and AWS keys. Each prompt hides what you type, checks the key
+first (SerpApi's free Account API, AWS STS), and saves it outside git: the SerpApi key
+in `.env`, created from `.env.example` if needed, and the AWS keys in
+`~/.aws/credentials` (see below).
+
+```bash
+.venv/bin/python -m pipeline set-key serpapi
+.venv/bin/python -m pipeline set-key aws --region us-east-1
+```
+
+The AWS user needs `rekognition:DetectFaces` and `rekognition:CompareFaces`. An account
+on AWS's Free plan only allows some services in some regions: Johnny's project allows
+Rekognition in us-east-2 only, so its `.env` has `AWS_REGION=us-east-2`. Each photo
+costs one SerpApi search per engine (two by default; `REKOGNITION_ENGINES` picks them)
+and about $0.001 per image Rekognition looks at: one DetectFaces call and up to 40
+CompareFaces calls. Only the face crop leaves the machine, as a JPEG without EXIF.
+Unless the AWS organization has an AI services opt-out policy, AWS may keep the images
+Rekognition analyzes and use them to improve its services
+([Rekognition FAQ](https://aws.amazon.com/rekognition/faqs/)); tell participants when
+you ask for consent. Each engine's results are cached in the run folder, so `stage 1
+--run` on the same run, or a new threshold, makes no new SerpApi search (`--refresh`
+does). A result image that won't download falls back to the engine's thumbnail.
+
+For FaceCheck instead, save its token and set `SEARCH_BACKEND=facecheck`. FaceCheck
+scores each match from 0 to 100 (90+ certain, 83-89 confident, 70-82 uncertain, 50-69
+weak). The prompt checks the token with FaceCheck's free `/api/info` call, which shows
+the credit balance and runs no search:
 
 ```bash
 .venv/bin/python -m pipeline set-key facecheck
@@ -238,12 +266,7 @@ upload is a JPEG copy at most 1,600 px on its longest side with EXIF stripped;
 FaceCheck says it doesn't add uploads to its index and deletes search history
 within 24 hours. Match thumbnails show other people's faces, so they're dropped.
 
-For Yandex instead, save a SerpApi key (checked with SerpApi's free Account API)
-and set `SEARCH_BACKEND=serpapi`:
-
-```bash
-.venv/bin/python -m pipeline set-key serpapi
-```
+For Yandex alone, set `SEARCH_BACKEND=serpapi`. It uses the same SerpApi key.
 
 `set-key typesafe`, `set-key openrouter`, and `set-key anthropic` save the other
 keys the same way. A TypeSafe (Jev) key is checked first by listing TypeSafe's
@@ -255,7 +278,7 @@ to `run` or `stage`, since those calls are paid.
 .venv/bin/python -m pipeline set-key typesafe
 ```
 
-AWS keys (for S3 image hosting and Bedrock) work differently: `set-key aws` asks for
+AWS keys (for Rekognition, S3 image hosting, and Bedrock) work differently: `set-key aws` asks for
 an IAM user's access key ID and secret access key, checks them with STS
 GetCallerIdentity (free, needs no permissions), and saves them as the `[default]`
 profile in `~/.aws/credentials` with mode 0600, outside the repo, where boto3 finds
@@ -292,14 +315,14 @@ first with `python3 -m mock_internet serve`.
 ```
 
 Every run needs a capture folder whose `manifest.json` records the participant's
-consent (spec 0.4). Live search (FaceCheck, the default, or SerpApi) and `--models`
+consent (spec 0.4). Live search (V3, the default, FaceCheck, or SerpApi) and `--models`
 (paid model calls) send data to outside services, so both require
 `consent.external_processing: true`, and live runs need real image files. The mock fixtures under `tests/fixtures/`
 require the mock backend (`--mock` or `SEARCH_BACKEND=mock`). The offline tests
 always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
 
-SerpApi's Yandex engine only takes an image URL, so a SerpApi run hosts each photo
-briefly (spec 1.2). `IMAGE_HOST` picks how:
+SerpApi's engines only take an image URL, so V3 and SerpApi runs host each photo
+briefly (spec 1.2); V3 hosts only the face crop. `IMAGE_HOST` picks how:
 
 - `tunnel` (the default) needs only `ssh`. Stage 1 starts a web server on
   127.0.0.1 and opens a free [localhost.run](https://localhost.run) tunnel to it
@@ -316,16 +339,21 @@ briefly (spec 1.2). `IMAGE_HOST` picks how:
   10 minutes, and deleted after its search. `uploads.json` in the run folder tracks
   it until then, and `purge` deletes anything left over.
 
-Try one consenting teammate's photo first. It costs one search (3 FaceCheck credits,
-or one SerpApi search with `--backend serpapi`) and never calls a model:
+Try one consenting teammate's photo first. With V3 it costs two SerpApi searches and
+about 40 Rekognition calls (3 FaceCheck credits with `--backend facecheck`, one SerpApi
+search with `--backend serpapi`), and it never calls a model:
 
 ```bash
 .venv/bin/python -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
 ```
 
-With FaceCheck, each hit carries its face score: the console view prints
-`face 92/100` in place of a title, and the per-image agent is told to prefer high
-scores and treat anything under 70 as a likely lookalike.
+With V3 or FaceCheck, each hit carries a face score: the console view prints
+`face 97/100` before the title, and the per-image agent is told what the score means.
+For V3 that's Rekognition's similarity: 99+ strong, 95-98 likely, 90-94 possible. For
+FaceCheck, anything under 70 is a likely lookalike. Even 99 isn't proof, so ask the
+participant which hits are really theirs. `search_extras` in `01_raw_evidence.json`
+counts what happened to every V3 result (matched, below_threshold, no_face,
+image_unavailable, ...).
 
 With `LLM_MODE=anthropic` (or `bedrock`) and `--models`, each image gets its own
 Strands agent that decides which hits to fetch and which pages are about the

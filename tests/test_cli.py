@@ -24,6 +24,8 @@ from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase, read_
 ALEX = FIXTURE_CAPTURES / "alex"
 SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
 FACECHECK_ENV = {"SEARCH_BACKEND": "facecheck", "FACECHECK_API_KEY": "test-facecheck-token"}
+V3_ENV = {"SEARCH_BACKEND": "rekognition", "SERPAPI_KEY": "test-serpapi-key", "AWS_REGION": "us-east-1"}
+AWS_KEYS = {"AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE", "AWS_SECRET_ACCESS_KEY": "test-aws-secret-" + "x" * 24}
 HOSTING_ENV = {"IMAGE_HOST": "s3", "IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
 
 
@@ -190,13 +192,47 @@ class CliTests(MockServerTestCase):
         self.assertNotIn("test-anthropic-key", err)
         self.assertEqual(self.run_dirs(), [])
 
-    def test_facecheck_is_the_default_and_needs_a_key(self):
+    def test_v3_is_the_default_and_needs_its_keys(self):
         del os.environ["SEARCH_BACKEND"]
         code, _, err = self.cli("run", "--capture", str(ALEX), "--until", "0")
         self.assertEqual(code, BAD_CONFIG)
-        self.assertIn("FACECHECK_API_KEY", err)
-        self.assertIn("set-key facecheck", err)
+        for text in ("SERPAPI_KEY", "AWS_REGION", "set-key serpapi", "set-key aws"):
+            self.assertIn(text, err)
         self.assertEqual(self.run_dirs(), [])
+
+    def test_v3_run_needs_aws_credentials_before_the_run_folder(self):
+        os.environ.update(V3_ENV, IMAGE_HOST="s3", IMAGE_BUCKET="test-bucket")
+        capture = self.real_image_capture()
+        code, _, err = self.cli("run", "--capture", str(capture), "--until", "1")
+        self.assertEqual(code, BAD_CONFIG)
+        self.assertIn("no AWS credentials", err)
+        self.assertEqual(self.run_dirs(), [])
+        # Stage 0 alone searches nothing, so it needs no credentials.
+        self.assertEqual(self.cli("run", "--capture", str(capture), "--until", "0")[0], OK)
+
+    def test_v3_run_records_its_backend(self):
+        from tests.test_stage1 import FakeBackend, page_html, yandex
+
+        os.environ.update({**V3_ENV, **AWS_KEYS})
+        capture = self.real_image_capture()
+        url = "https://example.com/pat"
+        payload = yandex(url)
+        payload["image_results"][0]["face_score"] = 97
+        backend = FakeBackend({"img-1": payload}, {url: page_html(title="Pat")})
+        backend.name = "rekognition"
+        with patch("pipeline.hosting.find_ssh", return_value="/usr/bin/ssh"), \
+                patch("pipeline.stage1_collect.make_backend", return_value=backend) as make_backend:
+            code, out, err = self.cli("run", "--capture", str(capture), "--until", "1")
+        self.assertEqual(code, OK, err)
+        self.assertIn("search: rekognition", out)
+        self.assertIn(f"1. face  97/100 Hit 1  {url}", out)
+        self.assertEqual(make_backend.call_args.args[0].rekognition_engines, ("yandex_images", "google_lens"))
+        [run_dir] = self.run_dirs()
+        self.assertEqual(read_artifact(run_dir, 0).backend, "rekognition")
+        self.assertEqual(read_artifact(run_dir, 1).images[0].backend, "rekognition")
+        files = "".join(path.read_text() for path in run_dir.iterdir() if path.is_file())
+        for secret in ("test-serpapi-key", AWS_KEYS["AWS_SECRET_ACCESS_KEY"]):
+            self.assertNotIn(secret, out + err + files)
 
     def test_facecheck_run_needs_no_image_hosting(self):
         from tests.test_stage1 import FakeBackend, page_html, yandex
@@ -303,11 +339,19 @@ class CliTests(MockServerTestCase):
 
     def test_smoke_search_always_uses_a_live_backend(self):
         code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
-        self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; FaceCheck's key is missing
-        self.assertIn("FACECHECK_API_KEY", err)
-        os.environ.update(FACECHECK_API_KEY="test-facecheck-token")
+        self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; V3's keys are missing
+        self.assertIn("SERPAPI_KEY", err)
+        os.environ.update(SERPAPI_KEY="test-serpapi-key", AWS_REGION="us-east-1", IMAGE_HOST="s3",
+                          IMAGE_BUCKET="test-bucket")
+        code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
+        self.assertEqual(code, BAD_CONFIG)  # no AWS credentials for Rekognition
+        self.assertIn("set-key aws", err)
+        os.environ.update(AWS_KEYS)
         code, _, _ = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
         self.assertEqual(code, REFUSED)  # mock fixtures can't be searched live
+        os.environ.update(FACECHECK_API_KEY="test-facecheck-token")
+        smoke = ("smoke-search", "--capture", str(ALEX), "--image-id", "img-1", "--backend", "facecheck")
+        self.assertEqual(self.cli(*smoke)[0], REFUSED)
 
     def test_smoke_search_on_serpapi_needs_its_key_and_hosting(self):
         smoke = ("smoke-search", "--capture", str(ALEX), "--image-id", "img-1", "--backend", "serpapi")
@@ -330,7 +374,8 @@ class CliTests(MockServerTestCase):
         backend = FakeBackend({"img-1": yandex(url)}, {url: page_html(title="Pat")})
         backend.name = "facecheck"
         with patch("pipeline.stage1_collect.make_backend", return_value=backend) as make_backend:
-            code, out, _ = self.cli("smoke-search", "--capture", str(capture), "--image-id", "img-1")
+            code, out, _ = self.cli("smoke-search", "--capture", str(capture), "--image-id", "img-1",
+                                    "--backend", "facecheck")
         self.assertEqual(code, OK)
         self.assertEqual(make_backend.call_args.kwargs, {"refresh": False})
         [run_dir] = self.run_dirs()

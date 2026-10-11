@@ -24,15 +24,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_CAPTURES = REPO_ROOT / "tests" / "fixtures" / "captures"
 
 PIPELINE_ENV = (
-    "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS",
-    "SERPAPI_KEY", "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "FACECHECK_API_KEY", "FACECHECK_DEMO",
+    "REKOGNITION_ENGINES", "REKOGNITION_MIN_SIMILARITY", "SERPAPI_KEY", "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "JEV_MODE", "JEV_MODEL",
     "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
 )
 
 # boto3 reads ~/.aws (where `set-key aws` saves keys) unless these point elsewhere; os.devnull is never a file it loads.
+# With no credentials it would also ask the EC2 instance metadata service, a network call.
 OFFLINE_ENV = {"SEARCH_BACKEND": "mock", "JEV_MODE": "fake", "LLM_MODE": "off",
-               "AWS_SHARED_CREDENTIALS_FILE": os.devnull, "AWS_CONFIG_FILE": os.devnull}
+               "AWS_SHARED_CREDENTIALS_FILE": os.devnull, "AWS_CONFIG_FILE": os.devnull,
+               "AWS_EC2_METADATA_DISABLED": "true"}
 
 
 class ExternalNetworkBlocked(RuntimeError):

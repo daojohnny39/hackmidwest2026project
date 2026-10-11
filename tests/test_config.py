@@ -19,6 +19,7 @@ SECRETS = {
 }
 FACECHECK = {"FACECHECK_API_KEY": SECRETS["FACECHECK_API_KEY"]}
 LIVE = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "IMAGE_BUCKET": "hm-bucket", "AWS_REGION": "us-east-1"}
+V3 = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "AWS_REGION": "us-east-1"}
 
 
 def load(env=None, **options):
@@ -52,21 +53,23 @@ class ConfigTestCase(OfflineTestCase):
 
 
 class DefaultsTests(ConfigTestCase):
-    def test_default_backend_is_facecheck(self):
-        settings = load({**FACECHECK, "SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend=None)
-        self.assertEqual(settings.search_backend, "facecheck")
+    def test_default_backend_is_v3(self):
+        settings = load({**V3, **FACECHECK}, backend=None)
+        self.assertEqual(settings.search_backend, "rekognition")
         self.assertTrue(settings.live)
-        self.assertEqual(settings.facecheck_api_key, SECRETS["FACECHECK_API_KEY"])
-        self.assertIsNone(settings.serpapi_key)
-        self.assertFalse(settings.facecheck_demo)
+        self.assertEqual((settings.serpapi_key, settings.aws_region), (SECRETS["SERPAPI_KEY"], "us-east-1"))
+        self.assertIsNone(settings.facecheck_api_key)
+        self.assertEqual(settings.rekognition_engines, ("yandex_images", "google_lens"))
+        self.assertEqual(settings.rekognition_min_similarity, 80.0)
         self.assertEqual((settings.jev_mode, settings.llm_mode), ("fake", "off"))
         self.assertFalse(settings.models or settings.real_models_enabled)
 
-    def test_default_backend_needs_facecheck_key(self):
-        error = self.assertConfigError(r"FACECHECK_API_KEY \(for FaceCheck search\)", backend=None)
-        self.assertIn("set-key facecheck", str(error))
-        self.assertIn("SEARCH_BACKEND=serpapi", str(error))
-        self.assertIn("--mock", str(error))
+    def test_default_backend_needs_serpapi_key_and_region(self):
+        error = self.assertConfigError(
+            r"SERPAPI_KEY \(for SerpApi search\); AWS_REGION \(for Rekognition face matching\)", backend=None)
+        for hint in ("set-key serpapi", "set-key aws --region", "SEARCH_BACKEND=facecheck", "--mock"):
+            self.assertIn(hint, str(error))
+        self.assertConfigError(r"missing required settings: AWS_REGION", {"SERPAPI_KEY": "k"}, backend=None)
 
     def test_mock_backend_is_offline(self):
         settings = load()
@@ -85,10 +88,12 @@ class DefaultsTests(ConfigTestCase):
 
     def test_empty_strings_count_as_unset(self):
         env = {"SEARCH_BACKEND": "", "MOCK_SCENARIO": " ", "JEV_MODE": "", "LLM_MODE": "", "MOCK_DELAY_MS": "",
-               "FACECHECK_DEMO": "", **FACECHECK}
+               "FACECHECK_DEMO": "", "REKOGNITION_ENGINES": "", "REKOGNITION_MIN_SIMILARITY": " ", **V3}
         settings = load(env, backend=None)
-        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("facecheck", "fake", "off"))
+        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("rekognition", "fake", "off"))
         self.assertFalse(settings.facecheck_demo)
+        self.assertEqual((settings.rekognition_engines, settings.rekognition_min_similarity),
+                         (("yandex_images", "google_lens"), 80.0))
         self.assertEqual((settings.mock_scenario, settings.mock_delay_ms), ("default", 0))
 
     def test_settings_are_frozen(self):
@@ -134,11 +139,13 @@ class DotenvTests(ConfigTestCase):
     def test_missing_dotenv_file_is_ignored(self):
         self.assertEqual(load(dotenv_path=self.folder / "absent.env").mock_scenario, "default")
 
-    def test_env_example_selects_facecheck_and_needs_the_key(self):
+    def test_env_example_selects_v3_and_needs_its_keys(self):
         example = REPO_ROOT / ".env.example"
-        self.assertConfigError("FACECHECK_API_KEY", backend=None, dotenv_path=example)
-        settings = load(FACECHECK, backend=None, dotenv_path=example)
-        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("facecheck", "fake", "off"))
+        self.assertConfigError("SERPAPI_KEY.*AWS_REGION", backend=None, dotenv_path=example)
+        settings = load(V3, backend=None, dotenv_path=example)
+        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("rekognition", "fake", "off"))
+        self.assertEqual((settings.rekognition_engines, settings.rekognition_min_similarity),
+                         (("yandex_images", "google_lens"), 80.0))
         self.assertFalse(settings.facecheck_demo)
 
 
@@ -165,7 +172,7 @@ class SearchBackendTests(ConfigTestCase):
 
     def test_dotenv_supplies_facecheck_key(self):
         path = self.write_dotenv(f"FACECHECK_API_KEY={SECRETS['FACECHECK_API_KEY']}\nFACECHECK_DEMO=true\n")
-        settings = load(backend=None, dotenv_path=path)
+        settings = load(backend="facecheck", dotenv_path=path)
         self.assertEqual((settings.facecheck_api_key, settings.facecheck_demo), (SECRETS["FACECHECK_API_KEY"], True))
 
     def test_env_can_still_select_serpapi(self):
@@ -183,6 +190,31 @@ class SearchBackendTests(ConfigTestCase):
                 self.assertEqual(load({**FACECHECK, "FACECHECK_DEMO": value}, backend="facecheck").facecheck_demo,
                                  expected)
         self.assertConfigError("FACECHECK_DEMO", {**FACECHECK, "FACECHECK_DEMO": "maybe"}, backend="facecheck")
+
+    def test_v3_keeps_the_serpapi_key_and_drops_facecheck(self):
+        settings = load({**V3, **FACECHECK}, backend="rekognition")
+        self.assertEqual((settings.serpapi_key, settings.facecheck_api_key), (SECRETS["SERPAPI_KEY"], None))
+        self.assertIsNone(load({**V3, **FACECHECK}, backend="facecheck").serpapi_key)
+
+    def test_rekognition_engines(self):
+        for raw, expected in (("google_lens", ("google_lens",)), (" google_lens , yandex_images ", ("google_lens", "yandex_images")),
+                              ("yandex_images,yandex_images", ("yandex_images",))):
+            with self.subTest(raw=raw):
+                self.assertEqual(load({**V3, "REKOGNITION_ENGINES": raw}, backend="rekognition").rekognition_engines,
+                                 expected)
+        for raw in ("bing", "yandex_images,bing", ","):
+            with self.subTest(raw=raw):
+                self.assertConfigError("REKOGNITION_ENGINES", {**V3, "REKOGNITION_ENGINES": raw}, backend="rekognition")
+
+    def test_rekognition_min_similarity(self):
+        for raw, expected in (("0", 0.0), ("99.5", 99.5), ("100", 100.0)):
+            with self.subTest(raw=raw):
+                settings = load({**V3, "REKOGNITION_MIN_SIMILARITY": raw}, backend="rekognition")
+                self.assertEqual(settings.rekognition_min_similarity, expected)
+        for raw in ("-1", "101", "nan", "inf", "high"):
+            with self.subTest(raw=raw):
+                self.assertConfigError("REKOGNITION_MIN_SIMILARITY", {**V3, "REKOGNITION_MIN_SIMILARITY": raw},
+                                       backend="rekognition")
 
     def test_scenario_rejected_with_facecheck(self):
         self.assertConfigError("--scenario.*--mock", FACECHECK, backend="facecheck", scenario="ambiguous")

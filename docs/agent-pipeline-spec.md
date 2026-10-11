@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. FaceCheck face search replaced Yandex as the default backend on 2026-10-10 (Johnny), after a live Yandex run on his own photo returned only lookalikes; the state before that is tagged `cyberpi-backend-v1`. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. FaceCheck face search replaced Yandex as the default backend on 2026-10-10 (Johnny), after a live Yandex run on his own photo returned only lookalikes; the state before that is tagged `cyberpi-backend-v1`. Backend V3 replaced FaceCheck as the default later that day, at Johnny's request: SerpApi searches the open web for a crop of the participant's face, and Amazon Rekognition checks the face in every result (`SEARCH_BACKEND=rekognition`, 1.1). FaceCheck's default state is commit `25e807f`. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -36,8 +36,8 @@ Each section reads the artifacts named in its **In** line and writes its **Out**
 
 ## 2. Ground rules
 
-- **Consent gate.** Require affirmative participant consent before reading real images, creating an artifact, or making a call. Live consent must cover image disclosure to FaceCheck (or S3, the tunnel, SerpApi and Yandex), and evidence disclosure to the selected model providers. Apply the gate to `run`, `stage`, and `smoke-search`. Real tests use consenting team members; mock tests use fictional participants.
-- **FaceCheck by default, SerpApi as the alternative, mock for tests.** Search defaults to FaceCheck face search (Johnny, 2026-10-10; it replaced SerpApi, the default since earlier that day). `SEARCH_BACKEND=serpapi` selects Yandex through SerpApi, and `run --mock` or `SEARCH_BACKEND=mock` selects the mock internet, which costs no search credits. `LLM_MODE=off` and `JEV_MODE=fake` stay the defaults, and `--models` separately permits paid model calls, including models used with mock evidence. Normal tests force the mock and block non-loopback connections.
+- **Consent gate.** Require affirmative participant consent before reading real images, creating an artifact, or making a call. Live consent must cover image disclosure to SerpApi, Yandex, Google, AWS Rekognition and the tunnel for V3 (or FaceCheck, or S3, the tunnel, SerpApi and Yandex), and evidence disclosure to the selected model providers. Apply the gate to `run`, `stage`, and `smoke-search`. Real tests use consenting team members; mock tests use fictional participants.
+- **Backend V3 by default, FaceCheck and SerpApi alone as alternatives, mock for tests.** Search defaults to backend V3, SerpApi search with Rekognition face matching (Johnny, 2026-10-10; it replaced FaceCheck, which had replaced SerpApi earlier that day). `SEARCH_BACKEND=facecheck` selects FaceCheck, `SEARCH_BACKEND=serpapi` selects Yandex alone through SerpApi, and `run --mock` or `SEARCH_BACKEND=mock` selects the mock internet, which costs no search credits. `LLM_MODE=off` and `JEV_MODE=fake` stay the defaults, and `--models` separately permits paid model calls, including models used with mock evidence. Normal tests force the mock and block non-loopback connections.
 - **Code holds the data; models make judgments.** Tools store evidence and provenance. The LLM may extract supported fields, triage URLs, and write a sourced bio. Code sets IDs, graph values, confidence, and acceptance. Treat page text as untrusted data, never as tool instructions.
 - **Every model step has a fallback.** Tests run without an LLM or Jev. Runtime failures use the rules and template below and record the fallback. A mock demonstration is not proof of live retrieval or identity accuracy.
 - **Keep data out of git.** Add `runs/` and `captures/` to `.gitignore` before collecting real data; they are not ignored today. Existing rules cover `.env`, bytecode, and `data/*.sqlite3*`. Keep real photos, pages, prompts, responses, caches, and traces under those ignored roots. Commit only synthetic fixtures and blank key placeholders.
@@ -70,6 +70,7 @@ Project Directory/
       mock_backend.py         wraps MockInternetClient
       serpapi_backend.py      SerpApi yandex_images + bounded live HTTP fetch (LivePages)
       facecheck_backend.py    FaceCheck.ID face search; reuses LivePages for page fetches
+      rekognition_backend.py  backend V3: SerpApi search of a face crop, Rekognition CompareFaces on every result
     hosting.py                live only: upload image, presigned URL, delete
     jev.py                    Jev wrapper with modes typesafe | openrouter | fake | off
     llm.py                    Strands model factory (one provider first)
@@ -88,7 +89,7 @@ Project Directory/
 
 ### 0.2 Dependencies
 
-Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`, `pillow` (image validation), and `python-dotenv` directly. Add `strands-agents[anthropic]` for the proposed Anthropic route, `typesafe-sdk` for direct TypeSafe, and `boto3` for S3 or Bedrock. The existing mock needs only the standard library. `requirements.txt` pins the versions that installed cleanly on Python 3.12 (created with `uv venv --python 3.12 .venv`, since this machine's Python 3.14 has no pip) and passed an import-only SDK smoke check. Import model clients lazily so offline mode needs no credentials.
+Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`, `pillow` (image validation), and `python-dotenv` directly. Add `strands-agents[anthropic]` for the proposed Anthropic route, `typesafe-sdk` for direct TypeSafe, and `boto3` for S3, Bedrock, or Rekognition (backend V3). The existing mock needs only the standard library. `requirements.txt` pins the versions that installed cleanly on Python 3.12 (created with `uv venv --python 3.12 .venv`, since this machine's Python 3.14 has no pip) and passed an import-only SDK smoke check. Import model clients lazily so offline mode needs no credentials.
 
 **Proposal:** build one LLM provider and the Jev route matching Johnny's key first. Keep the wrapper boundary; defer the second provider, text-search expansion, and graph-driven re-merging. Plain Python owns stage order. No graph database or multi-agent orchestration framework is needed.
 
@@ -96,13 +97,15 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 
 | Variable | Values | Default | Used by |
 |---|---|---|---|
-| `SEARCH_BACKEND` | `facecheck`, `serpapi`, `mock` | `facecheck` | Section 1 |
+| `SEARCH_BACKEND` | `rekognition` (V3), `facecheck`, `serpapi`, `mock` | `rekognition` | Section 1 |
 | `MOCK_INTERNET_URL` | loopback URL | `http://127.0.0.1:8765` | mock backend |
 | `MOCK_SCENARIO` | `default`, `ambiguous`, `stale`, `duplicates`, `empty`, `rate_limited`, `server_error` | `default` | mock backend |
 | `MOCK_DELAY_MS` | integer 0–5000, search requests only | `0` | concurrency tests |
 | `FACECHECK_API_KEY` | token; save with `set-key facecheck` | none | facecheck backend |
 | `FACECHECK_DEMO` | `true`/`false`; true searches only 100,000 faces, free | `false` | facecheck backend |
-| `SERPAPI_KEY` | key; save with `set-key serpapi` | none | serpapi backend |
+| `SERPAPI_KEY` | key; save with `set-key serpapi` | none | rekognition and serpapi backends |
+| `REKOGNITION_ENGINES` | comma-separated SerpApi engines: `yandex_images`, `google_lens` | both | rekognition backend |
+| `REKOGNITION_MIN_SIMILARITY` | CompareFaces similarity 0–100; results under it are dropped | `80` | rekognition backend |
 | `IMAGE_HOST` | `tunnel` or `s3` | `tunnel` | `hosting.py` (live only) |
 | `IMAGE_BUCKET` + AWS credentials | S3 bucket name; keys via `set-key aws` (to `~/.aws/credentials`) | none | `hosting.py` (`IMAGE_HOST=s3`) |
 | `JEV_MODE` | `fake`, `typesafe`, `openrouter`, `off` | `fake` | Sections 2, 3 |
@@ -111,11 +114,11 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `LLM_MODE` | `off`, `anthropic`, `bedrock` | `off` | Sections 1–4 |
 | `ANTHROPIC_API_KEY` | key | none | `llm.py` |
 | `LLM_MODEL` | provider-specific model ID | `claude-sonnet-5-5` for Anthropic; required for Bedrock | `llm.py` |
-| `AWS_REGION` | region with bucket/model access | required for S3/Bedrock | hosting and Bedrock |
+| `AWS_REGION` | region with Rekognition, bucket, or model access | required for V3, S3, and Bedrock | Rekognition, hosting, and Bedrock |
 
-`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `facecheck`, which requires `FACECHECK_API_KEY`; `serpapi` requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. Hosting settings (`IMAGE_HOST`, then `ssh` for the tunnel or `IMAGE_BUCKET` for S3) are checked by `hosting.require_hosting` before a SerpApi search, not at load, so stages that only read saved evidence don't need them. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
+`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `rekognition` (V3), which requires `SERPAPI_KEY`, `AWS_REGION`, and AWS credentials; `facecheck` requires `FACECHECK_API_KEY`; `serpapi` requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. Hosting settings (`IMAGE_HOST`, then `ssh` for the tunnel or `IMAGE_BUCKET` for S3) are checked by `hosting.require_hosting` before a SerpApi search, and AWS credentials by `rekognition_backend.require_rekognition` before a V3 search, not at load, so stages that only read saved evidence don't need them. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
 
-`python -m pipeline set-key {facecheck,serpapi,typesafe,openrouter,anthropic,aws}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`. python-dotenv's parser locates the assignment, so quoted keys, multi-line values, comments, and CRLF endings survive. The file is replaced atomically, through a temp file named `.env.*`, so a crash can't leave an unignored copy. The command requests mode 0600, which protects the key on filesystems that enforce POSIX permissions. On `/mnt/c` those modes aren't enforced, and `.env` inherits the folder's Windows ACLs, so protect the repo folder there. If the terminal can't hide input, the command refuses before reading anything. A FaceCheck token is first checked with FaceCheck's free `POST /api/info`, which returns the credit balance and runs no search (a missing or invalid token gets HTTP 200 with `code` `INVALID_TOKEN` or `EXCEPTION`, checked 2026-10-10); a rejected token isn't saved. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. A TypeSafe key is checked by listing TypeSafe's models (`GET /v1/models`, authenticated; a fake key gets 401, checked 2026-10-10), which makes no Jev decision. A rejected key is not saved, and an unreachable check saves with a warning. `--no-check` skips the checks. Saving a model key never changes `JEV_MODE` or `LLM_MODE`; the command prints the setting to change, and real modes still need `--models`. `set-key aws` (`aws_credentials.py`) is the exception to `.env`: S3 hosting and Bedrock use boto3's standard credential chain, so it saves an IAM user's access key pair as the `[default]` profile of `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`), keeping other profiles, with mode 0600 in a 0700 folder, outside the repo and off `/mnt/c`. Both prompts are hidden. Key formats are checked first, and temporary `ASIA` keys are refused. The keys are checked with STS GetCallerIdentity, which is free and needs no IAM permissions, and the command prints only the account and ARN, warning on root-user keys. Rejected keys aren't saved (real STS answers `InvalidClientTokenId` for AWS's example key, checked 2026-10-10). `--region` also saves `AWS_REGION` to `.env`. `OfflineTestCase` points `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at `os.devnull`, so tests never load the saved keys.
+`python -m pipeline set-key {facecheck,serpapi,typesafe,openrouter,anthropic,aws}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`. python-dotenv's parser locates the assignment, so quoted keys, multi-line values, comments, and CRLF endings survive. The file is replaced atomically, through a temp file named `.env.*`, so a crash can't leave an unignored copy. The command requests mode 0600, which protects the key on filesystems that enforce POSIX permissions. On `/mnt/c` those modes aren't enforced, and `.env` inherits the folder's Windows ACLs, so protect the repo folder there. If the terminal can't hide input, the command refuses before reading anything. A FaceCheck token is first checked with FaceCheck's free `POST /api/info`, which returns the credit balance and runs no search (a missing or invalid token gets HTTP 200 with `code` `INVALID_TOKEN` or `EXCEPTION`, checked 2026-10-10); a rejected token isn't saved. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. A TypeSafe key is checked by listing TypeSafe's models (`GET /v1/models`, authenticated; a fake key gets 401, checked 2026-10-10), which makes no Jev decision. A rejected key is not saved, and an unreachable check saves with a warning. `--no-check` skips the checks. Saving a model key never changes `JEV_MODE` or `LLM_MODE`; the command prints the setting to change, and real modes still need `--models`. `set-key aws` (`aws_credentials.py`) is the exception to `.env`: Rekognition, S3 hosting and Bedrock use boto3's standard credential chain, so it saves an IAM user's access key pair as the `[default]` profile of `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`), keeping other profiles, with mode 0600 in a 0700 folder, outside the repo and off `/mnt/c`. Both prompts are hidden. Key formats are checked first, and temporary `ASIA` keys are refused. The keys are checked with STS GetCallerIdentity, which is free and needs no IAM permissions, and the command prints only the account and ARN, warning on root-user keys. Rejected keys aren't saved (real STS answers `InvalidClientTokenId` for AWS's example key, checked 2026-10-10). `--region` also saves `AWS_REGION` to `.env`. `OfflineTestCase` points `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at `os.devnull` and sets `AWS_EC2_METADATA_DISABLED`, so tests never load the saved keys or ask the instance metadata service.
 
 The Anthropic model ID above is documented. The existing Haiku alternative, `claude-haiku-4-5-20251001`, is also documented; access still needs a smoke check. Never reuse an Anthropic API ID as a Bedrock ID. See [Claude model IDs](https://platform.claude.com/docs/en/models/overview) and [Haiku 4.5](https://platform.claude.com/docs/en/models/haiku-4-5/overview).
 
@@ -177,7 +180,7 @@ class CaptureArtifact(BaseModel):
     run_id: str
     capture: CaptureBundle
     capture_dir: str                  # validated local folder; images remain here
-    backend: Literal["mock", "serpapi", "facecheck"]
+    backend: Literal["mock", "serpapi", "facecheck", "rekognition"]
     scenario: str                     # mock scenario; "default" for live search
     llm_mode: Literal["off", "anthropic", "bedrock"]
     jev_mode: Literal["fake", "typesafe", "openrouter", "off"]
@@ -207,6 +210,7 @@ Each run gets a folder `runs/<run_id>/` containing:
 - `run_log.jsonl`: stage, backend, endpoint path without query, status, latency, retry count, and fallback/error code. Jev also records returned model and usage. No raw prompts, evidence, authorization headers, or signed URLs.
 - `trace.jsonl` (`trace.py`): the debug record, appended by every stage the CLI runs. It holds each stage's start and end (settings, duration, outcome, and the exception if the stage raised one), every search and page fetch with its URL, and each Strands agent's prompts, messages (text, reasoning, tool calls and results, structured output), model and tool calls, and usage. It also holds Jev requests, answers, and HTTP error bodies, and every error a stage turned into a fallback or a code, with its exception chain. That chain includes causes hidden by `raise ... from None`. Library log records at INFO and above are kept too. The trace holds evidence, so it stays in the run folder and `purge` deletes it. Every value goes through the `run_log.jsonl` scrubber, which redacts keys, tokens, signatures, URL query strings, and tunnel URLs.
 - `cache/facecheck/`: converted FaceCheck results (URLs and scores, no thumbnails) for this run only, keyed by image hash and demo mode.
+- `cache/rekognition/`: V3's sanitized SerpApi results per engine, keyed by image hash and engine, and its final face-matched results, keyed by image hash, engines, and threshold.
 - `cache/serpapi/`: sanitized successful responses for this run only, keyed by image hash plus engine and tab. Redact submitted image URLs and embedded signed URLs. `--refresh` bypasses this local cache; it does not force a new provider search.
 - `uploads.json` (`UploadsManifest`): bucket, random object key, optional version ID, and deletion status. Record each key before upload so crash cleanup can retry. Never store presigned URLs here.
 
@@ -230,7 +234,7 @@ Contract snippets omit imports and validators. Use postponed annotations, `BaseM
 
 **In:** `00_capture.json`. **Out:** `01_raw_evidence.json` (`RawEvidenceBundle`).
 
-**Built** (2026-10-10): `pipeline/platforms.py`, `scrape.py`, `search/` (`base.py`, `mock_backend.py`, `serpapi_backend.py`), `hosting.py`, `llm.py`, `stage1_collect.py` (store, collectors, merge, `run_stage1`, `STAGE_RUNNERS[1]`), and `image_agent.py`. Tests: `tests/test_platforms.py`, `test_scrape.py`, `test_search.py`, `test_stage1.py`, `test_image_agent.py`, `test_serpapi_backend.py`, `test_hosting.py`, `test_llm.py`, and the stage-1 cases in `test_cli.py`. Every mock target in 1.8 and the Section 1 column of the matrix (9) pass against the real collector. Not yet done: a live smoke-search on a consenting teammate, which needs an S3 bucket, and the optional paid agent check. These choices fill gaps in 1.1–1.7. They are implementation defaults, not decisions:
+**Built** (2026-10-10): `pipeline/platforms.py`, `scrape.py`, `search/` (`base.py`, `mock_backend.py`, `serpapi_backend.py`, later `facecheck_backend.py` and `rekognition_backend.py`), `hosting.py`, `llm.py`, `stage1_collect.py` (store, collectors, merge, `run_stage1`, `STAGE_RUNNERS[1]`), and `image_agent.py`. Tests: `tests/test_platforms.py`, `test_scrape.py`, `test_search.py`, `test_stage1.py`, `test_image_agent.py`, `test_serpapi_backend.py`, `test_facecheck_backend.py`, `test_rekognition_backend.py`, `test_hosting.py`, `test_llm.py`, and the stage-1 cases in `test_cli.py`. Every mock target in 1.8 and the Section 1 column of the matrix (9) pass against the real collector. Not yet done: a live smoke-search on a consenting teammate, which needs an S3 bucket, and the optional paid agent check. These choices fill gaps in 1.1–1.7. They are implementation defaults, not decisions:
 
 - **Identity.** `normalize_url` also drops `www.`, maps `twitter.com` and the mobile hosts of known platforms to their main host, and strips trailing slashes. A redirect keeps the requested URL as the page key; `final_url` and `fetched_url` record where it landed.
 - **Provenance.** Each page keeps one `FoundVia` per image: its best route, a hit before a followed link and then the lowest rank. A depth-1 page's parent is the best-ranked depth-0 profile that links to it.
@@ -278,7 +282,7 @@ Rules:
 - Normal tests block all non-loopback sockets as well as selecting mock/fake/off. Real runs use SerpApi unless `--mock` is given; real models require `--models`. Starting the mock alone does not redirect another client's traffic.
 - Smoke-search uses a consent-bearing capture: `python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1`. It writes a run and cleanup record, uploads one photo, queries `tab=about`, and prints hits. `about` is already Yandex's default; do not pay to compare it with itself. The free plan currently lists 250 searches/month and 50/hour; check the account dashboard before the demo. Quota reporting is optional and uses the separate Account API; allowlist counters because its response includes the key. See [pricing](https://serpapi.com/pricing) and [Account API](https://serpapi.com/account-api).
 
-**FaceCheck backend (default since 2026-10-10, `facecheck_backend.py`).** A live Yandex run on Johnny's own selfie (run `johnny-1-25669bcf`) returned 102 results, all lookalikes: Yandex's `about` tab matches overall appearance, not identity. FaceCheck.ID matches the face against its own index of faces from public pages ([API](https://facecheck.id/en/Face-Search/API), [OpenAPI](https://facecheck.id/swagger/v1/swagger.json)). Built as follows:
+**FaceCheck backend (V2, `facecheck_backend.py`; the default on 2026-10-10 until V3).** A live Yandex run on Johnny's own selfie (run `johnny-1-25669bcf`) returned 102 results, all lookalikes: Yandex's `about` tab matches overall appearance, not identity. FaceCheck.ID matches the face against its own index of faces from public pages ([API](https://facecheck.id/en/Face-Search/API), [OpenAPI](https://facecheck.id/swagger/v1/swagger.json)). Built as follows:
 
 - `POST https://facecheck.id/api/upload_pic` (multipart field `images`) returns `id_search`; `POST /api/search` with `{id_search, with_progress: true, status_only: false, demo}` is polled every 2 s until `output` arrives, for at most 180 s. The token goes only in the `Authorization` header. Errors arrive on HTTP 200 with `error` and `code`: token problems map to `unauthorized`, credit problems to `no_credits`, the rest to `provider_error`.
 - The upload is a JPEG copy at most 1,600 px on its longest side, EXIF stripped (`hosting.search_copy`). No hosting or tunnel is needed.
@@ -289,9 +293,24 @@ Rules:
 - The per-image agent sees `face_score` on each hit and is told FaceCheck's bands (90+ certain, 83–89 confident, 70–82 uncertain, under 70 weak), to prefer high scores, and to treat hits under 70 as likely lookalikes.
 - Not yet checked live: the polling behavior, error codes beyond the token errors, and the result quality. The first paid run on Johnny's photo is the check.
 
+**Backend V3 (default since 2026-10-10, `rekognition_backend.py`).** Johnny asked for a version that searches the open web through SerpApi and checks faces with Rekognition, instead of looking faces up in FaceCheck's own database. Yandex alone finds lookalikes (above); V3 keeps Yandex's recall, adds Google Lens, and lets Rekognition decide which results show the same face. Built as follows:
+
+- **Face first.** `DetectFaces` runs on a JPEG copy at most 1,600 px on its longest side, EXIF stripped and upright. The largest face is the participant's. An image with no face fails as `no_face` before any SerpApi search or upload.
+- **Search the crop.** The face box, padded by half its width and height on each side and clipped to the image, is cut out as a JPEG. Only this crop is hosted (tunnel or S3, 1.2) and searched, once per engine in `REKOGNITION_ENGINES`: `yandex_images` with `tab=about` and `google_lens`, in parallel. If one engine fails, the other's results are used and `failed_engines` names it. If all fail, the search fails, and a retry searches again, without a second `DetectFaces` or upload. SerpApi's "hasn't returned any results" counts as zero results.
+- **Merge.** Results are merged by normalized page URL, alternating engines by rank, and the first 40 are compared. Each keeps every engine's full-size image URL (`original_image.link` for Yandex, `image` for Lens) ahead of the thumbnails.
+- **Compare.** Each result image is downloaded with the guard page fetches use: public addresses only, every redirect hop checked, at most 8 MB in 8 s, `image/*` content. It is shrunk to at most 1,600 px and sent to `CompareFaces` with the crop as the source and `SimilarityThreshold=0`, so every face in it gets a similarity. A failed download or an unsupported image falls back to the next URL, usually the thumbnail. `face_score` is the highest similarity, rounded down. Eight comparisons run at once, and comparing stops after 45 s.
+- **Filter.** Results under `REKOGNITION_MIN_SIMILARITY` (default 80, CompareFaces' own default) and images without a face are dropped. The rest become the Yandex-shaped payload `parse_image_results` reads, ranked by similarity, with each engine's title, snippet, and thumbnail kept. `search_extras` records `engines`, `failed_engines`, `min_similarity`, `candidates`, and `outcomes`, which counts `matched`, `below_threshold`, `no_face`, `no_image`, `image_unavailable`, `compare_error`, `not_compared`, and `over_limit`.
+- **Errors.** Rekognition error codes map to the codes in 1.7: `AccessDeniedException` and credential errors become `unauthorized` and stop the image's search at once, throttling becomes `rate_limited`, and `InvalidParameterException` from `CompareFaces` means the image has no face.
+- **Cache.** Each engine's sanitized reply is cached under `cache/rekognition/`, so a rerun or a new threshold makes no new SerpApi search. The final payload is cached only when every engine answered and every result was compared. `--refresh` skips both.
+- **Setup.** `SERPAPI_KEY`, `AWS_REGION`, and AWS credentials with `rekognition:DetectFaces` and `rekognition:CompareFaces`. `run` and `smoke-search` look the credentials up (no AWS request) before creating a run folder, and `build_rekognition_backend` does again before opening the tunnel. The image deadline becomes 35 s plus 75 s (`extra_deadline_s`).
+- **Cost.** One SerpApi search per engine per image, and about $0.001 per Rekognition image: one `DetectFaces` and up to 40 `CompareFaces` per capture image, about $0.12 for X = 3.
+- **Agent.** The per-image agent sees `face_score` and V3's bands: 99+ strong, 95–98 likely, 90–94 possible, lower weak. These bands are ours, not AWS's. AWS recommends 99 or higher for public-safety uses, says even 99 doesn't guarantee a match, and asks for human review ([thresholds](https://docs.aws.amazon.com/rekognition/latest/dg/thresholds-collections.html), [public safety](https://docs.aws.amazon.com/rekognition/latest/dg/considerations-public-safety-use-cases.html)).
+- **Privacy.** Unless the AWS account opts out with an AWS Organizations AI services opt-out policy, AWS may keep the analyzed images and use them to improve its services ([Rekognition FAQ](https://aws.amazon.com/rekognition/faqs/)). Consent must cover that.
+- **Checked live 2026-10-10 (run `johnny-1-8c9c0190`, Johnny's own photo):** Johnny's account is a Free-plan "project" from AWS's new sign-up. Its sandbox SCP allows Rekognition only in us-east-2 (us-east-1 and us-west-2 are denied), so `AWS_REGION=us-east-2`. DetectFaces found 2 faces and kept the largest. Yandex returned 104 results and Google Lens 60; of the first 40 compared, 39 scored under 80 (best 56.6) and 1 had no face, so V3 returned no hits, where V1 had passed lookalikes on. Stage 1 took 38 s. Still unknown: whether comparing all 164 results, or more images per person, finds the participant's own pages.
+
 ### 1.2 Image hosting (live only; default changed to a tunnel, see below)
 
-SerpApi's Yandex engine requires an image `url`; it documents no file upload parameter. The URL must be fetchable without our credentials. **Unverified integration:** whether Yandex can fetch this team's presigned S3 URLs. Test that early. `hosting.py`'s S3 route does the following:
+SerpApi's Yandex and Google Lens engines require an image `url`; they document no file upload parameter. V3 hosts only the face crop, the same way. The URL must be fetchable without our credentials. **Unverified integration:** whether Yandex can fetch this team's presigned S3 URLs. Test that early. `hosting.py`'s S3 route does the following:
 
 1. Uploads each image to a private S3 bucket under a random key.
 2. Returns a presigned GET URL that is valid for 10 minutes.
@@ -461,7 +480,7 @@ class ImageHit(BaseModel):
     source: str
     snippet: str = ""
     thumbnail_url: str | None = None
-    face_score: int | None = None  # FaceCheck's 0-100 face match; None for Yandex and the mock
+    face_score: int | None = None  # 0-100: FaceCheck's score or V3's Rekognition similarity; None for Yandex and the mock
 
 class FetchError(BaseModel):
     url: str | None               # None when the search itself failed
@@ -976,10 +995,11 @@ Checked against seed-derived fixtures and real Section 1–4 artifact runs over 
 Today `run` works through every stage registered in `STAGE_RUNNERS` (stages 1–4 are all registered) and exits with code 3 at the first stage that isn't. `stage N --run` re-checks consent, invalidates stage N and later outputs, and reruns stage N. `smoke-search` runs one image through deterministic stage 1 with models off, and `purge` and `set-key` work. `purge` also deletes uploaded images when `AWS_REGION` is set. The rest are commands to implement.
 
 ```bash
-# Save the FaceCheck token once (hidden prompt; checked with the free /api/info call)
-python3 -m pipeline set-key facecheck
-# Or the SerpApi key, for SEARCH_BACKEND=serpapi
+# Backend V3 (default): the SerpApi key and AWS keys plus region (hidden prompts, checked first)
 python3 -m pipeline set-key serpapi
+python3 -m pipeline set-key aws --region us-east-1
+# Or the FaceCheck token, for SEARCH_BACKEND=facecheck (checked with the free /api/info call)
+python3 -m pipeline set-key facecheck
 
 # Mock search, no credits. Start the mock internet in another terminal first.
 python3 -m mock_internet serve
@@ -992,9 +1012,9 @@ python3 -m pipeline stage 2 --run runs/<run_id>
 # Optional paid models with mock search; select modes and keys in .env first
 python3 -m pipeline run --capture tests/fixtures/captures/alex --mock --models
 
-# FaceCheck search (default): consent-bearing manifest with real images
+# Live search (V3 by default): consent-bearing manifest with real images
 python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
-python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1 --backend serpapi
+python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1 --backend facecheck
 python3 -m pipeline run --capture captures/<session_id> --models
 
 # Delete a run's data and any uploaded images
@@ -1022,7 +1042,7 @@ As it runs, `run` prints each of the diagram's views in turn:
 
 `python3 -m unittest discover -s tests -v` is the normal offline suite. Future pipeline tests start their own mock server on a free port, following `tests/test_mock_internet.py`, with mock/fake/off modes forced regardless of `.env`. Patch or reject external connections and model constructors. Tests may inspect synthetic SQLite entity IDs in assertions; the pipeline never receives those IDs.
 
-Keep optional provider smoke checks outside normal discovery. `smoke-search` forces SerpApi and requires external-processing consent; only paid-model smoke checks require `--models`. Unit tests inject 429s, timeouts, malformed SDK answers, failed cleanup, and invalid citations without paid calls. Do not write brittle tests for model wording or exact live probabilities.
+Keep optional provider smoke checks outside normal discovery. `smoke-search` forces a live backend (V3 unless `--backend` says otherwise) and requires external-processing consent; only paid-model smoke checks require `--models`. Unit tests inject 429s, timeouts, malformed SDK answers, failed cleanup, and invalid citations without paid calls. Do not write brittle tests for model wording or exact live probabilities.
 
 Review validation, 2026-10-10: the database persistence test passed. The HTTP suite could not start because the review sandbox blocks sockets (`PermissionError`); it was not rerun successfully here. Direct calls to the existing search handler against the seed in memory confirmed the counts below. Those checks do not replace HTTP integration tests or test the unbuilt pipeline.
 

@@ -14,7 +14,7 @@ from strands.models import Model
 
 from pipeline.capture import load_capture
 from pipeline.contracts import CaptureArtifact
-from pipeline.image_agent import SYSTEM_PROMPT, make_agent_runner
+from pipeline.image_agent import make_agent_runner, system_prompt
 from pipeline.search.mock_backend import MockSearchBackend
 from pipeline.stage1_collect import collect_evidence
 from pipeline.trace import tracing
@@ -151,8 +151,11 @@ class ImageAgentTests(MockServerTestCase):
                 asyncio.run(collect_evidence(live_capture("img-1"), FakeBackend({"img-1": payload}, pages),
                                              agent=make_agent_runner(lambda: model)))
                 self.assertEqual([(hit["url"], hit.get("face_score")) for hit in model.hits], expected)
-        self.assertIn("face_score", SYSTEM_PROMPT)
-        self.assertIn("under 70 as likely lookalikes", SYSTEM_PROMPT)
+        from pipeline.search.facecheck_backend import FaceCheckBackend
+
+        self.assertIn("under 70 as likely lookalikes", system_prompt(FaceCheckBackend))
+        self.assertIn("No hit has a face_score", system_prompt(FakeBackend({}, {})))
+        self.assertNotIn("{", system_prompt(FakeBackend({}, {})))
 
     def test_tools_refuse_urls_outside_the_image(self):
         other_image_hit = "https://photogram.test/alexbuilds"  # img-2's hit, not img-1's

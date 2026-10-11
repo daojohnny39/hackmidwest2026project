@@ -1,7 +1,8 @@
 """CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
 
-Search uses FaceCheck face search unless SEARCH_BACKEND=serpapi picks Yandex through
-SerpApi, or `run --mock` (or SEARCH_BACKEND=mock) picks the local mock internet.
+Search uses backend V3 (SerpApi web search, faces checked by Amazon Rekognition) unless
+SEARCH_BACKEND=facecheck picks FaceCheck face search, SEARCH_BACKEND=serpapi picks Yandex
+alone through SerpApi, or `run --mock` (or SEARCH_BACKEND=mock) picks the local mock internet.
 `set-key {facecheck,serpapi,typesafe,openrouter,anthropic}` prompts for a key with
 hidden input and saves it to .env; FaceCheck, SerpApi and TypeSafe keys are checked first.
 `set-key aws` saves an AWS access key pair to ~/.aws/credentials after a free STS check.
@@ -30,8 +31,8 @@ from pipeline.artifacts import (
 )
 from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_consent
 from pipeline.config import (
-    DEFAULT_SEARCH_BACKEND, LIVE_BACKENDS, REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings,
-    set_env_value,
+    DEFAULT_SEARCH_BACKEND, HOSTED_BACKENDS, LIVE_BACKENDS, REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError,
+    Settings, load_settings, set_env_value,
 )
 from pipeline.contracts import CaptureArtifact
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected, check_typesafe_key
@@ -104,8 +105,8 @@ def settings_for(args: argparse.Namespace, *, backend: str | None = None, scenar
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         settings = settings_for(args, backend="mock" if args.mock else None, scenario=args.scenario)
-        if settings.search_backend == "serpapi" and args.until >= 1:
-            require_hosting(settings)  # before the run folder exists, let alone an upload
+        if args.until >= 1:
+            require_search(settings)  # before the run folder exists, let alone an upload
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
@@ -152,6 +153,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     return run_stages(run_dir, settings, range(1, args.until + 1), refresh=args.refresh)
 
 
+def require_search(settings: Settings) -> None:
+    """Fail on missing image hosting or AWS credentials before a live search would need them."""
+    if settings.search_backend in HOSTED_BACKENDS:
+        require_hosting(settings)
+    if settings.search_backend == "rekognition":
+        from pipeline.search.rekognition_backend import require_rekognition
+
+        require_rekognition(settings)
+
+
 def cmd_stage(args: argparse.Namespace) -> int:
     try:
         run_dir = resolve_run_dir(args.runs_dir, args.run)
@@ -183,12 +194,12 @@ def cmd_stage(args: argparse.Namespace) -> int:
 
 def cmd_smoke_search(args: argparse.Namespace) -> int:
     """One live reverse search on one image (spec 1.1): a stage-0 bundle with only that image,
-    then deterministic stage 1. Never calls a model, so it costs one search: 3 FaceCheck credits
-    (free with FACECHECK_DEMO=true) or one SerpApi search."""
+    then deterministic stage 1. Never calls a model. It costs one SerpApi search per engine plus
+    about $0.001 per Rekognition comparison (V3), 3 FaceCheck credits (free with
+    FACECHECK_DEMO=true), or one SerpApi search (serpapi)."""
     try:
         settings = settings_for(args, backend=args.backend)
-        if args.backend == "serpapi":
-            require_hosting(settings)
+        require_search(settings)
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
@@ -354,7 +365,7 @@ def set_aws_keys(args: argparse.Namespace) -> int:
     path = args.credentials_file or aws_credentials.default_credentials_file()
     replaced = aws_credentials.save_keys(path, key_id, secret)
     print(f"{'Replaced' if replaced else 'Saved'} the [default] profile in {path} "
-          f"(key ending {key_id[-4:]}). S3 hosting and Bedrock read it from there.")
+          f"(key ending {key_id[-4:]}). Rekognition (backend V3), S3 hosting and Bedrock read it from there.")
     if args.region:
         set_env_value(args.env_file, "AWS_REGION", args.region, template=ENV_TEMPLATE)
         print(f"Saved AWS_REGION={args.region} to {args.env_file}")

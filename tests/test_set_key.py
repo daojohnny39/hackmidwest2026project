@@ -52,7 +52,7 @@ class SetEnvValueTests(EnvFileCase):
         set_env_value(self.env_file, "SERPAPI_KEY", KEY, template=REPO_ROOT / ".env.example")
         values = dotenv_values(self.env_file)
         self.assertEqual(values["SERPAPI_KEY"], KEY)
-        self.assertEqual(values["SEARCH_BACKEND"], "facecheck")
+        self.assertEqual(values["SEARCH_BACKEND"], "rekognition")
         self.assertEqual(values["JEV_MODE"], "fake")
 
     def test_new_file_without_template(self):
@@ -164,7 +164,7 @@ class SetKeyCommandTests(EnvFileCase):
         checked.assert_called_once_with(KEY)
         self.assertIn("SerpApi accepted the key: Free Plan, 250 searches left", out)
         self.assertEqual(self.saved(), KEY)
-        self.assertEqual(dotenv_values(self.env_file)["SEARCH_BACKEND"], "facecheck")  # from .env.example
+        self.assertEqual(dotenv_values(self.env_file)["SEARCH_BACKEND"], "rekognition")  # from .env.example
 
     def test_rejected_key_is_not_saved(self):
         code, _, err, _ = self.set_key("serpapi", quota=KeyRejected("HTTP 401"))

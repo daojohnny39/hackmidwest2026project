@@ -130,10 +130,10 @@ class PublicOnlyTransport(httpx.AsyncHTTPTransport):
             max_keepalive_connections=10, keepalive_expiry=5.0, network_backend=PublicOnlyNetwork(resolver))
 
 
-def page_client(resolver=None) -> httpx.AsyncClient:
+def page_client(resolver=None, *, accept: str = ", ".join(HTML_TYPES)) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=PublicOnlyTransport(resolver), follow_redirects=False, trust_env=False,
-        timeout=httpx.Timeout(FETCH_TIMEOUT_S), headers={"User-Agent": USER_AGENT, "Accept": ", ".join(HTML_TYPES)},
+        timeout=httpx.Timeout(FETCH_TIMEOUT_S), headers={"User-Agent": USER_AGENT, "Accept": accept},
         cookies=CookieJar(DefaultCookiePolicy(allowed_domains=[])),  # accepts no cookies
     )
 
@@ -249,16 +249,23 @@ class SerpApiBackend(LivePages):
                 self.cache_hits.discard(image.image_id)
                 trace.error("search_cache_unreadable", exc, image=image.image_id)
         url = await self._hosted_url(image, data)
-        params = {"engine": ENGINE, "url": url, "tab": TAB, "api_key": self.api_key}
+        clean = sanitize(await self._get(image, {"engine": ENGINE, "url": url, "tab": TAB}))
+        metadata = clean.get("search_metadata", {})
+        if cache is not None and metadata.get("status") == "Success" and "error" not in clean:
+            await asyncio.to_thread(_write_json, cache, clean)
+        return clean
+
+    async def _get(self, image: CaptureImage, params: dict) -> dict:
+        """One SerpApi search with these parameters plus the key; returns the raw JSON object."""
         try:
-            response = await self.search_client.get(SERPAPI_URL, params=params)
+            response = await self.search_client.get(SERPAPI_URL, params={**params, "api_key": self.api_key})
         except httpx.TimeoutException:
             raise BackendError("timeout") from None
         except httpx.HTTPError:  # never show the exception: its text can include the request URL and key
             raise BackendError("connection_error") from None
         if response.status_code != 200:
-            trace.error("serpapi_http_error", image=image.image_id, status=response.status_code,
-                        body=response.text[:2000])
+            trace.error("serpapi_http_error", image=image.image_id, engine=params.get("engine"),
+                        status=response.status_code, body=response.text[:2000])
             raise status_error(response.status_code, response.headers)
         try:
             payload = response.json()
@@ -266,11 +273,7 @@ class SerpApiBackend(LivePages):
             raise BackendError("invalid_response") from None
         if not isinstance(payload, dict):
             raise BackendError("invalid_response")
-        clean = sanitize(payload)
-        metadata = clean.get("search_metadata", {})
-        if cache is not None and metadata.get("status") == "Success" and "error" not in clean:
-            await asyncio.to_thread(_write_json, cache, clean)
-        return clean
+        return payload
 
     async def _hosted_url(self, image: CaptureImage, data: bytes) -> str:
         lock = self._hosting_locks.setdefault(image.image_id, asyncio.Lock())
@@ -325,13 +328,11 @@ def _write_json(path: Path, data: dict) -> None:
         raise
 
 
-def build_serpapi_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *, refresh: bool) -> SerpApiBackend:
-    """The live backend for a run: needs SERPAPI_KEY and an image host (IMAGE_HOST, hosting.py).
-    A tunnel host opens here, before any image's deadline starts; if it can't, no search is made."""
+def open_host(settings: Settings, run_dir: Path):
+    """The run's image host (IMAGE_HOST, hosting.py). A tunnel opens here, before any image's
+    deadline starts; if it can't, no search is made."""
     from pipeline.hosting import HostingError, host_for
 
-    if not settings.serpapi_key:
-        raise ConfigError("SERPAPI_KEY is missing; save it with `python -m pipeline set-key serpapi`, or pass --mock")
     host = host_for(settings, run_dir)
     if hasattr(host, "start"):
         try:
@@ -339,5 +340,13 @@ def build_serpapi_backend(settings: Settings, capture: CaptureArtifact, run_dir:
         except HostingError as error:
             raise ConfigError(f"couldn't open the image tunnel ({error}); check the network and retry with "
                               "`stage 1 --run <run>`, set IMAGE_HOST=s3, or pass --mock") from None
-    return SerpApiBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir), host=host,
-                          cache_dir=Path(run_dir) / "cache" / "serpapi", refresh=refresh)
+    return host
+
+
+def build_serpapi_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *, refresh: bool) -> SerpApiBackend:
+    """The live backend for a run: needs SERPAPI_KEY and an image host (IMAGE_HOST, hosting.py)."""
+    if not settings.serpapi_key:
+        raise ConfigError("SERPAPI_KEY is missing; save it with `python -m pipeline set-key serpapi`, or pass --mock")
+    return SerpApiBackend(api_key=settings.serpapi_key, capture_dir=Path(capture.capture_dir),
+                          host=open_host(settings, run_dir), cache_dir=Path(run_dir) / "cache" / "serpapi",
+                          refresh=refresh)

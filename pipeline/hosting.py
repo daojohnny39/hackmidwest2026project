@@ -1,6 +1,7 @@
-"""Short-lived image hosting for SerpApi's Yandex engine (spec 1.2; live only).
+"""Short-lived image hosting for SerpApi searches (spec 1.2; live only): Yandex alone (V1)
+and the face crop backend V3 searches with Yandex and Google Lens.
 
-Yandex needs a public image URL and SerpApi documents no upload parameter.
+Both engines need a public image URL and SerpApi documents no upload parameter.
 IMAGE_HOST picks how each image gets one:
 
 - tunnel (default): a loopback-only HTTP server on this machine, reached through a
@@ -340,13 +341,13 @@ def require_hosting(settings) -> None:
     """Fail before any upload when image hosting isn't configured."""
     if settings.image_host == "s3":
         if not settings.image_bucket or not settings.aws_region:
-            raise ConfigError("IMAGE_HOST=s3 hosts each image briefly in S3 so Yandex can fetch it; "
+            raise ConfigError("IMAGE_HOST=s3 hosts each image briefly in S3 so the search engine can fetch it; "
                               "set IMAGE_BUCKET and AWS_REGION (and AWS credentials) in .env, "
                               "use IMAGE_HOST=tunnel, or pass --mock")
     elif find_ssh() is None:
         raise ConfigError("IMAGE_HOST=tunnel serves each image briefly through a localhost.run SSH tunnel so "
-                          "Yandex can fetch it, and needs the ssh program (sudo apt install openssh-client); "
-                          "or set IMAGE_HOST=s3, or pass --mock")
+                          "the search engine can fetch it, and needs the ssh program "
+                          "(sudo apt install openssh-client); or set IMAGE_HOST=s3, or pass --mock")
 
 
 def host_for(settings, run_dir: Path) -> S3ImageHost | TunnelImageHost:

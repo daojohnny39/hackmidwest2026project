@@ -248,7 +248,7 @@ def verify(
 ) -> VerificationResult:
     """Score every candidate and accept at most one (3.2).
 
-    `jev` is None for JEV_MODE=off. `live` is true for a live (FaceCheck or SerpApi) run, where a
+    `jev` is None for JEV_MODE=off. `live` is true for a live (any non-mock backend) run, where a
     fallback result needs human review instead of an automatic match.
     """
     validate_references(raw=raw, profiles=profiles)
