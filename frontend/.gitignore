@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Copied from the downloaded model and installed MediaPipe package.
+/public/mediapipe/
+/test-results/
+/playwright-report/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
