@@ -15,3 +15,6 @@ data/*.sqlite3*
 /runs/
 /cache/
 /traces/
+
+# Face photos for the Rekognition gallery and its local index (face_gallery.py).
+/gallery/
