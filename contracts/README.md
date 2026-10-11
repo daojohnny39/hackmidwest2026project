@@ -3,8 +3,8 @@
 The shared contracts, [private image-byte storage](../docs/member-3-storage.md),
 and [Stage A image processing](../docs/member-3-stage-a.md) are implemented.
 [Stage B](../docs/member-3-stage-b.md) adds Jev classification and prioritization;
-live provider acceptance is pending credentials. HTTP endpoints and the Strands
-tool remain Stage C work.
+live provider acceptance is pending credentials. [Stage C](../docs/member-3-stage-c.md)
+implements the combined callable, HTTP endpoints, Strands tool and evaluation runner.
 The defaults below are the implementation baseline for integration, pending
 teammate integration. They do not change the existing front-camera contract.
 
@@ -74,8 +74,8 @@ records the returned model and rubric version plus optional `sdkVersion`.
 ## Image transfer and storage defaults
 
 Member 2 retrieves external images. The backend can now use `LocalAssetStore.put`
-to store bytes and pass the returned opaque `assetId` to Member 3; HTTP upload
-is a later adapter. Candidate JSON
+to store bytes and pass the returned opaque `assetId` to Member 3, or use the
+authenticated HTTP upload route below. Candidate JSON
 contains no base64 image, local path or download instruction. Hashes used for
 deduplication are computed from stored bytes, not accepted from caller metadata.
 
@@ -86,7 +86,7 @@ deduplication are computed from stored bytes, not accepted from caller metadata.
 | Lifetime and quota | 24 hours; 512 MiB total asset payload quota (SQLite overhead is additional) |
 | Image limits | Still JPEG/PNG, up to 10 MiB, 20 million decoded pixels, 10,000 px per side |
 | Crops | Up to two padded 256 × 256 JPEG assets; originals remain immutable |
-| Batch execution | At most 20 candidates, sequential vision work; Stage B enforces its 120-second deadline, and Stage C will enforce the combined batch budget |
+| Batch execution | At most 20 candidates, sequential vision work; Stage C enforces a combined 120-second processing deadline; safe cancellation cleanup can add latency |
 | Jev execution | 10-second total deadline per candidate, at most one retry |
 
 The initial store is for local integration. Member 1 supplies production storage
@@ -94,10 +94,10 @@ and authentication bindings. Asset IDs do not themselves grant access. Request
 payloads cannot select another caller's scope. Jev receives bounded text context,
 not image pixels, crops or asset access tokens.
 
-## HTTP adapter defaults for Section 6
+## HTTP adapter
 
-These routes are reserved for the forthcoming optional FastAPI adapter; they are
-not available in Section 1. Member 1 can also call the Python module directly.
+These routes are implemented by the optional `candidate_processing.http_adapter`.
+Member 1 can also call `candidate_processing.pipeline.analyze_candidates` directly.
 
 | Route | Request / response |
 | --- | --- |
@@ -106,8 +106,14 @@ not available in Section 1. Member 1 can also call the Python module directly.
 | `DELETE /api/v1/assets/{assetId}` | Deletes an authorized asset |
 | `POST /api/v1/candidates/analyze` | JSON `CandidateBatch`; returns JSON `BatchResult` within the request |
 
-The local HTTP adapter will require `Authorization: Bearer <FACETRACE_API_TOKEN>`
-and obtain asset scope from its backend configuration/authentication integration.
+The local HTTP adapter requires `Authorization: Bearer <FACETRACE_API_TOKEN>`
+(at least 32 characters) and obtains its single caller's scope from
+`FACETRACE_ASSET_SCOPE` or explicit backend configuration. Scope is never taken
+from candidate JSON or query parameters. Upload MIME is verified by the isolated
+decoder. Unauthorized bodies are rejected before parsing; multipart and JSON
+bodies are bounded even without Content-Length. Upload `expiresAt` is a Unix
+timestamp in seconds. Missing/expired/unauthorized asset reads return 404;
+invalid inputs return 422, oversized requests 413, and quota failures 507.
 Investigation creation, camera uploads, job polling, discovery and threat
 assessment remain Member 1/2/4 integration work.
 
@@ -115,8 +121,8 @@ assessment remain Member 1/2/4 integration work.
 
 `requirements-member3.txt` pins the Python dependencies for the module;
 it includes the existing camera/checkpoint requirements. `.env.example` documents
-server-side configuration. No dotenv loader or HTTP service is implemented;
-export variables in the server process when using Jev. Contract checks need no
+server-side configuration. This module does not load dotenv files;
+export variables in the server process when using Jev or the HTTP service. Contract checks need no
 credentials, camera, downloaded model or external requests.
 
 From the repository root:

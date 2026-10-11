@@ -5,7 +5,7 @@ test('real local VIDEO model rejects the no-face camera and explains prolonged f
   const errors: string[] = []
   page.on('request', (r) => requests.push({ url: r.url(), method: r.method() }))
   page.on('pageerror', (e) => errors.push(e.message))
-  await page.goto('/')
+  await page.goto('/?mode=front')
   await expect(page.getByRole('button', { name: 'Take photo' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Start camera' }).click()
   await expect(page.getByRole('status')).toHaveText('Move your face into view.', { timeout: 60_000 })
@@ -27,7 +27,7 @@ test('real local VIDEO model rejects the no-face camera and explains prolonged f
 
 test('automatic capture recovers from local model loading failure', async ({ page }) => {
   await page.route('**/face_landmarker.task', (route) => route.abort())
-  await page.goto('/')
+  await page.goto('/?mode=front')
   await page.getByRole('button', { name: 'Start camera' }).click()
   await expect(page.getByRole('status')).toContainText('Face analysis could not load', { timeout: 60_000 })
   expect(await page.locator('video').evaluate((v: HTMLVideoElement) => v.srcObject)).toBeNull()
@@ -41,7 +41,7 @@ test('stop during local model loading cannot rearm capture', async ({ page }) =>
   const pending = new Promise<void>((r) => { release = r })
   const request = new Promise<void>((r) => { requested = r })
   await page.route('**/face_landmarker.task', async (route) => { requested(); await pending; await route.continue() })
-  await page.goto('/')
+  await page.goto('/?mode=front')
   await page.getByRole('button', { name: 'Start camera' }).click()
   await request
   await page.getByRole('button', { name: 'Stop camera' }).click()

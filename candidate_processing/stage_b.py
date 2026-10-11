@@ -79,12 +79,13 @@ def _duplicate_key(candidate: CandidateInput, analyzed: AnalyzedCandidate) -> st
 
 
 async def classify_analyzed_batch(batch: CandidateBatch, analyzed_results: list[AnalyzedCandidate],
-                                 provider: JevProvider, *, deadline_seconds: float = BATCH_DEADLINE_SECONDS) -> BatchResult:
+                                 provider: JevProvider, *, deadline_seconds: float = BATCH_DEADLINE_SECONDS,
+                                 _deadline_at: float | None = None) -> BatchResult:
     """Run Stage B on trusted backend Stage A results in the original input order.
 
     This is not an HTTP boundary: callers must never accept image measurements
-    or hashes from client JSON. Stage C will own combined vision orchestration,
-    exact-image analysis reuse, transport and the Strands wrapper.
+    or hashes from client JSON. Stage C's callable owns combined vision
+    orchestration, exact-image reuse and the absolute shared deadline.
     """
     if (isinstance(deadline_seconds, bool) or not isinstance(deadline_seconds, (int, float))
             or not math.isfinite(deadline_seconds) or not 0 < deadline_seconds <= BATCH_DEADLINE_SECONDS):
@@ -104,6 +105,8 @@ async def classify_analyzed_batch(batch: CandidateBatch, analyzed_results: list[
 
     results, cache = [], {}
     deadline = asyncio.get_running_loop().time() + deadline_seconds
+    if _deadline_at is not None:
+        deadline = min(deadline, _deadline_at)
     for candidate in batch.candidates:
         analyzed = by_id[candidate.id]
         key = _duplicate_key(candidate, analyzed)

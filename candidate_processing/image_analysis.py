@@ -79,39 +79,46 @@ class IsolatedImageAnalyzer(IsolatedImageValidator):
             report = ImageProcessingResult(analysis=ImageAnalysis(status=loaded.status, valid=loaded.valid), errors=[loaded.error])
         else:
             report = await self.analyze(loaded)
-        crops = []
-        try:
-            for crop in report.crops:
-                pending = asyncio.create_task(asyncio.to_thread(store.put, base64.b64decode(crop.jpeg), scope=scope, mime_type="image/jpeg"))
+        return await save_image_analysis(candidate, report, store, scope=scope)
+
+
+async def save_image_analysis(candidate: CandidateInput, report: ImageProcessingResult,
+                              store: LocalAssetStore, *, scope: str) -> AnalyzedCandidate:
+    """Persist separately owned crops and attach original candidate provenance."""
+    report = report.model_copy(deep=True)
+    crops = []
+    try:
+        for crop in report.crops:
+            pending = asyncio.create_task(asyncio.to_thread(store.put, base64.b64decode(crop.jpeg), scope=scope, mime_type="image/jpeg"))
+            try:
+                asset = await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                # A cancelled caller still owns cleanup of a completed
+                # thread write; don't leave an unreferenced crop behind.
                 try:
-                    asset = await asyncio.shield(pending)
-                except asyncio.CancelledError:
-                    # A cancelled caller still owns cleanup of a completed
-                    # thread write; don't leave an unreferenced crop behind.
-                    try:
-                        asset = await pending
-                    except (OSError, sqlite3.Error, StorageFull, ValueError):
-                        pass
-                    else:
-                        await asyncio.to_thread(store.delete, asset.id, scope=scope)
-                    raise
-                crops.append(FaceCrop(assetId=asset.id, faceIndex=crop.face_index, box=crop.box))
-        except asyncio.CancelledError:
-            for saved in crops:
-                try:
-                    await asyncio.to_thread(store.delete, saved.asset_id, scope=scope)
-                except AssetNotFound:
+                    asset = await pending
+                except (OSError, sqlite3.Error, StorageFull, ValueError):
                     pass
-            raise
-        except (OSError, sqlite3.Error, StorageFull, ValueError):
-            report.errors.append(Failure(stage="storage", code="crop_storage_failed", message="A face crop could not be stored."))
-        analysis = ImageAnalysis.model_validate({**report.analysis.model_dump(), "crops": crops})
-        review_reasons = list(dict.fromkeys([
-            "classification_not_assessed", *analysis.flags, *[error.code for error in report.errors],
-        ]))
-        return AnalyzedCandidate(
-            id=candidate.id, sourceId=candidate.source_id, imageUrl=candidate.image_url, sourceUrl=candidate.source_url,
-            assetId=candidate.image.asset_id, imageAnalysis=analysis, errors=report.errors,
-            classification=Classification(reasons=[Evidence(code="classification_not_assessed", message="Context classification belongs to Stage B.", method="operational")]),
-            reviewRequired=True, reviewReasons=review_reasons,
-        )
+                else:
+                    await asyncio.to_thread(store.delete, asset.id, scope=scope)
+                raise
+            crops.append(FaceCrop(assetId=asset.id, faceIndex=crop.face_index, box=crop.box))
+    except asyncio.CancelledError:
+        for saved in crops:
+            try:
+                await asyncio.to_thread(store.delete, saved.asset_id, scope=scope)
+            except AssetNotFound:
+                pass
+        raise
+    except (OSError, sqlite3.Error, StorageFull, ValueError):
+        report.errors.append(Failure(stage="storage", code="crop_storage_failed", message="A face crop could not be stored."))
+    analysis = ImageAnalysis.model_validate({**report.analysis.model_dump(), "crops": crops})
+    review_reasons = list(dict.fromkeys([
+        "classification_not_assessed", *analysis.flags, *[error.code for error in report.errors],
+    ]))
+    return AnalyzedCandidate(
+        id=candidate.id, sourceId=candidate.source_id, imageUrl=candidate.image_url, sourceUrl=candidate.source_url,
+        assetId=candidate.image.asset_id, imageAnalysis=analysis, errors=report.errors,
+        classification=Classification(reasons=[Evidence(code="classification_not_assessed", message="Context classification belongs to Stage B.", method="operational")]),
+        reviewRequired=True, reviewReasons=review_reasons,
+    )
