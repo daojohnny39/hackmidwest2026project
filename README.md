@@ -8,9 +8,12 @@ faces using the existing MediaPipe code, stores normalized crops and returns
 quality/review flags with source provenance. [Stage B](docs/member-3-stage-b.md)
 adds server-side Jev contextual relevance, source categories, duplicate-record
 reuse and stable ordering while preserving uncertain results for review.
-See the [Stage A guide](docs/member-3-stage-a.md) and Stage B guide for usage,
-verification and commit instructions. Live Jev acceptance needs a server-side
-`TYPESAFE_API_KEY`; HTTP/Strands integration and labeled evaluation remain Stage C.
+[Stage C](docs/member-3-stage-c.md) connects both stages through one callable,
+an authenticated local FastAPI adapter and a Strands tool, with a combined batch
+deadline and exact-image analysis reuse. Its evaluation runner includes 40
+synthetic cases, provisional labels and an explicitly mocked offline report.
+Live Jev acceptance needs a server-side `TYPESAFE_API_KEY`; human label review
+and live accuracy evaluation remain outstanding.
 Quality thresholds are provisional; authorized real-photo acceptance is pending.
 
 ## Front-facing automatic capture
