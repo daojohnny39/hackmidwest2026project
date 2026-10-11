@@ -1,3 +1,21 @@
+# Agent pipeline dependencies (Python 3.12). The mock internet needs only the
+# standard library. Pinned 2026-10-10 after a clean install and an import-only
+# SDK smoke check. Model and AWS clients are imported lazily by the pipeline.
+pydantic==2.14.0
+httpx==0.28.1
+beautifulsoup4==4.15.0
+pillow==12.3.0
+python-dotenv==1.2.4
+
+# Strands agents with the Anthropic provider; BedrockModel uses boto3.
+strands-agents[anthropic]==1.59.0
+# Direct TypeSafe Jev route (TypeSafeClient, Noul, Choice, Score).
+typesafe-sdk==0.7.4
+# S3 image hosting for live search, and Bedrock.
+boto3==1.43.111
+
+# Capture-side image processing (ba-opencv, PR #2).
+# Use only the contrib variant: MediaPipe requires it, and OpenCV variants share cv2.
 opencv-contrib-python==5.0.0.93
 numpy==2.5.3
 mediapipe==1.1.0

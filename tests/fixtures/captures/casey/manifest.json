@@ -1,0 +1,13 @@
+{
+  "session_id": "mock-casey",
+  "captured_at": "2026-10-10T14:15:30Z",
+  "consent": {
+    "confirmed": true,
+    "participant": "Casey Brooks (fictional)",
+    "confirmed_at": "2026-10-10T14:15:02Z",
+    "external_processing": true
+  },
+  "images": [
+    { "image_id": "img-1", "angle": "front", "mock_fixture": "casey-front" }
+  ]
+}
