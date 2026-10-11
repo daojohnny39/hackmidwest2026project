@@ -34,9 +34,16 @@ def analyze_image(
 ) -> tuple[np.ndarray, vision.FaceLandmarkerResult]:
     """Prepare an image with OpenCV and analyze it using an existing detector."""
     bgr = decode_image(image_bytes)
+    return bgr, analyze_bgr(bgr, landmarker)
+
+
+def analyze_bgr(
+    bgr: np.ndarray, landmarker: vision.FaceLandmarker
+) -> vision.FaceLandmarkerResult:
+    """Analyze already decoded BGR pixels without changing the source array."""
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    return bgr, landmarker.detect(image)
+    return landmarker.detect(image)
 
 
 def draw_landmarks(
