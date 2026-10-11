@@ -31,7 +31,7 @@ function About() {
     <div className="page-intro"><h1>How it works</h1><p>No account needed.</p></div>
     <div className="process-grid">{[
       ['01', 'Consent', 'Agree before opening your camera.', 'shield'],
-      ['02', 'Capture', 'Take up to six photos. Check facial landmarks locally.', 'camera'],
+      ['02', 'Capture', 'Capture one reference photo automatically, or choose manual capture.', 'camera'],
       ['03', 'Review', 'Explore sample results. Live search is not connected.', 'globe'],
     ].map(([number, title, body, icon]) => <article className="process-card" key={number}><div className="process-top"><span>{number}</span><Icon name={icon} /></div><h2>{title}</h2><p>{body}</p></article>)}</div>
     <section className="principles"><div className="principles-art"><Orbit /></div><div><h2>Your privacy</h2>

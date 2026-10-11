@@ -70,7 +70,7 @@ test('captured reference enables a preview even if optional landmark analysis fa
   await page.route('**/face_landmarker.task', route => route.abort())
   const uploads: string[] = []
   page.on('request', request => { if (request.method() === 'POST' && new URL(request.url()).pathname.startsWith('/api/')) uploads.push(request.url()) })
-  await page.goto('/')
+  await page.goto('/?capture=manual')
   await page.getByRole('button', { name: 'Open camera', exact: true }).click()
   await page.getByRole('dialog').getByRole('checkbox').check()
   await page.getByRole('button', { name: 'Agree & open camera', exact: true }).click()

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Snapshot } from './Studio'
+import type { Snapshot } from './ManualStudio'
 
 export function PhotoReview({ photo, number, busy, onRetry }: { photo: Snapshot; number: number; busy: boolean; onRetry: () => void }) {
   const [showLandmarks, setShowLandmarks] = useState(true)

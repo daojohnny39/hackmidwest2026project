@@ -336,3 +336,28 @@ label > .field-hint { margin-left: 5px; }
 @media (max-width: 760px) { .workspace-grid { grid-template-columns: 1fr; } .results-panel { min-height: 0; } .capture-column { gap: 18px; } .optional-fields { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 430px) { .subject-form { padding: 18px 16px; } .optional-fields { grid-template-columns: 1fr; } .findings-content { padding: 18px 16px; } .studio-intro h1 { max-width: 330px; } .wordmark { font-size: 24px; } }
 @media (max-width: 359px) { .wordmark .brand-mark { display: none; } .site-header nav a { padding: 9px 8px; } }
+
+.capture-mode { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 22px; }
+.capture-mode > span { font-size: 14px; }
+.capture-mode .button { padding: 10px 14px; }
+.capture-mode [aria-pressed='true'] { background: var(--light-green); border-color: var(--green); }
+.capture-mode small { color: var(--muted); font-size: 12px; }
+.photo-slots.single-photo { grid-template-columns: minmax(0, 160px); }
+.single-photo .photo-slot { height: 100px; }
+.automatic-studio { --text-muted: var(--muted); --border: var(--line); --accent: var(--green); padding: 20px; }
+.automatic-studio .capture-view { display: flex; flex-direction: column; gap: 16px; }
+.automatic-studio .intro { font-size: 14px; color: var(--muted); line-height: 1.5; }
+.automatic-studio .stage { position: relative; display: flex; background: #26322b; color: white; border-radius: 6px; overflow: hidden; }
+.automatic-studio .stage[hidden] { display: none; }
+.automatic-studio .stage video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.automatic-studio .placeholder { position: absolute; inset: 0; display: grid; place-items: center; }
+.automatic-studio .controls, .automatic-studio .snapshot-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.automatic-studio .controls button, .automatic-studio .controls select, .automatic-studio .snapshot-actions > *, .automatic-studio .diagnostics button { font: inherit; font-size: 14px; padding: 10px 14px; min-height: 44px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink); }
+.automatic-studio .controls .primary { background: var(--light-green); border-color: var(--green); }
+.automatic-studio .controls select { max-width: 100%; }
+.automatic-studio .error { color: var(--red); }
+.automatic-studio .front-result img { max-height: 320px; }
+.automatic-studio .front-result p, .automatic-studio .diagnostics p, .automatic-studio .diagnostics li { font-size: 13px; line-height: 1.5; }
+.automatic-studio .diagnostics p { margin: 10px 0; }
+.automatic-studio .diagnostics ul { padding-left: 18px; }
+@media (max-width: 430px) { .automatic-studio { padding: 16px; } .capture-mode small { flex-basis: 100%; } }
