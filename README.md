@@ -1,4 +1,5 @@
-# hackmidwest2026project
+# CyberPI
+*Your private investigator for personal information.*
 
 ## Member 3: candidate image processing
 
@@ -36,48 +37,83 @@ to the AWS Strands workflow. No upload or AWS execution is implemented.
 
 ## OpenCV and MediaPipe setup
 
-Run from the project root using Python 3.13:
+CyberPI helps users investigate where their likeness appears online and what
+that exposure could mean for their personal information.
+
+The project's goal is to let a user take a picture with the camera built into
+the web application, use facial recognition to find public images of that user,
+label the certainty of each match, and assess the **Threat Level** of where each
+image was found. Potential concerns include sketchy websites, impersonation,
+and possible catfishing.
+
+## Intended workflow
+
+1. **Capture a photo:** take a picture of yourself using the in-app camera.
+2. **Find public images:** search for publicly accessible images that may show you
+   using facial recognition.
+3. **Review match certainty:** label how confidently each result matches your face.
+4. **Assess the Threat Level:** evaluate the source and context of each result for
+   signs of suspicious use, including possible catfishing or impersonation.
+
+Match certainty and Threat Level answer different questions: how likely the
+image is to show you, and how concerning its appearance on that site may be.
+
+## Current implementation
+
+The repository currently implements the camera and local face-analysis foundation:
+
+- Browser camera access, camera switching, and photo capture.
+- MediaPipe Face Landmarker analysis of each captured photo, including face
+  counts, facial landmarks, and transformation matrices.
+- A landmark overlay and downloads for the original photo, overlay, and analysis JSON.
+- Separate Python tools for initializing the detector and analyzing a local photo.
+
+Public-image search, facial identity matching, match-certainty labels, and Threat
+Level assessment are planned features. The existing landmark detector locates
+facial geometry; it does not identify a person or search the web.
+
+Current browser analysis runs on the user's device. Captured photos stay in
+browser memory until deleted or the page is closed, and analysis does not upload
+them. The web app currently runs without a Python backend or API credentials.
+
+## Technologies used
+
+| Technology | Role |
+| --- | --- |
+| React 19 + TypeScript | Web application and camera interface |
+| Vite 8 | Frontend development server and production builds |
+| Browser MediaDevices API + Canvas | Camera streams, photo capture, and overlays |
+| MediaPipe Tasks Vision + WebAssembly | Local facial-landmark analysis in the browser |
+| Python + MediaPipe | Standalone detector and photo-analysis tools |
+| OpenCV (`opencv-contrib-python`) + NumPy | Image decoding, color conversion, and landmark overlays in Python |
+| Playwright | Browser integration tests with simulated camera inputs |
+| Oxlint + Python `unittest` | Frontend linting and Python tests |
+
+## Run a development environment
+
+Run the setup commands from the repository root unless indicated otherwise.
+The commands below use a macOS/Linux shell.
+
+### Step 1: Prerequisites
+
+- Node.js **20.19+ in the 20.x line, or 22.12+**, with npm, as required by the
+  installed Vite version.
+- A browser and a camera for the interactive capture flow.
+- `curl` for the model download, or download the file manually from the URL below.
+- Python **3.12+ (tested on Python 3.12)** if you want to use the optional Python tools.
+
+### Step 2: Install frontend dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+cd frontend
+npm ci
+cd ..
 ```
 
-On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`.
+### Step 3: Download the Face Landmarker model
 
-MediaPipe requires `opencv-contrib-python`, which includes OpenCV's main and
-extra modules. It still imports as `cv2`. Use only this OpenCV package in the
-environment because the OpenCV variants share the same Python module.
-
-If you already installed the previous `opencv-python` requirements, activate
-that environment and migrate it with:
-
-```bash
-python -m pip uninstall -y opencv-python opencv-contrib-python
-python -m pip install -r requirements.txt
-```
-
-Removing both variants first also repairs environments where both were installed.
-
-Verify the installed packages:
-
-```bash
-python -c "import cv2, mediapipe as mp; print('OpenCV:', cv2.__version__); print('MediaPipe:', mp.__version__)"
-python -m pip check
-```
-
-These setup commands install the libraries only. Download the separate Face
-Landmarker model bundle below before initializing the detector.
-
-## Step 3: Download the Face Landmarker model
-
-Use Google's official float16 FaceLandmarker bundle from the
-[Face Landmarker model page](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker#models).
-The Python package provides the API; the `.task` file contains the trained models
-that run locally.
-
-Run from the project root (macOS/Linux):
+Both the web app and Python tools use `models/face_landmarker.task`. The model is
+excluded from Git and must be downloaded after cloning:
 
 ```bash
 mkdir -p models
@@ -87,115 +123,91 @@ curl --fail --location --retry 3 \
   && mv models/face_landmarker.task.part models/face_landmarker.task
 ```
 
-Alternatively, download the **FaceLandmarker** bundle from the model page and
-save it as `models/face_landmarker.task`.
+Alternatively, download that URL in your browser and save the file as
+`models/face_landmarker.task` in the repository root.
 
-Downloaded and verified on October 10, 2026:
-
-- Local path: `models/face_landmarker.task`
-- Size: 3,758,596 bytes (about 3.76 MB)
-- SHA-256: `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`
-- Verification: checksum matched Google Storage's MD5 metadata; archive integrity
-  and the three included TFLite model headers passed checks.
-
-To check your download against this recorded SHA-256:
+### Step 4: Start the web app
 
 ```bash
-python -c "from pathlib import Path; import hashlib; print(hashlib.sha256(Path('models/face_landmarker.task').read_bytes()).hexdigest())"
+cd frontend
+npm run dev
 ```
 
-The source URL uses `latest`, so a future Google update may change the size and
-checksum. Downloaded `.task` files and incomplete `.task.part` downloads are
-excluded from Git; each developer needs to download the model after cloning.
+Open the URL printed by Vite (normally `http://localhost:5173`). Click **Start
+camera**, allow camera access, then click **Take photo** to see the face count
+and landmark overlay. You can compare the original photo, download the results,
+or delete a snapshot.
 
-## Step 4: Initialize the Face Landmarker
+The development and build scripts automatically copy the model and MediaPipe
+WebAssembly files into `frontend/public/mediapipe/`. Production builds include
+these assets, so analysis does not need a CDN at runtime.
 
-With the virtual environment activated, run from the project root:
+Camera access requires a secure browser context. `localhost` works for local
+development; testing from a phone or another device requires serving the app
+over HTTPS. See the [frontend README](frontend/README.md) for camera details and
+additional browser-test instructions.
+
+## Optional Python development tools
+
+From the repository root, confirm that `python3 --version` reports Python 3.12
+or newer, then create a virtual environment and install the pinned dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+On Windows PowerShell, confirm the version with `py -3 --version`, create the
+environment with `py -3 -m venv .venv`, and activate it with
+`.venv\Scripts\Activate.ps1`.
+
+Use only `opencv-contrib-python` in this environment; the other OpenCV package
+variants share its `cv2` module. If migrating an environment with an older
+`opencv-python` installation, uninstall both variants and reinstall the requirements:
+
+```bash
+python -m pip uninstall -y opencv-python opencv-contrib-python
+python -m pip install -r requirements.txt
+```
+
+With the model downloaded in Step 3, verify detector initialization:
 
 ```bash
 python -m face_landmarker
 ```
 
-This loads the downloaded model, reports successful initialization, and closes
-the detector. It does not open the camera or analyze a photo.
-
-[`face_landmarker.py`](face_landmarker.py) exposes `create_face_landmarker()` with
-these settings:
-
-| Setting | Value |
-| --- | --- |
-| Model | `models/face_landmarker.task`, resolved relative to the Python file |
-| Delegate | CPU (local processing) |
-| Running mode | `IMAGE`, for independent photos |
-| Maximum faces | `2`, so later processing can reject multiple detected faces |
-| Facial transformation matrices | Enabled for later head-angle estimation |
-| Blendshapes | Disabled |
-
-The settings and context-manager lifecycle follow the
-[MediaPipe Python guide](https://developers.google.com/edge/mediapipe/solutions/vision/face_landmarker/python).
-To use the detector in subsequent processing:
-
-```python
-from face_landmarker import create_face_landmarker
-
-with create_face_landmarker() as landmarker:
-    # Reuse this instance for sequential photo requests (Step 5).
-    pass
-```
-
-Create it once at application startup, reuse it for requests one at a time, and
-close it during shutdown. Exiting the `with` block closes it even if processing
-raises an exception. If managing its lifetime directly, call `landmarker.close()`
-in a `finally` block. Importing the module does not initialize a detector.
-
-For a different local model location, pass a path to `create_face_landmarker(path)`
-or run `python -m face_landmarker --model /path/to/face_landmarker.task`.
-A missing model reports its resolved path and directs you to Step 3.
-
-## Step 5 checkpoint: Analyze your photo
-
-Use a JPEG or PNG of yourself or another consenting participant. With the
-virtual environment activated, run from the project root:
+Analyze a local JPEG or PNG:
 
 ```bash
 python -m photo_checkpoint "/absolute/path/to/your/photo.jpg"
 ```
 
-The command reads the photo with OpenCV, converts BGR pixels to RGB, and runs the
-local Face Landmarker. It prints the detected face count, landmark counts, and
-number of transformation matrices. Your source photo stays unchanged.
+Each run writes a landmark overlay (`landmarks.png`) and an analysis report
+(`results.json`) into a new `checkpoints/photo-.../` directory. The report includes
+image dimensions, face counts, landmarks, and transformation matrices. The
+detector processes individual images on the CPU and returns at most two faces.
+The `checkpoints/`, `photos/`, and downloaded model files are ignored by Git.
 
-Each run creates a separate `checkpoints/photo-.../` directory containing:
+## Build and validation
 
-- `landmarks.png`: a copy of the photo with landmark points drawn on each face.
-- `results.json`: image dimensions, face count, normalized landmark coordinates,
-  and facial transformation matrices.
-
-Open the overlay to check that the points line up with the eyes, nose, mouth,
-and face outline. For a single-person photo, the checkpoint passes when one face
-is detected and its landmarks align visually. Zero faces means detection did
-not succeed for that photo; try clearer lighting or a larger face. The detector
-returns at most two faces, so its count is capped at two.
-
-Processing runs locally. The default `checkpoints/` output directory and the
-optional `photos/` input directory are ignored by Git. You can also keep your
-photo outside the repository. To choose another output parent directory, add
-`--output-dir /path/to/output`; results there are not covered by these ignore rules.
-
-`photo_checkpoint.analyze_image(image_bytes, landmarker)` can reuse the detector
-from Step 4 for subsequent images. This checkpoint produces geometry only;
-head-angle calculations are a later step.
-
-## Connect the browser camera
-
-The teammate's camera UI now analyzes each captured photo directly in the browser
-using MediaPipe's JavaScript/WebAssembly runtime and the downloaded model. The
-Python checkpoint above remains a separate local verification tool.
+From `frontend/`:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+npm run lint
+npm run build
+npm run preview
+```
+
+The build runs TypeScript checks and writes the production app to `frontend/dist/`.
+The preview command serves that build locally.
+
+To run browser tests, install the Playwright engines and select a project:
+
+```bash
+npx playwright install firefox webkit
+npm test -- --project=firefox
+npm test -- --project=webkit
 ```
 
 Open the local Vite URL and choose **Start camera**. Follow the guidance; the
@@ -208,16 +220,21 @@ browser tests. This connection requires no Python endpoint or Vite API proxy.
 
 ## Run the tests
 
-With the virtual environment activated:
+From the repository root, with the Python environment activated:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-The OpenCV tests check BGR-to-RGB color conversion and JPEG saving and loading
-using synthetic images. Detector and checkpoint tests cover missing models,
-invalid images, RGB input, landmark overlays, detector reuse, and saved results.
-Tests that run the real detector require the downloaded model and are skipped
-when it is absent. All tests use Python's built-in `unittest` module and require
-no camera, personal photos, or additional testing package. Temporary images are
-automatically deleted after the test.
+Tests that use the real Python detector are skipped if the model is absent.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `frontend/` | React app, camera hook, browser face analysis, and Playwright tests |
+| `face_landmarker.py` | Reusable Python detector setup and initialization check |
+| `photo_checkpoint.py` | Local photo analysis, landmark overlay, and JSON export |
+| `requirements.txt` | Pinned Python dependencies |
+| `tests/` | Python image-processing and detector tests |
+| `models/` | Downloaded Face Landmarker model (ignored by Git) |

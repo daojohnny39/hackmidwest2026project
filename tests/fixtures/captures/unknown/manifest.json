@@ -1,0 +1,13 @@
+{
+  "session_id": "mock-unknown",
+  "captured_at": "2026-10-10T14:20:45Z",
+  "consent": {
+    "confirmed": true,
+    "participant": "Unlisted Person (fictional)",
+    "confirmed_at": "2026-10-10T14:20:20Z",
+    "external_processing": true
+  },
+  "images": [
+    { "image_id": "img-1", "angle": "front", "mock_fixture": "unknown" }
+  ]
+}
