@@ -4,11 +4,13 @@
 
 Stage A's backend module validates retrieved JPEG/PNG images, detects up to two
 faces using the existing MediaPipe code, stores normalized crops and returns
-quality/review flags with source provenance. See the
-[Stage A guide](docs/member-3-stage-a.md) for usage and verification, and the
-[combined commit guide](docs/member-3-commit-sections.md) for the review checkpoint.
-Jev classification and HTTP/Strands adapters are later work. Quality thresholds
-are provisional; authorized real-photo acceptance remains outstanding.
+quality/review flags with source provenance. [Stage B](docs/member-3-stage-b.md)
+adds server-side Jev contextual relevance, source categories, duplicate-record
+reuse and stable ordering while preserving uncertain results for review.
+See the [Stage A guide](docs/member-3-stage-a.md) and Stage B guide for usage,
+verification and commit instructions. Live Jev acceptance needs a server-side
+`TYPESAFE_API_KEY`; HTTP/Strands integration and labeled evaluation remain Stage C.
+Quality thresholds are provisional; authorized real-photo acceptance is pending.
 
 ## Front-facing automatic capture
 

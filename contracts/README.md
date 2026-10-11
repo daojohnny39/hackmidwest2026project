@@ -2,7 +2,9 @@
 
 The shared contracts, [private image-byte storage](../docs/member-3-storage.md),
 and [Stage A image processing](../docs/member-3-stage-a.md) are implemented.
-Jev calls, HTTP endpoints and the Strands tool are later work.
+[Stage B](../docs/member-3-stage-b.md) adds Jev classification and prioritization;
+live provider acceptance is pending credentials. HTTP endpoints and the Strands
+tool remain Stage C work.
 The defaults below are the implementation baseline for integration, pending
 teammate integration. They do not change the existing front-camera contract.
 
@@ -49,8 +51,8 @@ payload = batch.model_dump(mode="json", by_alias=True)
 
 Every accepted candidate retains its original IDs and provenance, including
 duplicates and processing failures. `rankedCandidateIds` includes every
-`disposition: candidate` result once, ordered by contextual relevance in the
-future pipeline. Duplicate results reference a canonical candidate through
+`disposition: candidate` result once, ordered by contextual relevance in Stage B.
+Duplicate results reference a canonical candidate through
 `duplicateOf`. `reviewCandidateIds` includes every result with
 `reviewRequired: true`, including duplicates or invalid records when flagged.
 
@@ -66,7 +68,8 @@ and `sourceType` (professional profile, social media, news article, personal
 website, forum, or unknown). Failed/skipped classification uses `unknown` for
 both decisions. Evidence records contain a reason code, explanation, optional
 source field/excerpt, and a `rule`, `model`, or `operational` method. These
-decisions do not establish facial identity or source trustworthiness.
+decisions do not establish facial identity or source trustworthiness. Stage B
+records the returned model and rubric version plus optional `sdkVersion`.
 
 ## Image transfer and storage defaults
 
@@ -83,7 +86,7 @@ deduplication are computed from stored bytes, not accepted from caller metadata.
 | Lifetime and quota | 24 hours; 512 MiB total asset payload quota (SQLite overhead is additional) |
 | Image limits | Still JPEG/PNG, up to 10 MiB, 20 million decoded pixels, 10,000 px per side |
 | Crops | Up to two padded 256 × 256 JPEG assets; originals remain immutable |
-| Batch execution | At most 20 candidates, sequential vision work, 120-second batch deadline |
+| Batch execution | At most 20 candidates, sequential vision work; Stage B enforces its 120-second deadline, and Stage C will enforce the combined batch budget |
 | Jev execution | 10-second total deadline per candidate, at most one retry |
 
 The initial store is for local integration. Member 1 supplies production storage
@@ -110,10 +113,10 @@ assessment remain Member 1/2/4 integration work.
 
 ## Configuration and checks
 
-`requirements-member3.txt` pins the Python dependencies for the planned module;
+`requirements-member3.txt` pins the Python dependencies for the module;
 it includes the existing camera/checkpoint requirements. `.env.example` documents
-server-side configuration. No dotenv loader or service is implemented yet;
-export variables when configuring the later adapter. Contract checks need no
+server-side configuration. No dotenv loader or HTTP service is implemented;
+export variables in the server process when using Jev. Contract checks need no
 credentials, camera, downloaded model or external requests.
 
 From the repository root:

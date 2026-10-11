@@ -126,6 +126,6 @@ multi-face, blurred, dark and clipped-face examples on the actual runtime and
 record threshold decisions. The existing physical-camera acceptance trial is
 also still pending. No Jev call or identity matching is performed by these tests.
 
-Run the checks and use the combined staging list in the
-[Stage A commit guide](member-3-commit-sections.md). Pause after this commit
-checkpoint; Stage B is the next implementation work.
+Stage A is the completed implementation checkpoint. The
+[Stage B guide](member-3-stage-b.md) now documents contextual classification,
+verification and its separate commit list.

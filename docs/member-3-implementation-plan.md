@@ -1,8 +1,8 @@
 # Member 3: review and implementation plan
 
-Created October 10, 2026 · Updated October 11, 2026 · Status: Stage A implemented with automated verification; real-photo acceptance/calibration pending. Stage B remains unimplemented.
+Created October 10, 2026 · Updated October 11, 2026 · Status: Stages A and B implemented with automated verification. Real-photo acceptance/calibration and a successful live Jev call remain pending.
 
-This plan reviews `FaceTrace_Member_3_Tasks.md` supplied from Downloads against the current repository. It does not replace the active [front-capture specification](front-capture-spec.md). The candidate-processing module is a separate addition to the completed capture component. Implementation is authorized for your Member 3 module and integration points. Follow the updated [commit guide](member-3-commit-sections.md): finish all Stage A tasks together, then pause for your commit. This supersedes the earlier separate storage/validation/face-processing pauses.
+This plan reviews `FaceTrace_Member_3_Tasks.md` supplied from Downloads against the current repository. It does not replace the active [front-capture specification](front-capture-spec.md). The candidate-processing module is a separate addition to the completed capture component. The user authorized Stage B after the combined Stage A checkpoint. The [Stage B guide](member-3-stage-b.md) contains the current usage, acceptance status and commit instructions. Keep implementation compact: three Stage B modules share the existing contracts and Stage A results.
 
 Step 1 also uses the supplied `message.md` project pitch. The pitch specifies Python/FastAPI with AWS Strands, contextual Jev filtering after conventional deduplication/validation, and independent source-risk assessment. The [version 1 contract](../contracts/README.md) now specifies payload fields and implementation defaults for transport/storage. Teammate acceptance remains an integration checkpoint. The wider project roadmap is not authorization to implement discovery, threat intelligence or facial-matching research in this module.
 
@@ -198,7 +198,7 @@ Stage A collects grayscale exposure and Laplacian-variance blur measurements on 
 
 ## Build order and verification checkpoints
 
-The [combined Stage A commit guide](member-3-commit-sections.md) supersedes the original milestone order below and the earlier seven separate commit sections. All Stage A work is verified together before pausing for your commit. This original table remains the requirement-to-milestone reference.
+Stage A was implemented as one combined checkpoint. Stage B now has its own [review and commit instructions](member-3-stage-b.md#review-and-commit). This original table remains the requirement-to-milestone reference; the active stage guides describe delivered behavior and outstanding acceptance.
 
 | Order | Tasks | Deliverable | Verification before advancing |
 | --- | --- | --- | --- |
@@ -212,25 +212,21 @@ The [combined Stage A commit guide](member-3-commit-sections.md) supersedes the 
 
 Source categories and quality heuristics can be deferred for a demo, with `unknown` returned explicitly. They remain required to finish the full supplied checklist. Mocked Jev calls enable development but do not satisfy the live integration criterion.
 
-Suggested structure for the pitch's Python backend:
+Current compact implementation and remaining integration boundaries:
 
 ```text
 contracts/                         # JSON Schemas and cross-language examples
 candidate_processing/
   contracts.py                     # Runtime validation and serialization
-  pipeline.py                      # analyze_candidates(request, dependencies)
   image_worker.py                  # Resource-bounded decode/detection lifecycle
   image_analysis.py                # Validation, preprocessing, crops, quality
   jev_client.py                    # Provider adapter and bounded failure handling
   classification.py                # Rubric, evidence, result validation
-  deduplication.py                  # Exact-image reuse and duplicate-record links
-  prioritization.py                # Stable ordering and review list
-  strands_adapter.py               # Thin wrapper selected with Member 1
+  stage_b.py                       # Record deduplication, ordering, review and live smoke command
 tests/member3/                     # Contract, image, classifier, integration tests
-evals/member3/                     # Sanitized labeled text cases and reports
 ```
 
-Dependencies such as asset resolution, detector access, crop storage and Jev calls are injected into the core pipeline. This keeps offline tests independent of credentials, downloads, cameras and AWS execution.
+Stage C will add the combined orchestrator (including shared image analysis and an overall deadline), the thin Strands/HTTP adapters, and labeled evaluation only as needed. Dependencies such as asset resolution, detector access, crop storage and Jev calls are injected. This keeps offline tests independent of credentials, downloads, cameras and AWS execution.
 
 ## Test and evaluation plan
 
@@ -271,4 +267,4 @@ The task file's two-week schedule is an example, not an agreed deadline. After t
 
 The full module is complete when agreed-schema candidates flow from Member 2 through validated image processing and a verified live Jev adapter into Member 1's callable integration; provenance and uncertain results survive all failure paths; image quality/source categories meet their acceptance checks; and automated tests plus a labeled evaluation are documented.
 
-The shared contract, [private asset storage](member-3-storage.md), and [Stage A image processing](member-3-stage-a.md) are implemented. Verification covers 80 Member 3 tests and 4 existing checkpoint regression tests. Quality calibration and real-photo acceptance remain outstanding. Classification, batch prioritization, HTTP/Strands adapters and labeled evaluation remain incomplete. Active capture requirements and the original task files are unchanged. The existing camera acceptance trial remains a separate outstanding task.
+The shared contract, [private asset storage](member-3-storage.md), [Stage A image processing](member-3-stage-a.md) and [Stage B classification/prioritization](member-3-stage-b.md) are implemented. Automated checks cover SDK mock transport, contextual policy, stable ranking, record deduplication and the Stage A/B handoff, alongside existing regressions. No live Jev response is verified because credentials are not configured. Quality calibration, real-photo acceptance, the combined orchestrator, HTTP/Strands adapters and labeled evaluation remain outstanding. Active capture requirements and the original task files are unchanged. The existing camera acceptance trial remains a separate outstanding task.
