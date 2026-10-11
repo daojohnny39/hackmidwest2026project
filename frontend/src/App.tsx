@@ -23,7 +23,7 @@ export default function App() {
       <span className="edition"><span className="status-dot" /> Hack Midwest ’26</span>
     </header>
     <main id="main-content" tabIndex={-1}>{page === 'studio' ? <Studio /> : page === 'about' ? <About /> : <Team />}</main>
-    <footer className="site-footer"><span><Mark /> CyberPI</span><a href="?mode=front">Automatic capture <Icon name="arrow" /></a><a href="#about">About this demo <Icon name="arrow" /></a></footer>
+    <footer className="site-footer"><span><Mark /> CyberPI</span><a href="?capture=automatic#studio">Automatic capture <Icon name="arrow" /></a><a href="#about">About <Icon name="arrow" /></a></footer>
   </div>
 }
 function About() {
@@ -37,14 +37,14 @@ function About() {
     <section className="principles"><div className="principles-art"><Orbit /></div><div><h2>Your privacy</h2>
       <details open><summary>Photos stay in this tab<Icon name="plus" /></summary><p>No uploads in this demo. Clear, reload, or leave Home to discard photos.</p></details>
       <details><summary>Public sources only<Icon name="plus" /></summary><p>Planned searches require consent and exclude private accounts.</p></details>
-      <details><summary>Relevance needs review<Icon name="plus" /></summary><p>Contextual relevance does not verify identity. Check each original source.</p></details>
+      <details><summary>Confidence needs review<Icon name="plus" /></summary><p>Confidence reflects contextual evidence and does not verify identity. Check each original source.</p></details>
       <details><summary>Demo status<Icon name="plus" /></summary><p>Face detection runs locally on each photo. Public-source search is not connected. Storage terms must be confirmed before uploads are enabled.</p></details>
     </div></section>
     <div className="page-cta"><a className="button primary" href="#studio">Open Home <Icon name="arrow" /></a></div>
   </div>
 }
 function Team() {
-  return <div className="subpage team-page"><div className="page-intro"><h1>Our team</h1><p>Five developers. Hack Midwest 2026.</p></div>
-    <div className="team-grid">{team.map((member, index) => <article className="team-card" key={member.id}><div className={`team-portrait portrait-${index}`} aria-hidden="true"><Mark /><span>0{index + 1}</span><div className="portrait-orbit" /></div><div className="team-copy"><h2>{member.name}</h2><p>{member.role}</p></div></article>)}</div>
+  return <div className="subpage team-page"><div className="page-intro"><h1>Our team</h1></div>
+    <div className="team-grid">{team.map(member => <article className="team-card" key={member.id}><div className="team-portrait"><img src={`${import.meta.env.BASE_URL}${member.photo}`} alt={member.name} loading="lazy" decoding="async" style={{ objectPosition: member.photoPosition }} /></div><div className="team-copy"><h2>{member.name}</h2><p>{member.role}</p></div></article>)}</div>
   </div>
 }

@@ -27,9 +27,9 @@ npm test -- --project=chrome
 ## Try the first assignment
 
 1. Automatic capture is selected by default. Choose **Start camera**, accept local capture consent, and allow the browser's camera prompt.
-2. Follow the face-position and angle guidance; a qualifying 400 ms hold automatically captures one reference and stops the camera. Alternatively, select **Manual**, open the camera, and choose **Take photo** once. Retaking replaces the single reference. Manual mode includes the original/landmark toggle.
+2. Follow the face-position and angle guidance; a qualifying 400 ms hold automatically captures one reference and stops the camera. Alternatively, uncheck **Automatic capture** beside **Mirror preview**, open the camera, and choose **Take photo** once. Retaking replaces the single reference. Manual mode includes the original/landmark toggle.
 3. Optionally provide First Name, Last Name, City, and Age, and confirm authorization. The information icon beside **Subject details** explains how these fields help narrow results.
-4. Choose **Preview sample findings**. The photo is not uploaded. A missing or invalid image or absent authorization keeps this action disabled. Failed manual landmark analysis does not block an otherwise valid photo.
+4. Choose **Submit**. The photo is not uploaded. A missing or invalid image or absent authorization keeps this action disabled. Failed manual landmark analysis does not block an otherwise valid photo.
 5. Use **Sample scenario** for multiple/one/no findings, partial findings, missing metadata, queued, running, or failed. These are static examples, not a simulated live investigation.
 6. **Clear session** discards photos, details and results and stops the camera. Leaving Home also clears the session.
 
@@ -48,7 +48,7 @@ The parser rejects malformed status/completion payloads, preserves incomplete ca
 
 ## Preserved team capture work
 
-The latest main branch's automatic capture engine, pose/framing rules, model checksum validation, and camera-disconnection cancellation remain intact. Automatic capture is integrated into the default CyberPI page and subject form. Select **Manual** or use `?capture=manual` for the one-photo manual flow. Switching capture modes clears the session. Use the **Automatic capture** footer link or `?mode=front` for the separate automatic checkpoint; `?mode=manual` retains the original manual checkpoint. These checkpoints keep their own styles and do not submit photos into the mock investigation form. See [AUTOMATIC-CAPTURE.md](AUTOMATIC-CAPTURE.md).
+The latest main branch's automatic capture engine, pose/framing rules, model checksum validation, and camera-disconnection cancellation remain intact. Automatic capture is integrated into the default CyberPI page and subject form. Uncheck **Automatic capture** beside **Mirror preview** or use `?capture=manual` for the one-photo manual flow. Switching capture modes clears the session and preserves the mirror setting. The **Automatic capture** footer link opens the current app with automatic capture selected. Use `?mode=front` for the separate automatic checkpoint; `?mode=manual` retains the original manual checkpoint. These checkpoints keep their own styles and do not submit photos into the mock investigation form. See [AUTOMATIC-CAPTURE.md](AUTOMATIC-CAPTURE.md).
 
 The new contract tests are in `tests/unit/investigationContract.test.ts`. The original checkpoint tests are preserved as `tests/manual-checkpoint.spec.ts`; `tests/camera.spec.ts` covers the new consent-based UI. The automatic suites now navigate to `?mode=front`.
 
@@ -73,6 +73,6 @@ Still needed: Member 1's confirmed API/base URL/auth and retention policy; live 
 - `src/types/investigation.ts`, `src/services/investigationContract.ts`: proposed types, validation, multipart builder and parser.
 - `src/mocks/investigationFixtures.ts`: fictional result states.
 - `src/index.css`: palette, typography and responsive layout.
-- `src/App.tsx`, `src/data/team.ts`: page content and five developer placeholders.
+- `src/App.tsx`, `src/data/team.ts`: page content and team names/photos in Developer 01–05 order.
 
 Photos, local analysis and subject fields are kept in temporary tab state, not persistent app storage. The existing CSP blocks external fetch/XHR, including the SDK's background logging. Do not relax it globally. This local-only behavior does not promise deletion or zero retention for future backend services.

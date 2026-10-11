@@ -1,5 +1,5 @@
 import './cameraCapture.css'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useAutoCapture } from './hooks/useAutoCapture'
 import { guidance, REASON_LABELS, troubleshooting } from './capture/guidance'
 import type { FrontCaptureResult, ResetReason } from './capture/types'
@@ -28,17 +28,20 @@ function CapturePreview({ result, onDelete }: { result: FrontCaptureResult; onDe
 }
 
 interface CameraCaptureProps {
+  previewOptions?: ReactNode
+  mirrorPreview?: boolean
   onCaptured?: (result: FrontCaptureResult) => void
   onDelete?: () => void
   onStartRequested?: (start: () => void) => void
 }
 
-export default function CameraCapture({ onCaptured, onDelete, onStartRequested }: CameraCaptureProps = {}) {
+export default function CameraCapture({ onCaptured, onDelete, onStartRequested, previewOptions, mirrorPreview }: CameraCaptureProps = {}) {
   const capture = useAutoCapture(onCaptured)
   const { state, result, camera } = capture
   const { videoRef, devices, activeDeviceId, status: cameraStatus, error: cameraError } = camera
   const [aspect, setAspect] = useState(4 / 3)
-  const [mirrored, setMirrored] = useState(true)
+  const [localMirrored, setLocalMirrored] = useState(true)
+  const mirrored = mirrorPreview ?? localMirrored
   const active = cameraStatus === 'active'
   const running = ['preparing', 'guiding', 'holding', 'capturing'].includes(state.phase)
   const message = guidance(state)
@@ -93,7 +96,7 @@ export default function CameraCapture({ onCaptured, onDelete, onStartRequested }
           {!activeDeviceId && <option value="">Choose a camera</option>}
           {devices.map((device, i) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${i + 1}`}</option>)}
         </select>}
-        <label className="mirror-control"><input type="checkbox" checked={mirrored} onChange={(event) => setMirrored(event.target.checked)} /> Mirror preview</label>
+        {previewOptions ?? <label className="mirror-control"><input type="checkbox" checked={mirrored} onChange={(event) => setLocalMirrored(event.target.checked)} /> Mirror preview</label>}
       </div>
       <p className="privacy">Use your own face or a consenting participant. Photos stay on this device.</p>
       {state.troubleshooting && state.phase !== 'complete' && <aside className="troubleshooting" aria-label="Capture troubleshooting">

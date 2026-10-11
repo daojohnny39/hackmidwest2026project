@@ -18,7 +18,7 @@ export function ResultsPanel({ state, onChange }: { state: PreviewState; onChang
         </div>
         {result.status === 'failed' && <div className="findings-error" role="alert"><p>{result.error}</p><button className="text-button" onClick={() => onChange('many')}>Retry sample <Icon name="reset" /></button></div>}
         {Boolean(result.warnings?.length) && <p className="findings-warning" role="status">Some sources are unavailable. These findings are incomplete.</p>}
-        {candidates.length > 0 && <><p className="evidence-note">Contextual relevance does not verify a person’s identity.</p><div className="candidate-list">{candidates.map((candidate, index) => <CandidateCard key={`${candidate.id}-${index}`} candidate={candidate} />)}</div></>}
+        {candidates.length > 0 && <><p className="evidence-note">Confidence reflects contextual evidence and does not verify a person’s identity.</p><div className="candidate-list">{candidates.map((candidate, index) => <CandidateCard key={`${candidate.id}-${index}`} candidate={candidate} />)}</div></>}
         <button className="text-button reset-results" onClick={() => onChange('idle')}>Close sample <Icon name="close" /></button>
       </div>}
     <div className="results-footnote"><Icon name="shield" /><span>Check each source. Unknown is not low risk.</span></div>

@@ -50,7 +50,6 @@ em { font-style: normal; color: var(--green); }
 h1 { font-size: clamp(34px, 3.9vw, 54px); line-height: 1.1; letter-spacing: -1.6px; font-weight: 400; }
 .recognition-text { color: var(--red); }
 .studio-intro p { font-size: 15px; color: var(--muted); margin-top: 12px; }
-.session-badge { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; border: 1px solid var(--line); border-radius: 20px; padding: 8px 12px; white-space: nowrap; }
 .workspace-grid { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr); gap: 20px; align-items: stretch; margin-bottom: 32px; }
 .camera-panel { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
 .camera-stage { position: relative; height: 332px; color: var(--green); background: var(--light-green); overflow: hidden; isolation: isolate; }
@@ -188,15 +187,7 @@ details[open] > summary .icon { transform: rotate(45deg); }
 .team-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 18px; padding-bottom: 40px; }
 .team-card { min-width: 0; }
 .team-portrait { position: relative; height: 225px; color: #5d7953; background: #d5e6cf; border-radius: 6px; overflow: hidden; }
-.team-portrait > .brand-mark { position: absolute; left: 20px; top: 20px; width: 27px; height: 27px; }
-.team-portrait > span { font-size: 98px; position: absolute; bottom: 16px; left: 20px; font-weight: 300; line-height: 1; letter-spacing: -5px; z-index: 1; }
-.portrait-orbit { height: 230px; width: 145px; border: 1px solid currentColor; border-radius: 50%; position: absolute; transform: rotate(40deg); top: 28px; left: 65px; opacity: .16; }
-.portrait-orbit::before, .portrait-orbit::after { content: ''; position: absolute; border: 1px solid currentColor; border-radius: 50%; inset: 10px; }
-.portrait-orbit::after { inset: 25px; }
-.portrait-1 { background: #dce1db; color: #737c71; }
-.portrait-2 { background: #c9dec3; color: #526d49; }
-.portrait-3 { background: #e3e7e1; color: #6e7869; }
-.portrait-4 { background: #d7e5d0; color: #5d7851; }
+.team-portrait img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .team-copy { padding: 20px 0; }
 .team-copy h2 { font-size: 23px; font-weight: 400; letter-spacing: -.5px; }
 .team-copy p { color: var(--muted); font-size: 13px; margin-top: 9px; }
@@ -221,7 +212,6 @@ details[open] > summary .icon { transform: rotate(45deg); }
   .site-header nav a { font-size: 14px; padding: 10px 13px; }
   .studio-intro { padding: 30px 0 24px; }
   h1 { font-size: 38px; letter-spacing: -1.2px; }
-  .studio-intro > .session-badge { display: none; }
   .workspace-grid { grid-template-columns: 1fr; gap: 18px; }
   .camera-stage { height: 330px; }
   .photo-slot { height: 66px; }
@@ -268,7 +258,6 @@ details[open] > summary .icon { transform: rotate(45deg); }
   .consent-actions { gap: 12px; }
   .consent-actions .button { font-size: 13px; padding: 12px; }
   .team-portrait { height: 175px; }
-  .team-portrait > span { font-size: 80px; }
   .team-copy h2 { font-size: 21px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
@@ -298,6 +287,8 @@ label > .field-hint { margin-left: 5px; }
 .reference-hint { color: var(--muted); font-size: 13px; margin-top: 17px; }
 .form-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 16px 0 10px; flex-wrap: wrap; }
 .form-actions .text-button { white-space: nowrap; }
+.subject-submit { position: relative; padding-inline: 44px; text-align: center; }
+.subject-submit .icon { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); }
 .results-panel { min-height: 570px; }
 .findings-content { padding: 20px; }
 .scenario-picker { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); margin: 16px 0 22px; }
@@ -319,7 +310,7 @@ label > .field-hint { margin-left: 5px; }
 .evidence-badge { padding: 4px 7px; font-size: 11px; border-radius: 3px; border: 1px solid var(--line); background: #f0f2ef; color: #52604e; }
 .evidence-high { background: #deebd8; border-color: #c3d8ba; color: #36542d; }
 .evidence-medium { background: #f0ecdc; border-color: #dfd6b4; color: #6a5c26; }
-.review-label { font-size: 11px; color: var(--muted); }
+.review-label { flex-basis: 100%; font-size: 11px; color: var(--muted); }
 .candidate-reasons { list-style: none; padding: 0; margin: 0; }
 .candidate-reasons li + li { margin-top: 6px; }
 .candidate-reasons, .candidate-unknown { font-size: 13px; line-height: 1.5; color: var(--muted); }
@@ -337,11 +328,10 @@ label > .field-hint { margin-left: 5px; }
 @media (max-width: 430px) { .subject-form { padding: 18px 16px; } .optional-fields { grid-template-columns: 1fr; } .findings-content { padding: 18px 16px; } .studio-intro h1 { max-width: 330px; } .wordmark { font-size: 24px; } }
 @media (max-width: 359px) { .wordmark .brand-mark { display: none; } .site-header nav a { padding: 9px 8px; } }
 
-.capture-mode { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 22px; }
-.capture-mode > span { font-size: 14px; }
-.capture-mode .button { padding: 10px 14px; }
-.capture-mode [aria-pressed='true'] { background: var(--light-green); border-color: var(--green); }
-.capture-mode small { color: var(--muted); font-size: 12px; }
+.preview-options { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; flex-basis: 100%; }
+.preview-options small { flex-basis: 100%; color: var(--muted); font-size: 12px; }
+.preview-options input { accent-color: var(--green); }
+.manual-preview-options { padding: 0 20px 16px; }
 .photo-slots.single-photo { grid-template-columns: minmax(0, 160px); }
 .single-photo .photo-slot { height: 100px; }
 .automatic-studio { --text-muted: var(--muted); --border: var(--line); --accent: var(--green); padding: 20px; }
@@ -360,4 +350,4 @@ label > .field-hint { margin-left: 5px; }
 .automatic-studio .front-result p, .automatic-studio .diagnostics p, .automatic-studio .diagnostics li { font-size: 13px; line-height: 1.5; }
 .automatic-studio .diagnostics p { margin: 10px 0; }
 .automatic-studio .diagnostics ul { padding-left: 18px; }
-@media (max-width: 430px) { .automatic-studio { padding: 16px; } .capture-mode small { flex-basis: 100%; } }
+@media (max-width: 430px) { .automatic-studio { padding: 16px; } .manual-preview-options { padding-inline: 16px; } }
