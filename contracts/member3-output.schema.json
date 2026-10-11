@@ -155,6 +155,19 @@
           "default": null,
           "title": "Model"
         },
+        "sdkVersion": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sdkversion"
+        },
         "rubricVersion": {
           "const": "context-v1",
           "default": "context-v1",
