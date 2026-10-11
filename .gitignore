@@ -9,3 +9,9 @@ agents.md
 # Local checkpoint photos and generated analysis results.
 /photos/
 /checkpoints/
+
+# Private backend assets and local credentials.
+/.facetrace-data/
+.env
+.env.*
+!.env.example
