@@ -1,0 +1,31 @@
+{
+  "run_id": "johnny-1-8c9c0190",
+  "capture": {
+    "session_id": "johnny-1",
+    "captured_at": "2026-10-10T23:10:42Z",
+    "consent": {
+      "confirmed": true,
+      "participant": "Johnny Dao",
+      "confirmed_at": "2026-10-11T01:24:57Z",
+      "external_processing": true
+    },
+    "images": [
+      {
+        "image_id": "img-1",
+        "file": "front.jpg",
+        "angle": "front",
+        "yaw": null,
+        "pitch": null,
+        "roll": null,
+        "mock_fixture": null
+      }
+    ]
+  },
+  "capture_dir": "/Volumes/X10 Pro/Personal/Coding/HackMidwest Project/Project Directory/captures/johnny-1",
+  "backend": "rekognition",
+  "scenario": "default",
+  "llm_mode": "anthropic",
+  "jev_mode": "fake",
+  "llm_model": "claude-sonnet-5-5",
+  "jev_model": null
+}

@@ -1,0 +1,35 @@
+{
+  "run_id": "johnny-1-8c9c0190",
+  "num_images": 1,
+  "images": [
+    {
+      "image_id": "img-1",
+      "angle": "front",
+      "backend": "rekognition",
+      "request_id": "6acb00aad02d2a9002140a55,6acb00aaafaa679a867deb93",
+      "searched_at": "2026-10-11T03:21:12.573677Z",
+      "hits": [],
+      "page_urls": [],
+      "search_extras": {
+        "status": "Success",
+        "total_results": 0,
+        "engines": [
+          "yandex_images",
+          "google_lens"
+        ],
+        "failed_engines": [],
+        "min_similarity": 80.0,
+        "candidates": 164,
+        "outcomes": {
+          "over_limit": 124,
+          "below_threshold": 39,
+          "no_face": 1
+        }
+      },
+      "collection_method": "agent",
+      "errors": []
+    }
+  ],
+  "pages": {},
+  "url_aliases": {}
+}
