@@ -24,11 +24,10 @@ CLIENT_RETRIES = 1
 # Claude models that think by default and return a 400 for a forced tool_choice ("any" or "tool").
 # Strands forces the structured-output tool when an agent ends its turn without calling it, so these
 # models get tool_choice "auto" instead; Strands' added reminder message still asks for the call.
-# Thinking counts toward max_tokens, so they get room for it, and low effort keeps it short (Anthropic's
-# suggested starting point for extraction and search work).
+# Thinking counts toward max_tokens, so they get room for it. LLM_EFFORT sets how long they think:
+# medium in V4 (Opus 5.5's API default), low in V3 (Anthropic's suggested start for extraction and search).
 ADAPTIVE_THINKING_MODELS = ("claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1")
 ADAPTIVE_MAX_TOKENS = 8192
-ADAPTIVE_EFFORT = "low"
 
 
 def build_model(settings: Settings, *, max_tokens: int = DEFAULT_MAX_TOKENS) -> Model:
@@ -52,7 +51,7 @@ def build_model(settings: Settings, *, max_tokens: int = DEFAULT_MAX_TOKENS) -> 
                 client_args=client_args,
                 model_id=settings.llm_model,
                 max_tokens=max(max_tokens, ADAPTIVE_MAX_TOKENS),
-                params={"output_config": {"effort": ADAPTIVE_EFFORT}},
+                params={"output_config": {"effort": settings.llm_effort}},
             )
         return AnthropicModel(client_args=client_args, model_id=settings.llm_model, max_tokens=max_tokens)
 

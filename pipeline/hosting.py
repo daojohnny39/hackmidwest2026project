@@ -1,5 +1,5 @@
 """Short-lived image hosting for SerpApi searches (spec 1.2; live only): Yandex alone (V1)
-and the face crop backend V3 searches with Yandex and Google Lens.
+and the face crop backend V3 searches with Yandex and Bing (V5) or Google Lens (V3, V4).
 
 Both engines need a public image URL and SerpApi documents no upload parameter.
 IMAGE_HOST picks how each image gets one:
@@ -15,12 +15,17 @@ IMAGE_HOST picks how each image gets one:
   data leaves the machine).
   Yandex refuses Cloudflare quick-tunnel URLs (*.trycloudflare.com) without fetching
   them, but fetched an lhr.life URL (checked 2026-10-10).
-- s3: a private S3 bucket under a random key, shared through a presigned GET URL
-  valid for 10 minutes. The key is recorded in uploads.json before the upload, so
-  `purge` can retry cleanup after a crash. The object is deleted once the search
-  and its retries are over. Use a dedicated bucket or prefix with public listing
-  off and a lifecycle rule that expires leftovers; signed-URL expiry doesn't
-  delete anything. boto3 is imported lazily.
+- s3: an S3 bucket whose hackmidwest-faces/ prefix anyone can read (s3:GetObject in
+  the bucket policy; listing stays private). Each image goes up as the same small
+  EXIF-free JPEG the tunnel serves, under a random 128-bit key, and the search engine
+  gets the object's plain URL. Presigned URLs didn't work: SerpApi puts the image
+  URL into Yandex's query string unencoded, so everything after the first `&` of
+  the signature was cut off and Yandex got an unsigned URL (found 2026-10-11).
+  start() checks the bucket end to end with a throwaway file before any search.
+  The key is recorded in uploads.json before the upload, so `purge` can retry
+  cleanup after a crash. The object is deleted once the search and its retries
+  are over; a lifecycle rule on the prefix should expire anything left behind.
+  boto3 is imported lazily.
 
 Hosted URLs are never logged or stored.
 """
@@ -45,12 +50,12 @@ from pipeline.artifacts import read_uploads, write_uploads
 from pipeline.config import ConfigError
 from pipeline.contracts import UploadRecord, UploadsManifest
 
-PRESIGN_SECONDS = 600
-KEY_PREFIX = "hackmidwest-faces/"
+KEY_PREFIX = "hackmidwest-faces/"  # the bucket policy makes only this prefix publicly readable
 IMAGE_TYPES = {b"\xff\xd8\xff": ("image/jpeg", ".jpg"), b"\x89PNG\r\n\x1a\n": ("image/png", ".png")}
 # The first end-to-end probe through a new tunnel took about 13 s (2026-10-10).
 TUNNEL_START_SECONDS = 20.0
 TUNNEL_PROBE_SECONDS = 25.0
+S3_PROBE_SECONDS = 10.0
 TUNNEL_SERVER = "nokey@localhost.run"
 TUNNEL_URL = re.compile(r"https://[a-z0-9-]+\.lhr\.life")
 TUNNEL_LABEL = "localhost-run-tunnel"  # UploadRecord.bucket for tunnel-hosted images; never written to uploads.json
@@ -61,7 +66,7 @@ SEARCH_IMAGE_QUALITY = 85
 
 
 class HostingError(Exception):
-    """Upload or presign failed. The message is a code, never a URL or key."""
+    """Upload or hosting check failed. The message is a code, never a URL or key."""
 
 
 def s3_client(region: str):
@@ -82,29 +87,53 @@ def image_type(data: bytes) -> tuple[str, str]:
 
 
 class S3ImageHost:
-    """Uploads images to a private bucket and tracks every object in the run's uploads.json."""
+    """Uploads images under the bucket's public prefix and tracks every object in the run's uploads.json.
+
+    start() checks that an uploaded file can be fetched at its public URL without credentials.
+    `probe(url, timeout)` returns the body at a public URL or None; tests replace it.
+    """
 
     def __init__(self, *, bucket: str, region: str, run_dir: Path, client=None, prefix: str = KEY_PREFIX,
-                 expires: int = PRESIGN_SECONDS):
-        self.bucket, self.run_dir, self.prefix, self.expires = bucket, Path(run_dir), prefix, expires
+                 probe=None, probe_timeout: float = S3_PROBE_SECONDS):
+        self.bucket, self.region, self.run_dir, self.prefix = bucket, region, Path(run_dir), prefix
         self.client = client if client is not None else s3_client(region)
+        self.probe, self.probe_timeout = probe or _probe, probe_timeout
         self._lock = threading.Lock()  # uploads.json is read-modify-write; images run in parallel
 
+    def start(self) -> None:
+        """Upload a throwaway file, fetch it at its public URL, delete it (blocking, up to about 30 s).
+        Raises HostingError if the upload fails or the bucket doesn't serve it publicly."""
+        body = secrets.token_bytes(16)
+        url, record = self._put(body, "application/octet-stream", ".txt")
+        try:
+            fetched = self.probe(url, self.probe_timeout)
+        finally:
+            try:
+                self.delete(record)
+            except Exception as exc:
+                trace.error("bucket_probe_delete_failed", exc)  # uploads.json still lists it; `purge` retries
+        if fetched != body:
+            trace.error("bucket_not_public", reason="a test file didn't come back from its public URL",
+                        bucket=self.bucket)
+            raise HostingError("bucket_not_public")
+        trace.event("bucket_checked", bucket=self.bucket)
+
     def upload(self, data: bytes) -> tuple[str, UploadRecord]:
-        """Upload one image; returns (presigned GET URL, record). Blocking: call from a worker thread."""
-        content_type, suffix = image_type(data)
+        """Upload a small copy of one image; returns (public URL, record). Blocking: call from a worker thread."""
+        image_type(data)
+        return self._put(search_copy(data), "image/jpeg", ".jpg")
+
+    def _put(self, body: bytes, content_type: str, suffix: str) -> tuple[str, UploadRecord]:
         record = UploadRecord(bucket=self.bucket, key=f"{self.prefix}{secrets.token_hex(16)}{suffix}")
         self._save(record)  # before the upload, so a crash mid-upload is still cleaned up
         try:
-            response = self.client.put_object(Bucket=self.bucket, Key=record.key, Body=data, ContentType=content_type)
-            if response.get("VersionId"):
-                record.version_id = response["VersionId"]
-                self._save(record)
-            url = self.client.generate_presigned_url(
-                "get_object", Params={"Bucket": self.bucket, "Key": record.key}, ExpiresIn=self.expires)
+            response = self.client.put_object(Bucket=self.bucket, Key=record.key, Body=body, ContentType=content_type)
         except Exception:
             raise HostingError("hosting_error") from None
-        return url, record
+        if response.get("VersionId"):
+            record.version_id = response["VersionId"]
+            self._save(record)
+        return public_url(self.bucket, self.region, record.key), record
 
     def delete(self, record: UploadRecord) -> None:
         """Delete one uploaded object (and its version, if versioned) and mark it deleted."""
@@ -117,6 +146,11 @@ class S3ImageHost:
             manifest = read_uploads(self.run_dir)
             objects = [item for item in manifest.objects if (item.bucket, item.key) != (record.bucket, record.key)]
             write_uploads(self.run_dir, UploadsManifest(run_id=manifest.run_id, objects=objects + [record]))
+
+
+def public_url(bucket: str, region: str, key: str) -> str:
+    """The object's plain virtual-hosted URL. No query string, so it survives SerpApi's Yandex request."""
+    return f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
 
 
 def delete_object(record: UploadRecord, *, client) -> None:

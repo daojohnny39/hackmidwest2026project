@@ -4,8 +4,9 @@ Each image gets a fresh Agent with its own model instance and three tools bound 
 closure to that image's ImageCollector, so an agent can only search and fetch for
 its own image. The tools enforce the fetch budget and the depth rules in code.
 The model only triages: which hits look like pages about this person, which to
-fetch, and which profiles' account links to follow. Its structured output is
-ImageTriage; code builds the evidence from the page store plus those judgments.
+fetch, and which profiles' account links and posts' authors to follow. Its
+structured output is ImageTriage; code builds the evidence from the page store
+plus those judgments.
 
 Structured output gets one correction: a second invalid ImageTriage cancels the
 agent, and the caller falls back to deterministic triage over the stored results.
@@ -22,6 +23,7 @@ from typing import TYPE_CHECKING
 from pipeline import trace
 from pipeline.contracts import ImageTriage
 from pipeline.platforms import account_handle, normalize_url, platform_for
+from pipeline.scrape import post_authors
 from pipeline.stage1_collect import AgentRunner, ImageCollector, NotAllowed, Request
 
 if TYPE_CHECKING:
@@ -44,7 +46,8 @@ claim to have compared or recognized a face yourself.
 2. Call fetch_page for the hits most likely to be this person's own profiles or posts, or articles
    about them. Skip shopping, stock-photo, wallpaper and mood-board pages, and lookalikes.
 3. Call follow_account_links on profile pages that came straight from the search results, to
-   collect the person's linked accounts.
+   collect the person's linked accounts, and on posts from the search results that have an
+   author_account, to fetch the profile of whoever posted it.
 4. Stop when the fetch budget is spent or nothing useful is left. Then give a judgment for every page
    you fetched: relevant=true if it is about this person, with a short note saying why.
 
@@ -71,12 +74,15 @@ def _budget_left(collector: ImageCollector) -> int:
 
 
 def summarize(request: Request) -> dict:
-    """What the model sees about one fetched page: platform, kind, title, name, opening text, account links."""
+    """What the model sees about one fetched page: platform, kind, title, name, opening text, account
+    links, and for a post its author's account."""
     result = request.result
     if result is None:
         return {"url": request.url, "error": "timeout"}
+    authors = post_authors(request.url, result.scraped) if result.kind == "post" else []
+    author = {"author_account": authors[0]} if authors else {}
     if not result.ok:
-        return {"url": request.url, "error": result.error.reason, "status_code": result.error.status_code}
+        return {"url": request.url, "error": result.error.reason, "status_code": result.error.status_code, **author}
     scraped = result.scraped
     person = next((block.get("name") for block in scraped.json_ld
                    if block.get("@type") == "Person" and isinstance(block.get("name"), str)), None)
@@ -89,6 +95,7 @@ def summarize(request: Request) -> dict:
         "display_name": person or scraped.og.get("og:title") or scraped.title,
         "text": scraped.text[:SUMMARY_TEXT],
         "account_links": [link.url for link in scraped.outbound_links if account_handle(link.url)][:MAX_SUMMARY_LINKS],
+        **author,
     }
 
 
@@ -132,16 +139,22 @@ def build_tools(collector: ImageCollector) -> list:
 
     @tool
     async def follow_account_links(url: str) -> dict:
-        """Fetch the account links on a profile page that came directly from this image's search
-        results. Posts, articles and followed pages can't be followed.
+        """Fetch the accounts a page from this image's search results leads to: every account link
+        on a profile page, or the author's profile for a post. Articles and followed pages can't
+        be followed.
 
         Args:
-            url: A profile page URL that fetch_page already fetched from the search hits.
+            url: A profile or post URL from the search hits. It is fetched first if fetch_page hasn't.
         """
         target = normalize_url(url, mock_origin=origin)
+        if target is not None and collector.hit_for(target) is not None:
+            # Tool calls in one turn run concurrently, so fetch_page may not have fetched this hit yet.
+            # fetch waits for that fetch if it has started, and costs nothing if it has finished.
+            await collector.fetch([target])
         links = collector.account_links(target) if target else []
         if not links:
-            return {"error": "only profile pages fetched directly from the search results have links to follow"}
+            return {"error": "nothing to follow: use a profile, or a post with an author_account, "
+                             "from the search hits"}
         new = sorted(link for link in links if link not in collector.requests)
         requests = await collector.fetch(new)
         return {"pages": [summarize(request) for request in requests],

@@ -234,6 +234,16 @@ python -m unittest discover -s tests -v
 
 Tests that use the real Python detector are skipped if the model is absent.
 
+## Agent pipeline
+
+The search side is the Python package in `pipeline/`. One AWS Strands agent per
+captured photo searches the web for the face, scrapes the pages it finds, and the
+pipeline then groups the accounts into candidate profiles, scores each candidate, and
+writes a final profile. It runs from the command line and isn't connected to the web
+app yet. Setup, API keys, search backends, and the local mock internet it's tested
+against are in [docs/agent-pipeline.md](docs/agent-pipeline.md). The build spec is
+[docs/agent-pipeline-spec.md](docs/agent-pipeline-spec.md).
+
 ## Repository layout
 
 | Path | Contents |
@@ -242,5 +252,8 @@ Tests that use the real Python detector are skipped if the model is absent.
 | `face_landmarker.py` | Reusable Python detector setup and initialization check |
 | `photo_checkpoint.py` | Local photo analysis, landmark overlay, and JSON export |
 | `requirements.txt` | Pinned Python dependencies |
-| `tests/` | Python image-processing and detector tests |
+| `pipeline/` | Agent pipeline: search, scraping, profiles, verification, and summary |
+| `mock_internet/` | Local internet simulator for offline pipeline tests |
+| `docs/` | Capture and agent pipeline specifications |
+| `tests/` | Python image-processing, detector, mock internet, and pipeline tests |
 | `models/` | Downloaded Face Landmarker model (ignored by Git) |

@@ -70,7 +70,8 @@ _ACCOUNT_RULES: list[tuple[tuple[str, ...], re.Pattern[str]]] = [
 # Post patterns. A named "handle" group, when present, is the author.
 _POST_RULES: list[tuple[tuple[str, ...], re.Pattern[str]]] = [
     (("x.com", "chatter.test"), re.compile(rf"/{_HANDLE}/status/\d+")),
-    (("instagram.com", "photogram.test"), re.compile(r"/(?:p|reel|reels|tv)/[A-Za-z0-9_-]+")),
+    # instagram.com/p/<id> hides its author; instagram.com/<handle>/reel/<id> names it.
+    (("instagram.com", "photogram.test"), re.compile(rf"(?:/{_HANDLE})?/(?:p|reel|reels|tv)/[A-Za-z0-9_-]+")),
     (("linkedin.com", "linkup.test"), re.compile(rf"/posts/{_SEGMENT}|/feed/update/{_SEGMENT}")),
     (("facebook.com",), re.compile(rf"/{_HANDLE}/posts/{_SEGMENT}|/permalink\.php|/story\.php")),
 ]
@@ -150,11 +151,15 @@ def is_post_url(url: str) -> bool:
 
 
 def post_author_handle(url: str) -> str | None:
-    """The author handle a post URL carries (chatter.test/<handle>/status/<id>), else None."""
+    """The author handle a post URL carries (chatter.test/<handle>/status/<id>,
+    instagram.com/<handle>/reel/<id>), else None. Site paths such as x.com/i/status/<id> name no one."""
     matched = _match(_POST_RULES, url)
     if matched is None or "handle" not in matched[1].re.groupindex:
         return None
-    return matched[1].group("handle")
+    handle = matched[1].group("handle")
+    if handle is None or handle.lower() in _RESERVED.get(platform_for(url), set()):
+        return None
+    return handle
 
 
 def account_url_for(post_url: str) -> str | None:

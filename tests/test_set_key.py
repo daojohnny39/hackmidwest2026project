@@ -1,6 +1,7 @@
-"""`python -m pipeline set-key`, the .env writer, and the FaceCheck, SerpApi, TypeSafe, and AWS key checks.
+"""`python -m pipeline set-key`, the .env writer, and the Trace, Google Cloud Vision, FaceCheck, SerpApi, TypeSafe,
+and AWS key checks.
 
-The prompt, FaceCheck, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
+The prompt, Trace, Google, FaceCheck, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
 """
 
 import configparser
@@ -27,7 +28,9 @@ from pipeline import aws_credentials
 from pipeline.__main__ import BAD_CONFIG, OK, REFUSED, main
 from pipeline.config import REPO_ROOT, load_settings, set_env_value
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected
+from pipeline.search.cloud_vision import CheckFailed as VisionCheckFailed, KeyRejected as VisionKeyRejected
 from pipeline.search.facecheck_backend import InfoCheckFailed, TokenRejected
+from pipeline.search.trace_face import CheckFailed as TraceCheckFailed, KeyRejected as TraceKeyRejected
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 from tests.support import OfflineTestCase
 
@@ -221,6 +224,85 @@ class SetKeyCommandTests(EnvFileCase):
         self.assertEqual(code, OK)
         info.assert_not_called()
         self.assertEqual(self.facecheck_saved(), KEY)
+
+    def trace_account(self, result=None):
+        result = {"email": "pat@example.com", "credits": 5, "key": {"name": "laptop"}} if result is None else result
+        return patch("pipeline.search.trace_face.account_info",
+                     side_effect=result if isinstance(result, BaseException) else None, return_value=result)
+
+    def trace_saved(self):
+        return dotenv_values(self.env_file).get("TRACE_API_KEY") if self.env_file.exists() else None
+
+    def test_saves_a_checked_trace_key(self):
+        with self.trace_account() as account:
+            code, out, _, checked = self.set_key("trace")
+        self.assertEqual(code, OK)
+        account.assert_called_once_with(KEY)
+        checked.assert_not_called()
+        self.assertIn("Trace accepted the key: credits: 5.", out)
+        self.assertNotIn("pat@example.com", out)  # only credit counts are printed
+        self.assertIn("Each Trace search costs 1 credit", out)
+        self.assertEqual(self.trace_saved(), KEY)
+
+    def test_rejected_trace_key_is_not_saved(self):
+        with self.trace_account(TraceKeyRejected("unauthenticated")):
+            code, _, err, _ = self.set_key("trace")
+        self.assertEqual(code, REFUSED)
+        self.assertIn("Trace rejected the key (unauthenticated)", err)
+        self.assertIsNone(self.trace_saved())
+
+    def test_unreachable_trace_check_still_saves(self):
+        with self.trace_account(TraceCheckFailed("ConnectError")):
+            code, out, _, _ = self.set_key("trace")
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the key with Trace", out)
+        self.assertEqual(self.trace_saved(), KEY)
+
+    def test_no_check_skips_trace(self):
+        with self.trace_account() as account:
+            code, _, _, _ = self.set_key("trace", "--no-check")
+        self.assertEqual(code, OK)
+        account.assert_not_called()
+        self.assertEqual(self.trace_saved(), KEY)
+
+    def vision_check(self, result="the Cloud Vision API answered"):
+        return patch("pipeline.search.cloud_vision.check_key",
+                     side_effect=result if isinstance(result, BaseException) else None, return_value=result)
+
+    def vision_saved(self):
+        return dotenv_values(self.env_file).get("GOOGLE_VISION_API_KEY") if self.env_file.exists() else None
+
+    def test_saves_a_checked_google_vision_key(self):
+        with self.vision_check() as check:
+            code, out, _, checked = self.set_key("google-vision")
+        self.assertEqual(code, OK)
+        check.assert_called_once_with(KEY)
+        checked.assert_not_called()
+        self.assertIn("Google accepted the key; the Cloud Vision API answered.", out)
+        self.assertIn("REKOGNITION_ENGINES=trace,yandex_images,cloud_vision", out)
+        self.assertEqual(self.vision_saved(), KEY)
+
+    def test_rejected_google_vision_key_is_not_saved(self):
+        with self.vision_check(VisionKeyRejected("API_KEY_INVALID")):
+            code, _, err, _ = self.set_key("google-vision")
+        self.assertEqual(code, REFUSED)
+        self.assertIn("Google rejected the key (API_KEY_INVALID)", err)
+        self.assertIsNone(self.vision_saved())
+
+    def test_google_vision_key_with_the_api_disabled_still_saves(self):
+        with self.vision_check(VisionCheckFailed("HTTP 403 SERVICE_DISABLED")):
+            code, out, _, _ = self.set_key("google-vision")
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the key with Google (HTTP 403 SERVICE_DISABLED)", out)
+        self.assertIn("enable it in the Google Cloud console", out)
+        self.assertEqual(self.vision_saved(), KEY)
+
+    def test_no_check_skips_google_vision(self):
+        with self.vision_check() as check:
+            code, _, _, _ = self.set_key("google-vision", "--no-check")
+        self.assertEqual(code, OK)
+        check.assert_not_called()
+        self.assertEqual(self.vision_saved(), KEY)
 
     def test_other_services_are_saved_without_a_check(self):
         for service, name, mode in (("openrouter", "OPENROUTER_API_KEY", "JEV_MODE=openrouter"),

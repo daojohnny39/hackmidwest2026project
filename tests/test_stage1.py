@@ -75,12 +75,14 @@ class MockCollectionTests(MockServerTestCase):
         self.assertEqual((snippet.extraction, snippet.status_code, snippet.outbound_links), ("snippet", 404, []))
         errors = [(error.url, error.status_code, error.reason) for image in bundle.images for error in image.errors]
         self.assertEqual(errors, [(OLD_PROJECT, 404, "not_found")])
-        # 5 profiles, each with provenance; Chatter was found by img-1 and img-2.
+        # 5 profiles, each with provenance. img-1 and img-2 found Chatter in search; img-3 reached it
+        # at depth 1 as the author of its Chatter post, without another fetch.
         profiles = {url: page for url, page in bundle.pages.items() if page.page_kind == "profile"}
         self.assertEqual(set(profiles), ALEX_PROFILES)
         self.assertTrue(all(page.found_via for page in profiles.values()))
-        self.assertEqual(sorted(via.image_id for via in profiles["https://chatter.test/alexbuilds"].found_via),
-                         ["img-1", "img-2"])
+        vias = {via.image_id: (via.depth, via.parent_url) for via in profiles["https://chatter.test/alexbuilds"].found_via}
+        self.assertEqual(vias, {"img-1": (0, None), "img-2": (0, None),
+                                "img-3": (1, "https://chatter.test/alexbuilds/status/101")})
         self.assertTrue(all(page.relevant for page in bundle.pages.values()))
         self.assertEqual({image.collection_method for image in bundle.images}, {"deterministic"})
 
@@ -194,10 +196,12 @@ class StageTests(MockServerTestCase):
 # Live-shaped canned backend
 
 
-def page_html(*, canonical=None, links=(), person=False, title="Page"):
+def page_html(*, canonical=None, links=(), person=False, title="Page", og_url=None):
     head = f'<title>{title}</title>'
     if canonical:
         head += f'<link rel="canonical" href="{canonical}">'
+    if og_url:
+        head += f'<meta property="og:url" content="{og_url}">'
     if person:
         head += '<script type="application/ld+json">{"@type": "Person", "name": "Pat"}</script>'
     anchors = "".join(f'<a href="{url}">{label}</a>' for url, label in links)
@@ -288,6 +292,35 @@ class FakeBackendTests(OfflineTestCase):
         bundle, _ = self.collect(backend)
         self.assertEqual(backend.fetched, hits[:12])
         self.assertEqual(bundle.images[0].search_extras["budget_skipped"], 3)
+
+    def test_a_post_leads_to_its_author_at_depth_1(self):
+        post, author = "https://instagram.com/p/AbC123", "https://instagram.com/pat.lee"
+        links = [("https://instagram.com/commenter", "commenter"), ("https://instagram.com/other", "Author")]
+        pages = {post: page_html(og_url="https://instagram.com/pat.lee/reel/AbC123", links=links),
+                 author: page_html(title="Pat Lee")}
+        backend = FakeBackend({"img-1": yandex(post)}, pages)
+        bundle, _ = self.collect(backend)
+        # Only the most trusted author is followed: not the commenter, not the second "Author" link.
+        self.assertEqual(backend.fetched, [post, author])
+        [via] = bundle.pages[author].found_via
+        self.assertEqual((via.depth, via.hit_position, via.parent_url), (1, None, post))
+        self.assertEqual(bundle.images[0].page_urls, [post, author])
+
+    def test_a_walled_post_still_leads_to_the_author_in_its_url(self):
+        post, author = "https://x.com/pat/status/7", "https://x.com/pat"
+        backend = FakeBackend({"img-1": yandex(post)},
+                              {post: BackendError("login_wall", status_code=200), author: page_html(title="Pat")})
+        bundle, _ = self.collect(backend)
+        self.assertEqual(backend.fetched, [post, author])
+        self.assertEqual(bundle.pages[post].extraction, "snippet")
+        self.assertEqual(bundle.pages[author].found_via[0].parent_url, post)
+
+    def test_articles_and_followed_pages_lead_nowhere(self):
+        article, account, next_hop = "https://news.example/story", "https://x.com/pat", "https://github.com/pat"
+        pages = {article: page_html(links=[(account, "Author")]), account: page_html(links=[(next_hop, "Code")])}
+        backend = FakeBackend({"img-1": yandex(article)}, pages)
+        self.collect(backend)
+        self.assertEqual(backend.fetched, [article])
 
     def test_search_failure_is_released_and_recorded(self):
         backend = FakeBackend({"img-1": BackendError("unauthorized", status_code=401),

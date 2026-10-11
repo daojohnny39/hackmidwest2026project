@@ -193,9 +193,9 @@ def parse_image_results(payload: object, *, mock_origin: str | None = None) -> S
             extras["demo"] = info["demo"]
         if isinstance(info.get("searched_faces"), int):
             extras["searched_faces"] = info["searched_faces"]
-        # Backend V3: the engines that answered or failed, the similarity threshold, the number of
-        # merged results, and how many of them ended each way (matched, no_face, ...).
-        for name in ("engines", "failed_engines"):
+        # Backend V3: the engines that answered or failed, the platforms kept (V3_1), the similarity
+        # threshold, the number of merged results, and how many of them ended each way (matched, ...).
+        for name in ("engines", "failed_engines", "platforms"):
             if isinstance(info.get(name), list) and all(isinstance(item, str) for item in info[name]):
                 extras[name] = info[name]
         if isinstance(info.get("min_similarity"), (int, float)) and not isinstance(info["min_similarity"], bool):

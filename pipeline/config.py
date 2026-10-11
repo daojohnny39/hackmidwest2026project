@@ -1,8 +1,10 @@
 """Pipeline settings from the environment, .env, and CLI switches (spec 0.3).
 
 Precedence is CLI options, then exported variables, then .env; empty values count
-as unset. Search defaults to backend V3 (rekognition): SerpApi web search with Amazon
-Rekognition face matching, which needs SERPAPI_KEY, AWS_REGION and AWS credentials.
+as unset. Search defaults to backend V3 (rekognition) with V5's engines: Trace face search and
+SerpApi's Yandex and Bing, every result checked by Amazon Rekognition. It needs TRACE_API_KEY for
+Trace, SERPAPI_KEY for the SerpApi engines, GOOGLE_VISION_API_KEY for Cloud Vision (V6), AWS_REGION,
+and AWS credentials.
 FaceCheck (needs FACECHECK_API_KEY) and SerpApi's Yandex alone (needs SERPAPI_KEY) are
 the other live backends. The mock internet is opt-in (`backend="mock"`, `--mock`, or
 SEARCH_BACKEND=mock). Real Jev/LLM modes still need `models=True`. Secrets stay out of repr, describe(), and every error
@@ -25,6 +27,7 @@ from dotenv import dotenv_values
 from dotenv.parser import parse_stream
 
 from mock_internet.client import MockInternetClient
+from pipeline.platforms import PLATFORM_DOMAINS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,23 +38,34 @@ SEARCH_BACKENDS = ("rekognition", "facecheck", "serpapi", "mock")
 DEFAULT_SEARCH_BACKEND = "rekognition"
 # Search the real internet; the run needs external_processing consent.
 LIVE_BACKENDS = ("rekognition", "facecheck", "serpapi")
-HOSTED_BACKENDS = ("rekognition", "serpapi")  # search through SerpApi, so each image needs a public URL
 IMAGE_HOSTS = ("tunnel", "s3")  # how SerpApi runs give the search engine a public image URL (hosting.py)
-# SerpApi engines backend V3 can search, and its default threshold (CompareFaces' own default).
-REKOGNITION_ENGINES = ("yandex_images", "google_lens")
-DEFAULT_MIN_SIMILARITY = 80.0
+# Engines backend V3 can search: Trace takes an upload, the SerpApi engines need a hosted image URL,
+# and Cloud Vision takes the image's bytes.
+SERPAPI_ENGINES = ("yandex_images", "google_lens", "bing_reverse_image")
+REKOGNITION_ENGINES = ("trace", *SERPAPI_ENGINES, "cloud_vision")
+# V5 replaces V3's Google Lens with Bing. V6 is trace,yandex_images,cloud_vision; V3 and V4 were
+# trace,yandex_images,google_lens.
+DEFAULT_REKOGNITION_ENGINES = ("trace", "yandex_images", "bing_reverse_image")
+DEFAULT_MIN_SIMILARITY = 80.0  # CompareFaces' own default
+# Platforms REKOGNITION_PLATFORMS may keep; unset keeps every site. V3_1 is linkedin,facebook.
+SEARCH_PLATFORMS = tuple(dict.fromkeys(PLATFORM_DOMAINS.values()))
 DEFAULT_IMAGE_HOST = "tunnel"
 JEV_MODES = ("fake", "typesafe", "openrouter", "off")
 LLM_MODES = ("off", "anthropic", "bedrock")
 JEV_DEFAULT_MODELS = {"typesafe": "jev-latest", "openrouter": "typesafe/jev-1.13"}
-LLM_DEFAULT_MODELS = {"anthropic": "claude-sonnet-5-5"}  # Bedrock IDs differ, so it has no default
+LLM_DEFAULT_MODELS = {"anthropic": "claude-opus-5-5"}  # Bedrock IDs differ, so it has no default
+# Effort for the Claude models that think by default (llm.ADAPTIVE_THINKING_MODELS). V4 is Opus 5.5 at
+# medium; V3 ran Sonnet 5.5 at low (LLM_MODEL=claude-sonnet-5-5, LLM_EFFORT=low).
+LLM_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_LLM_EFFORT = "medium"
 MAX_MOCK_DELAY_MS = 5000
 
 ENV_VARS = (
     "SEARCH_BACKEND", "MOCK_INTERNET_URL", "MOCK_SCENARIO", "MOCK_DELAY_MS", "SERPAPI_KEY",
-    "FACECHECK_API_KEY", "FACECHECK_DEMO", "REKOGNITION_ENGINES", "REKOGNITION_MIN_SIMILARITY",
+    "FACECHECK_API_KEY", "FACECHECK_DEMO", "TRACE_API_KEY", "GOOGLE_VISION_API_KEY", "REKOGNITION_ENGINES",
+    "REKOGNITION_MIN_SIMILARITY", "REKOGNITION_PLATFORMS",
     "IMAGE_HOST", "IMAGE_BUCKET", "AWS_REGION", "JEV_MODE", "JEV_MODEL", "TYPESAFE_API_KEY",
-    "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY", "LLM_MODE", "LLM_MODEL", "LLM_EFFORT", "ANTHROPIC_API_KEY",
 )
 
 
@@ -59,6 +73,8 @@ ENV_VARS = (
 SECRET_ENV = {
     "serpapi": "SERPAPI_KEY",
     "facecheck": "FACECHECK_API_KEY",
+    "trace": "TRACE_API_KEY",
+    "google-vision": "GOOGLE_VISION_API_KEY",
     "typesafe": "TYPESAFE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -80,8 +96,11 @@ class Settings:
     serpapi_key: str | None = field(repr=False)
     facecheck_api_key: str | None = field(repr=False)
     facecheck_demo: bool
+    trace_api_key: str | None = field(repr=False)
+    google_vision_api_key: str | None = field(repr=False)
     rekognition_engines: tuple[str, ...]
     rekognition_min_similarity: float
+    rekognition_platforms: tuple[str, ...]  # empty: every site
     image_host: Literal["tunnel", "s3"]
     image_bucket: str | None
     aws_region: str | None
@@ -91,6 +110,7 @@ class Settings:
     openrouter_api_key: str | None = field(repr=False)
     llm_mode: Literal["off", "anthropic", "bedrock"]
     llm_model: str | None
+    llm_effort: str | None
     anthropic_api_key: str | None = field(repr=False)
     live: bool
     models: bool
@@ -99,6 +119,20 @@ class Settings:
         if count < 0:
             raise ValueError(f"connection count must be >= 0, got {count}")
         return TRUST_TABLE[min(count, max(TRUST_TABLE))]
+
+    @property
+    def serpapi_engines(self) -> tuple[str, ...]:
+        """The SerpApi engines this run searches: Yandex alone for V1, the configured ones for V3-V6."""
+        if self.search_backend == "serpapi":
+            return ("yandex_images",)
+        if self.search_backend == "rekognition":
+            return tuple(engine for engine in self.rekognition_engines if engine in SERPAPI_ENGINES)
+        return ()
+
+    @property
+    def needs_hosting(self) -> bool:
+        """Whether a search hosts the image for SerpApi (hosting.py)."""
+        return bool(self.serpapi_engines)
 
     @property
     def real_models_enabled(self) -> bool:
@@ -152,8 +186,9 @@ def load_settings(
     delay = _delay(env.get("MOCK_DELAY_MS", "0"))
     image_host = _choice(env, "IMAGE_HOST", IMAGE_HOSTS, DEFAULT_IMAGE_HOST)
     facecheck_demo = _flag(env, "FACECHECK_DEMO")
-    engines = _engines(env.get("REKOGNITION_ENGINES", ",".join(REKOGNITION_ENGINES)))
+    engines = _engines(env.get("REKOGNITION_ENGINES", ",".join(DEFAULT_REKOGNITION_ENGINES)))
     min_similarity = _similarity(env.get("REKOGNITION_MIN_SIMILARITY", str(DEFAULT_MIN_SIMILARITY)))
+    platforms = _platforms(env.get("REKOGNITION_PLATFORMS", ""))
 
     jev_mode = _choice(env, "JEV_MODE", JEV_MODES, "fake")
     llm_mode = _choice(env, "LLM_MODE", LLM_MODES, "off")
@@ -170,8 +205,15 @@ def load_settings(
     # Hosting settings (ssh for tunnel, IMAGE_BUCKET for s3) are checked by
     # hosting.require_hosting before a SerpApi search, and AWS credentials by
     # rekognition_backend.require_rekognition, not here.
-    if backend in HOSTED_BACKENDS:
+    uses_serpapi = backend == "serpapi" or (backend == "rekognition" and any(e in SERPAPI_ENGINES for e in engines))
+    uses_trace = backend == "rekognition" and "trace" in engines
+    uses_vision = backend == "rekognition" and "cloud_vision" in engines
+    if uses_serpapi:
         required.setdefault("SERPAPI_KEY", []).append("SerpApi search")
+    if uses_trace:
+        required.setdefault("TRACE_API_KEY", []).append("Trace face search")
+    if uses_vision:
+        required.setdefault("GOOGLE_VISION_API_KEY", []).append("Cloud Vision web detection")
     if backend == "rekognition":
         required.setdefault("AWS_REGION", []).append("Rekognition face matching")
     elif backend == "facecheck":
@@ -188,9 +230,15 @@ def load_settings(
     missing = [f"{name} (for {', '.join(why)})" for name, why in required.items() if name not in env]
     if missing:
         hint = ""
-        if backend == "rekognition" and not {"SERPAPI_KEY", "AWS_REGION"} <= env.keys():
-            hint = (" Save the SerpApi key with `python -m pipeline set-key serpapi` and AWS keys with "
-                    "`python -m pipeline set-key aws --region us-east-1`, set SEARCH_BACKEND=facecheck or "
+        if backend == "rekognition":
+            saves = [f"the {service} key with `python -m pipeline set-key {command}`"
+                     for service, command, name in (("Trace", "trace", "TRACE_API_KEY"),
+                                                    ("SerpApi", "serpapi", "SERPAPI_KEY"),
+                                                    ("Google Cloud Vision", "google-vision", "GOOGLE_VISION_API_KEY"))
+                     if name in required and name not in env]
+            if "AWS_REGION" not in env:
+                saves.append("AWS keys with `python -m pipeline set-key aws --region <region>`")
+            hint = (f" Save {' and '.join(saves)}, change REKOGNITION_ENGINES, set SEARCH_BACKEND=facecheck or "
                     "serpapi for another backend, or pass --mock for the mock internet.")
         elif "SERPAPI_KEY" in required and "SERPAPI_KEY" not in env:
             hint = " Save the SerpApi key with `python -m pipeline set-key serpapi`, or pass --mock for the mock internet."
@@ -207,11 +255,14 @@ def load_settings(
         mock_internet_url=mock_url.rstrip("/"),
         mock_scenario=mock_scenario,
         mock_delay_ms=delay,
-        serpapi_key=env.get("SERPAPI_KEY") if backend in HOSTED_BACKENDS else None,
+        serpapi_key=env.get("SERPAPI_KEY") if uses_serpapi else None,
         facecheck_api_key=env.get("FACECHECK_API_KEY") if backend == "facecheck" else None,
         facecheck_demo=facecheck_demo,
+        trace_api_key=env.get("TRACE_API_KEY") if uses_trace else None,
+        google_vision_api_key=env.get("GOOGLE_VISION_API_KEY") if uses_vision else None,
         rekognition_engines=engines,
         rekognition_min_similarity=min_similarity,
+        rekognition_platforms=platforms,
         image_host=image_host,
         image_bucket=env.get("IMAGE_BUCKET"),
         aws_region=env.get("AWS_REGION"),
@@ -221,6 +272,8 @@ def load_settings(
         openrouter_api_key=env.get("OPENROUTER_API_KEY") if jev_mode == "openrouter" else None,
         llm_mode=llm_mode,
         llm_model=env.get("LLM_MODEL", LLM_DEFAULT_MODELS.get(llm_mode)) if llm_mode != "off" else None,
+        # Validated only when a model runs, like MOCK_SCENARIO.
+        llm_effort=_choice(env, "LLM_EFFORT", LLM_EFFORTS, DEFAULT_LLM_EFFORT) if llm_mode != "off" else None,
         anthropic_api_key=env.get("ANTHROPIC_API_KEY") if llm_mode == "anthropic" else None,
         live=live,
         models=models,
@@ -261,6 +314,14 @@ def _engines(raw: str) -> tuple[str, ...]:
     if not names or any(name not in REKOGNITION_ENGINES for name in names):
         raise ConfigError(f"REKOGNITION_ENGINES={raw!r} is not supported; expected a comma-separated list of "
                           f"{', '.join(REKOGNITION_ENGINES)}")
+    return names
+
+
+def _platforms(raw: str) -> tuple[str, ...]:
+    names = tuple(dict.fromkeys(name.strip().lower() for name in raw.split(",") if name.strip()))
+    if any(name not in SEARCH_PLATFORMS for name in names) or (raw.strip() and not names):
+        raise ConfigError(f"REKOGNITION_PLATFORMS={raw!r} is not supported; expected a comma-separated list of "
+                          f"{', '.join(SEARCH_PLATFORMS)}, or nothing for every site")
     return names
 
 

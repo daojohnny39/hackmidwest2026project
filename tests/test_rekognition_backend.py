@@ -1,12 +1,14 @@
-"""Backend V3 (SerpApi search + Rekognition face matching), offline (spec 1.1, 1.7).
+"""Backend V3 (Trace and SerpApi search + Rekognition face matching), offline (spec 1.1, 1.7).
 
 httpx.MockTransport stands in for SerpApi and the hosts of result images, FakeHost for
-image hosting, and FakeRekognition for boto3's Rekognition client. Result images are
+image hosting, FakeTrace for the Trace client (tests/test_trace_face.py covers its HTTP),
+and FakeRekognition for boto3's Rekognition client. Result images are
 blank JPEGs told apart by their width, which survives the backend's re-encoding. The
 socket guard from OfflineTestCase stays on throughout.
 """
 
 import asyncio
+import base64
 import io
 import json
 import os
@@ -24,7 +26,9 @@ from pipeline.config import ConfigError, load_settings
 from pipeline.contracts import CaptureImage, FetchedPage, UploadRecord, validate_references
 from pipeline.image_agent import system_prompt
 from pipeline.search.base import BackendError, parse_image_results
+from pipeline.search.cloud_vision import VISION_URL, CloudVisionSearch
 from pipeline.search.rekognition_backend import (
+    TRACE_EXTRA_DEADLINE_S,
     RekognitionBackend, aws_error, best_similarity, build_rekognition_backend, face_crop, merge, require_rekognition,
     sanitize_engine, score_band,
 )
@@ -64,6 +68,42 @@ LENS = {
         {"position": 3, "title": "Pat at the meetup", "link": BROKEN, "source": "broken.example",
          "thumbnail": "https://tbn.example/t4.jpg", "image": "https://img.example/missing.jpg"},
     ],
+}
+# V5's engine, in the shape of SerpApi's documented sample (checked 2026-10-11): link is Bing's own
+# image-detail page, source the page with the image, original the image, cdn_original Bing's copy.
+BING = {
+    "search_metadata": {"id": "b-1", "status": "Success"},
+    "search_parameters": {"engine": "bing_reverse_image", "image_url": HOSTED},
+    "image_info": {"link": "https://www.bing.com/images/search?view=detailv2", "source": HOSTED, "original": HOSTED},
+    "pages_with_this_image": [
+        {"title": "Pat Lee | LinkedIn", "link": "https://www.bing.com/images/search?view=detailv2&id=A1",
+         "thumbnail": "https://tse1.mm.bing.net/th?id=t1", "source": "https://www.linkedin.com/in/patlee/",
+         "original": "https://img.example/linkedin.jpg", "cdn_original": "https://th.bing.example/R.1",
+         "domain": "www.linkedin.com", "size": "400 x 400"},
+    ],
+    "related_content": [
+        {"position": 1, "title": "patlee (Pat Lee) - GitHub",
+         "link": "https://www.bing.com/images/search?view=detailv2&id=B2", "thumbnail": "https://tse2.mm.bing.net/th?id=t3",
+         "source": GITHUB, "original": "https://img.example/hotlink-blocked.jpg",
+         "cdn_original": "https://th.bing.example/github.png", "domain": "github.com"},
+        {"position": 2, "title": "Someone else", "link": "https://www.bing.com/images/search?view=detailv2&id=C3",
+         "source": LOOKALIKE, "original": "https://img.example/lookalike.jpg", "domain": "lookalike.example"},
+        {"position": 3, "title": "No page", "link": "https://www.bing.com/images/search?view=detailv2&id=D4"},
+    ],
+}
+VISION_KEY = "AIza-vision-test-key-not-real"
+# V6's engine: a Cloud Vision webDetection object.
+VISION = {
+    "webEntities": [{"entityId": "/m/0", "score": 0.4, "description": "Pat Lee"}],
+    "bestGuessLabels": [{"label": "pat lee", "languageCode": "en"}],
+    "pagesWithMatchingImages": [
+        {"url": "https://www.linkedin.com/in/patlee/", "pageTitle": "Pat Lee | <b>LinkedIn</b> &amp; more",
+         "fullMatchingImages": [{"url": "https://img.example/linkedin.jpg"}]},
+        {"url": GITHUB, "pageTitle": "patlee", "partialMatchingImages": [{"url": "https://img.example/github.png"}]},
+        {"url": "javascript:alert(1)", "fullMatchingImages": [{"url": "https://img.example/x.jpg"}]},
+    ],
+    "fullMatchingImages": [{"url": "https://img.example/linkedin.jpg"}, {"url": "https://img.example/t4.jpg"}],
+    "visuallySimilarImages": [{"url": "https://img.example/lookalike.jpg"}, {"url": "https://img.example/landscape.jpg"}],
 }
 # Result image path -> width; width -> CompareFaces reply (or exception).
 WIDTHS = {"/linkedin.jpg": 101, "/lookalike.jpg": 102, "/landscape.jpg": 103, "/github.png": 104, "/t4.jpg": 105,
@@ -132,8 +172,11 @@ class V3TestCase(OfflineTestCase):
         (self.folder / "img-1.jpg").write_bytes(jpeg(1000, 800))
         self.serp, self.downloads = [], []
 
-    def backend(self, serp=None, *, rekognition=None, images=None, pages=None, refresh=False, **options):
-        """serp: engine -> list of (status, body) replies, used in order."""
+    def backend(self, serp=None, *, rekognition=None, images=None, pages=None, refresh=False, hosted=True,
+                **options):
+        """serp: engine -> list of (status, body) replies, used in order. hosted=False builds it
+        without a SerpApi key or image host, as for REKOGNITION_ENGINES=trace. Engines default to
+        V3's SerpApi pair, yandex_images and google_lens."""
         serp = {engine: list(replies) for engine, replies in (serp or {"yandex_images": [(200, YANDEX)],
                                                                        "google_lens": [(200, LENS)]}).items()}
         images = images if images is not None else {}
@@ -155,8 +198,10 @@ class V3TestCase(OfflineTestCase):
 
         self.host = FakeHost()
         self.rekognition = rekognition or FakeRekognition()
+        options.setdefault("engines", ("yandex_images", "google_lens"))
         backend = RekognitionBackend(
-            api_key=KEY, capture_dir=self.folder, host=self.host, rekognition=self.rekognition,
+            api_key=KEY if hosted else None, capture_dir=self.folder, host=self.host if hosted else None,
+            rekognition=self.rekognition,
             cache_dir=self.folder / "cache", refresh=refresh,
             search_client=httpx.AsyncClient(transport=httpx.MockTransport(search)),
             images=httpx.AsyncClient(transport=httpx.MockTransport(image)),
@@ -328,6 +373,251 @@ class SearchTests(V3TestCase):
         self.assertEqual(result.extras["outcomes"], {"image_unavailable": 2, "matched": 1, "no_image": 1})
         self.assertFalse([url for url in self.downloads if "127.0.0.1" in url or "10.0.0.8" in url])
 
+    def test_an_image_without_a_face_moves_on_to_the_next(self):
+        lens = {"search_metadata": {"status": "Success"}, "visual_matches": [
+            # CompareFaces finds no face in the full-size image; the thumbnail matches.
+            {"link": "https://a.example/p", "image": "https://img.example/landscape.jpg",
+             "thumbnail": "https://tbn.example/t4.jpg"},
+            # No face in either: CompareFaces refuses the first and finds none in the second.
+            {"link": "https://b.example/p", "image": "https://tbn.example/t1.jpg",
+             "thumbnail": "https://img.example/landscape.jpg"},
+            # No face, then a thumbnail that won't download: still no_face, not image_unavailable.
+            {"link": "https://c.example/p", "image": "https://img.example/landscape.jpg",
+             "thumbnail": "https://img.example/missing.jpg"},
+        ]}
+        backend = self.backend({"google_lens": [(200, lens)]}, engines=("google_lens",))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([(hit.url, hit.face_score) for hit in result.hits], [("https://a.example/p", 85)])
+        self.assertEqual(result.extras["outcomes"], {"matched": 1, "no_face": 2})
+        self.assertEqual(len(self.rekognition.compare_calls), 5)
+
+
+TRACE_MATCHES = [
+    {"score": 71, "tier": "possible", "platform": "instagram", "handle": "someone_else",
+     "url": "https://www.instagram.com/someone_else/", "preview_url": "https://traceaifacescan.app/api/v1/scans/scan-1/previews/1"},
+    {"score": 96, "tier": "near_certain", "platform": "linkedin", "handle": "patlee",
+     "url": "https://www.linkedin.com/in/patlee/", "preview_url": "https://traceaifacescan.app/api/v1/scans/scan-1/previews/0"},
+    {"score": 74, "tier": "possible", "platform": "web", "handle": None,
+     "url": "https://blog.example/pat-at-the-meetup", "preview_url": "https://evil.example/steal-the-key"},
+    {"score": 70, "tier": "possible", "platform": "x", "handle": "nopreview", "url": "https://x.com/nopreview",
+     "preview_url": "https://traceaifacescan.app/api/v1/scans/scan-1/previews/9"},
+]
+# Preview index -> width, picking a CompareFaces reply from REPLIES: LinkedIn 99.62, Instagram 61.0, and
+# the blog 85.9 (its preview URL isn't Trace's, so the backend uses Trace's path for its index, 2).
+PREVIEW_WIDTHS = {0: 101, 1: 102, 2: 105}
+
+
+class FakeTrace:
+    def __init__(self, matches=TRACE_MATCHES, error=None):
+        self.matches, self.error = matches, error
+        self.uploads, self.keys, self.previews, self.deleted, self.closed = [], [], [], [], False
+
+    async def search(self, image_id, image, *, key=None):
+        self.uploads.append(image)
+        self.keys.append(key)
+        if self.error:
+            raise self.error
+        return "scan-1", {"id": "scan-1", "status": "done", "locked": False, "matches": self.matches}
+
+    async def preview(self, url):
+        self.previews.append(url)
+        width = PREVIEW_WIDTHS.get(int(url.rsplit("/", 1)[1]))
+        if width is None:
+            raise BackendError("not_found", status_code=404)
+        return jpeg(width)
+
+    async def delete(self, image_id):
+        self.deleted.append(image_id)
+
+    async def aclose(self):
+        self.closed = True
+
+
+class TraceEngineTests(V3TestCase):
+    def test_trace_only_needs_no_serpapi_or_hosting(self):
+        fake = FakeTrace()
+        backend = self.backend({}, engines=("trace",), trace_search=fake, hosted=False)
+        self.assertEqual(backend.extra_deadline_s, TRACE_EXTRA_DEADLINE_S)
+        result = parse_image_results(self.search(backend))
+
+        self.assertEqual((self.serp, self.host.uploads), ([], []))
+        [upload] = fake.uploads
+        self.assertEqual(Image.open(io.BytesIO(upload)).size, (400, 400))  # the face crop
+        self.assertEqual([(hit.url, hit.face_score, hit.title, hit.snippet) for hit in result.hits], [
+            (LINKEDIN, 99, "patlee on linkedin", "Trace face match 96/100 (near certain)"),
+            ("https://blog.example/pat-at-the-meetup", 85, "web", "Trace face match 74/100 (possible)")])
+        self.assertEqual(result.extras["outcomes"], {"matched": 2, "below_threshold": 1, "image_unavailable": 1})
+        self.assertEqual(result.request_id, "scan-1")
+        # A preview URL off Trace's API is replaced by Trace's own path, so the key never leaves Trace.
+        self.assertTrue(all(url.startswith("https://traceaifacescan.app/api/v1/scans/scan-1/previews/")
+                            for url in fake.previews))
+        self.assertEqual(self.cached(), ["v3-trace-80.json"])  # Trace replies themselves aren't cached
+        asyncio.run(backend.release(IMAGE))
+        self.assertEqual(fake.deleted, ["img-1"])
+
+        # The Idempotency-Key comes from the photo, so another run of the same photo gets the same scan.
+        again = FakeTrace()
+        self.search(self.backend({}, engines=("trace",), trace_search=again, hosted=False, refresh=True))
+        self.assertEqual(len(fake.keys[0]), 32)
+        self.assertEqual(again.keys, fake.keys)
+
+    def test_every_trace_match_is_compared_and_the_cap_limits_the_rest(self):
+        fake = FakeTrace()
+        backend = self.backend(engines=("trace", "yandex_images", "google_lens"), trace_search=fake)
+        with patch("pipeline.search.rekognition_backend.MAX_CANDIDATES", 2):
+            result = parse_image_results(self.search(backend))
+        # All 4 Trace matches, then the first 2 SerpApi-only pages (GitHub, the lookalike). LinkedIn,
+        # also found by Yandex and Lens, is compared through Trace's preview, not a download.
+        self.assertEqual([hit.url for hit in result.hits],
+                         [LINKEDIN, GITHUB, "https://blog.example/pat-at-the-meetup"])
+        self.assertEqual(result.extras["candidates"], 8)
+        self.assertEqual(result.extras["outcomes"]["over_limit"], 2)
+        self.assertEqual(len(fake.previews), 4)
+        self.assertNotIn("https://img.example/linkedin.jpg", self.downloads)
+        self.assertEqual(len(self.serp), 2)
+
+    def test_platform_limit_drops_other_sites_before_comparing(self):
+        # V3_1: of the 8 merged pages only the LinkedIn profile is kept, compared through Trace's preview.
+        fake = FakeTrace()
+        backend = self.backend(engines=("trace", "yandex_images", "google_lens"), trace_search=fake,
+                               platforms=("linkedin", "facebook"))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([(hit.url, hit.face_score) for hit in result.hits], [(LINKEDIN, 99)])
+        self.assertEqual((result.extras["candidates"], result.extras["outcomes"]),
+                         (8, {"out_of_scope": 7, "matched": 1}))
+        self.assertEqual(result.extras["platforms"], ["linkedin", "facebook"])
+        self.assertEqual((len(self.rekognition.compare_calls), self.downloads), (1, []))
+        self.assertIn("v3-trace+yandex_images+google_lens-80-linkedin+facebook.json", self.cached())
+
+    def test_the_cap_counts_only_kept_platforms(self):
+        backend = self.backend(platforms=("github",))
+        with patch("pipeline.search.rekognition_backend.MAX_CANDIDATES", 1):
+            result = parse_image_results(self.search(backend))
+        # Without the limit the cap of 1 would compare LinkedIn, the first merged page.
+        self.assertEqual([hit.url for hit in result.hits], [GITHUB])
+        self.assertEqual(result.extras["outcomes"], {"out_of_scope": 4, "matched": 1})
+
+    def test_small_face_sends_the_whole_photo_to_trace(self):
+        small = {"BoundingBox": {"Left": 0.45, "Top": 0.45, "Width": 0.05, "Height": 0.05}}
+        fake = FakeTrace(matches=[])
+        self.search(self.backend({}, engines=("trace",), trace_search=fake, hosted=False,
+                                 rekognition=FakeRekognition(faces=(small,))))
+        self.assertEqual(Image.open(io.BytesIO(fake.uploads[0])).size, (1000, 800))
+
+    def test_trace_failure_keeps_the_serpapi_results(self):
+        fake = FakeTrace(error=BackendError("no_credits"))
+        backend = self.backend(engines=("trace", "yandex_images", "google_lens"), trace_search=fake)
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([hit.url for hit in result.hits], [LINKEDIN, GITHUB, BROKEN])
+        self.assertEqual((result.extras["engines"], result.extras["failed_engines"]),
+                         (["yandex_images", "google_lens"], ["trace"]))
+        self.assertNotIn("v3-trace+yandex_images+google_lens-80.json", self.cached())
+
+    def test_engines_need_their_clients(self):
+        with self.assertRaisesRegex(ValueError, "TraceFaceSearch"):
+            self.backend(engines=("trace",))
+        with self.assertRaisesRegex(ValueError, "SerpApi key"):
+            self.backend(engines=("google_lens",), hosted=False)
+
+
+class V5Tests(V3TestCase):
+    """V5: Bing reverse image search through SerpApi instead of Google Lens."""
+
+    def test_bing_gets_the_hosted_crop_as_image_url_and_its_pages_are_compared(self):
+        backend = self.backend({"yandex_images": [(200, YANDEX)], "bing_reverse_image": [(200, BING)]},
+                               engines=("yandex_images", "bing_reverse_image"))
+        result = parse_image_results(self.search(backend))
+        self.assertIn({"engine": "bing_reverse_image", "image_url": HOSTED, "mkt": "en-US", "api_key": KEY}, self.serp)
+        self.assertEqual(len(self.host.uploads), 1)  # one hosted crop for both engines
+
+        # Hits link to the pages (Bing's source), never to Bing's own detail pages.
+        self.assertEqual([(hit.url, hit.face_score, hit.title, hit.source) for hit in result.hits], [
+            (LINKEDIN, 99, "Pat Lee | LinkedIn", "linkedin.com"),
+            (GITHUB, 93, "patlee (Pat Lee) - GitHub", "github.com")])
+        self.assertEqual(result.extras["engines"], ["yandex_images", "bing_reverse_image"])
+        self.assertEqual((result.extras["candidates"], result.extras["outcomes"]),
+                         (4, {"matched": 2, "below_threshold": 1, "no_face": 1}))
+        # The page's own image refused the download, so Bing's copy of it was compared.
+        self.assertIn("https://img.example/hotlink-blocked.jpg", self.downloads)
+        self.assertIn("https://th.bing.example/github.png", self.downloads)
+        for text in [json.dumps(self.search(backend))] + [path.read_text() for path in (self.folder / "cache").iterdir()]:
+            self.assertNotIn(KEY, text)
+            self.assertNotIn("lhr.life", text)
+            self.assertNotIn("bing.com/images/search", text)
+        self.assertEqual(self.cached(), ["bing_reverse_image.json", "v3-yandex_images+bing_reverse_image-80.json",
+                                         "yandex_images.json"])
+
+    def test_bing_failing_keeps_yandex(self):
+        failed = {"search_metadata": {"id": "b-2", "status": "Error"}, "error": "Bing Reverse Image failed"}
+        backend = self.backend({"yandex_images": [(200, YANDEX)], "bing_reverse_image": [(200, failed)]},
+                               engines=("yandex_images", "bing_reverse_image"))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([hit.url for hit in result.hits], [LINKEDIN])
+        self.assertEqual(result.extras["failed_engines"], ["bing_reverse_image"])
+
+
+class V6Tests(V3TestCase):
+    """V6: Google Cloud Vision web detection instead of Google Lens."""
+
+    def vision(self, *replies):
+        """A CloudVisionSearch whose requests go to these (status, body) replies in order."""
+        self.vision_requests = []
+        queue = list(replies)
+
+        def annotate(request):
+            self.vision_requests.append(request)
+            status, body = queue.pop(0)
+            return httpx.Response(status, json=body)
+
+        return CloudVisionSearch(VISION_KEY, client=httpx.AsyncClient(transport=httpx.MockTransport(annotate)))
+
+    def test_cloud_vision_gets_the_crop_itself_and_needs_no_hosting(self):
+        vision = self.vision((200, {"responses": [{"webDetection": VISION}]}))
+        backend = self.backend({}, engines=("cloud_vision",), vision_search=vision, hosted=False)
+        result = parse_image_results(self.search(backend))
+
+        self.assertEqual((self.serp, self.host.uploads), ([], []))
+        [request] = self.vision_requests
+        self.assertEqual((str(request.url), request.headers["x-goog-api-key"]), (VISION_URL, VISION_KEY))
+        [body] = json.loads(request.content)["requests"]
+        self.assertEqual(body["features"], [{"type": "WEB_DETECTION", "maxResults": 50}])
+        crop = base64.b64decode(body["image"]["content"])
+        self.assertEqual(crop, self.rekognition.compare_calls[0]["SourceImage"]["Bytes"])
+        self.assertEqual(Image.open(io.BytesIO(crop)).size, (400, 400))
+
+        # Pages first (HTML stripped from titles), then an image Google gave without a page.
+        self.assertEqual([(hit.url, hit.face_score, hit.title, hit.snippet) for hit in result.hits], [
+            (LINKEDIN, 99, "Pat Lee | LinkedIn & more", "Cloud Vision: page showing the same image"),
+            (GITHUB, 93, "patlee", "Cloud Vision: page showing part of the image"),
+            ("https://img.example/t4.jpg", 85, "", "Cloud Vision: the same image, page not given")])
+        self.assertEqual(result.hits[2].source, "img.example")
+        self.assertEqual((result.extras["engines"], result.extras["candidates"], result.extras["outcomes"]),
+                         (["cloud_vision"], 5, {"matched": 3, "below_threshold": 1, "no_face": 1}))
+        for text in [json.dumps(self.search(backend))] + [path.read_text() for path in (self.folder / "cache").iterdir()]:
+            self.assertNotIn(VISION_KEY, text)
+            self.assertNotIn("Pat Lee\"", text)  # webEntities and bestGuessLabels aren't kept
+        self.assertEqual(self.cached(), ["cloud_vision.json", "v3-cloud_vision-80.json"])
+
+        # A rerun reads Cloud Vision's cached reply instead of asking again.
+        rerun = self.backend({}, engines=("cloud_vision",), vision_search=self.vision(), hosted=False, min_similarity=60)
+        self.assertEqual(len(parse_image_results(self.search(rerun)).hits), 4)
+        self.assertEqual(self.vision_requests, [])
+
+    def test_cloud_vision_failing_keeps_the_other_engines(self):
+        disabled = {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Cloud Vision API has not been used",
+                              "details": [{"reason": "SERVICE_DISABLED"}]}}
+        backend = self.backend({"yandex_images": [(200, YANDEX)]}, engines=("yandex_images", "cloud_vision"),
+                               vision_search=self.vision((403, disabled)))
+        result = parse_image_results(self.search(backend))
+        self.assertEqual([hit.url for hit in result.hits], [LINKEDIN])
+        self.assertEqual((result.extras["engines"], result.extras["failed_engines"]),
+                         (["yandex_images"], ["cloud_vision"]))
+        self.assertEqual(self.cached(), ["yandex_images.json"])
+
+    def test_cloud_vision_needs_its_client(self):
+        with self.assertRaisesRegex(ValueError, "CloudVisionSearch"):
+            self.backend({}, engines=("cloud_vision",), hosted=False)
+
 
 class HelperTests(OfflineTestCase):
     def test_face_crop_pads_and_clips(self):
@@ -372,6 +662,20 @@ class HelperTests(OfflineTestCase):
         signed = {"visual_matches": [{"link": "https://a.example", "image": "https://s3.example/a.jpg?X-Amz-Signature=1"}]}
         self.assertEqual(sanitize_engine("google_lens", signed)["results"][0]["images"], [])
 
+    def test_sanitize_bing_keeps_the_page_not_bings_detail_link(self):
+        clean = sanitize_engine("bing_reverse_image", BING)
+        self.assertEqual(clean["results"][0], {
+            "title": "Pat Lee | LinkedIn", "source": "www.linkedin.com", "link": "https://www.linkedin.com/in/patlee/",
+            "thumbnail": "https://tse1.mm.bing.net/th?id=t1",
+            "images": ["https://img.example/linkedin.jpg", "https://th.bing.example/R.1",
+                       "https://tse1.mm.bing.net/th?id=t1"]})
+        # The result without a source page is dropped.
+        self.assertEqual([row["link"] for row in clean["results"]],
+                         ["https://www.linkedin.com/in/patlee/", GITHUB, LOOKALIKE])
+        dumped = json.dumps(clean)
+        self.assertNotIn(HOSTED, dumped)  # image_info and search_parameters echo the hosted crop
+        self.assertNotIn("bing.com/images/search", dumped)
+
     def test_merge_alternates_engines_and_puts_full_images_first(self):
         results = {"yandex_images": sanitize_engine("yandex_images", YANDEX),
                    "google_lens": sanitize_engine("google_lens", LENS)}
@@ -390,7 +694,8 @@ class HelperTests(OfflineTestCase):
 class BuildTests(OfflineTestCase):
     def settings(self, **env):
         return load_settings(backend="rekognition", dotenv_path=None,
-                             environ={"SERPAPI_KEY": KEY, "AWS_REGION": "us-east-1", **env})
+                             environ={"SERPAPI_KEY": KEY, "TRACE_API_KEY": "trk_live_test", "AWS_REGION": "us-east-1",
+                                      **env})
 
     def test_missing_credentials_stop_before_the_tunnel(self):
         capture = live_capture("img-1")
@@ -399,19 +704,54 @@ class BuildTests(OfflineTestCase):
                 build_rekognition_backend(self.settings(), capture, Path("/tmp/run"), refresh=False)
         open_host.assert_not_called()
 
+    def test_trace_only_build_opens_no_tunnel(self):
+        os.environ.update(AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY="x" * 40)
+        settings = load_settings(backend="rekognition", dotenv_path=None, environ={
+            "TRACE_API_KEY": "trk_live_test", "AWS_REGION": "us-east-2", "REKOGNITION_ENGINES": "trace"})
+        with patch("pipeline.search.rekognition_backend.open_host") as open_host, \
+                patch("pipeline.search.rekognition_backend.rekognition_client"):
+            backend = build_rekognition_backend(settings, live_capture("img-1"), Path("/tmp/run"), refresh=False)
+        self.addCleanup(lambda: asyncio.run(backend.aclose()))
+        open_host.assert_not_called()
+        self.assertIsNone(backend.host)
+        self.assertEqual((backend.engines, backend.trace_search.api_key), (("trace",), "trk_live_test"))
+
     def test_build_uses_the_settings(self):
         os.environ.update(AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY="x" * 40)
         require_rekognition(self.settings())
-        settings = self.settings(REKOGNITION_ENGINES="google_lens", REKOGNITION_MIN_SIMILARITY="90")
+        settings = self.settings(REKOGNITION_ENGINES="google_lens", REKOGNITION_MIN_SIMILARITY="90",
+                                 REKOGNITION_PLATFORMS="linkedin,facebook")
         with patch("pipeline.search.rekognition_backend.open_host", return_value=FakeHost()), \
                 patch("pipeline.search.rekognition_backend.rekognition_client") as client:
             backend = build_rekognition_backend(settings, live_capture("img-1"), Path("/tmp/run"), refresh=True)
         self.addCleanup(lambda: asyncio.run(backend.aclose()))
         client.assert_called_once_with("us-east-1")
         self.assertEqual((backend.engines, backend.min_similarity, backend.refresh), (("google_lens",), 90.0, True))
+        self.assertEqual(backend.platforms, ("linkedin", "facebook"))
         self.assertEqual(backend.cache_dir, Path("/tmp/run/cache/rekognition"))
         self.assertIn("face_score", system_prompt(backend))
         self.assertIn("under 90 were already dropped", system_prompt(backend))
+
+
+    def test_v6_build_gets_a_cloud_vision_client(self):
+        os.environ.update(AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE", AWS_SECRET_ACCESS_KEY="x" * 40)
+        settings = self.settings(REKOGNITION_ENGINES="trace,yandex_images,cloud_vision",
+                                 GOOGLE_VISION_API_KEY=VISION_KEY)
+        with patch("pipeline.search.rekognition_backend.open_host", return_value=FakeHost()) as open_host, \
+                patch("pipeline.search.rekognition_backend.rekognition_client"):
+            backend = build_rekognition_backend(settings, live_capture("img-1"), Path("/tmp/run"), refresh=False)
+        self.addCleanup(lambda: asyncio.run(backend.aclose()))
+        open_host.assert_called_once()  # for Yandex; Cloud Vision gets the crop's bytes
+        self.assertEqual(backend.engines, ("trace", "yandex_images", "cloud_vision"))
+        self.assertEqual(backend.vision_search.api_key, VISION_KEY)
+
+        v5 = self.settings()
+        with patch("pipeline.search.rekognition_backend.open_host", return_value=FakeHost()), \
+                patch("pipeline.search.rekognition_backend.rekognition_client"):
+            backend = build_rekognition_backend(v5, live_capture("img-1"), Path("/tmp/run"), refresh=False)
+        self.addCleanup(lambda: asyncio.run(backend.aclose()))
+        self.assertEqual(backend.engines, ("trace", "yandex_images", "bing_reverse_image"))
+        self.assertIsNone(backend.vision_search)
 
 
 class CollectTests(V3TestCase):

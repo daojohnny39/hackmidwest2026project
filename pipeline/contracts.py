@@ -53,7 +53,7 @@ def safe_id(value: str, what: str) -> str:
 
 class Consent(Contract):
     confirmed: StrictBool
-    participant: str = Field(min_length=1)
+    participant: str = ""  # may be empty; only the consent gate reads it, never search or models
     confirmed_at: AwareDatetime
     external_processing: StrictBool = False  # required true for live search or --models
 
@@ -111,6 +111,7 @@ class CaptureArtifact(Contract):
     llm_mode: LlmMode
     jev_mode: JevMode
     llm_model: str | None = None
+    llm_effort: str | None = None
     jev_model: str | None = None
 
     @model_validator(mode="after")
@@ -194,7 +195,7 @@ class ImageTriage(Contract):
 class FoundVia(Contract):
     image_id: str
     hit_position: Rank | None  # rank in that image's results; None if reached by a followed link
-    depth: Depth  # 0 = search hit, 1 = followed from a profile
+    depth: Depth  # 0 = search hit, 1 = followed from a depth-0 profile or post
     parent_url: str | None = None
 
     @model_validator(mode="after")
@@ -544,6 +545,16 @@ class CandidateSignals(Contract):
     consistency: Probability
     name_collision: bool
     newest_update: str | None = None
+    # Best face score among the hits that reached this candidate, and where it sits on its backend's scale
+    # (0 weak, 1 strong). Both None when no such hit has a face score (Yandex alone, the mock).
+    face_score: int | None = Field(default=None, ge=0, le=100)
+    face_match: Probability | None = None
+
+    @model_validator(mode="after")
+    def _face(self) -> CandidateSignals:
+        if (self.face_score is None) != (self.face_match is None):
+            raise ValueError("face_score and face_match are set together")
+        return self
 
 
 class CandidateVerdict(Contract):

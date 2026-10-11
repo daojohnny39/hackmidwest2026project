@@ -329,15 +329,20 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def open_host(settings: Settings, run_dir: Path):
-    """The run's image host (IMAGE_HOST, hosting.py). A tunnel opens here, before any image's
-    deadline starts; if it can't, no search is made."""
-    from pipeline.hosting import HostingError, host_for
+    """The run's image host (IMAGE_HOST, hosting.py). A tunnel opens, or the bucket is checked, here,
+    before any image's deadline starts; if that fails, no search is made."""
+    from pipeline.hosting import KEY_PREFIX, HostingError, host_for
 
     host = host_for(settings, run_dir)
     if hasattr(host, "start"):
         try:
             host.start()
         except HostingError as error:
+            if settings.image_host == "s3":
+                raise ConfigError(f"the image bucket failed its check ({error}); IMAGE_HOST=s3 needs AWS keys that "
+                                  f"can put and delete objects under {KEY_PREFIX} in IMAGE_BUCKET, and a bucket "
+                                  "policy that lets anyone s3:GetObject there; or set IMAGE_HOST=tunnel, "
+                                  "or pass --mock") from None
             raise ConfigError(f"couldn't open the image tunnel ({error}); check the network and retry with "
                               "`stage 1 --run <run>`, set IMAGE_HOST=s3, or pass --mock") from None
     return host

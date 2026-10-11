@@ -346,6 +346,12 @@ class RecheckConsentTests(CaptureCase):
             with self.subTest(flags=flags), self.assertRaisesRegex(ConsentError, "external_processing"):
                 recheck_consent(self.artifact, **flags)
 
+    def test_empty_participant_is_allowed(self):
+        data = fixture_manifest()
+        data["consent"]["participant"] = ""
+        self.write_manifest(data)
+        self.assertEqual(load_capture(self.folder, models=True).bundle.consent.participant, "")
+
     def test_changed_participant(self):
         self.edit(lambda m: m["consent"].update(participant="Sam Rivera (fictional)"))
         with self.assertRaisesRegex(ConsentError, "participant changed"):
