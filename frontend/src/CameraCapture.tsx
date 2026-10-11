@@ -27,8 +27,14 @@ function CapturePreview({ result, onDelete }: { result: FrontCaptureResult; onDe
   </>
 }
 
-export default function CameraCapture() {
-  const capture = useAutoCapture()
+interface CameraCaptureProps {
+  onCaptured?: (result: FrontCaptureResult) => void
+  onDelete?: () => void
+  onStartRequested?: (start: () => void) => void
+}
+
+export default function CameraCapture({ onCaptured, onDelete, onStartRequested }: CameraCaptureProps = {}) {
+  const capture = useAutoCapture(onCaptured)
   const { state, result, camera } = capture
   const { videoRef, devices, activeDeviceId, status: cameraStatus, error: cameraError } = camera
   const [aspect, setAspect] = useState(4 / 3)
@@ -36,6 +42,17 @@ export default function CameraCapture() {
   const active = cameraStatus === 'active'
   const running = ['preparing', 'guiding', 'holding', 'capturing'].includes(state.phase)
   const message = guidance(state)
+
+  function requestStart() {
+    const start = () => capture.start()
+    if (onStartRequested) onStartRequested(start)
+    else start()
+  }
+
+  function deletePhoto() {
+    capture.deleteResult()
+    onDelete?.()
+  }
 
   function downloadDiagnostics() {
     const blob = new Blob([JSON.stringify({ schemaVersion: 1, sessionId: state.sessionId, preset: state.activeTarget, ...state.diagnostics }, null, 2)], { type: 'application/json' })
@@ -69,7 +86,7 @@ export default function CameraCapture() {
         </> : state.phase === 'paused' ? <>
           <button type="button" className="primary" onClick={capture.resume}>Resume capture</button>
           <button type="button" onClick={capture.stop}>Stop camera</button>
-        </> : <button type="button" className="primary" onClick={() => capture.start()}>
+        </> : <button type="button" className="primary" onClick={requestStart}>
           {state.phase === 'error' ? 'Try again' : result || state.phase === 'complete' ? 'Retake front photo' : 'Start camera'}
         </button>}
         {devices.length > 1 && <select aria-label="Camera" value={activeDeviceId ?? ''} disabled={state.phase === 'preparing'} onChange={(event) => capture.changeCamera(event.target.value)}>
@@ -99,7 +116,7 @@ export default function CameraCapture() {
       {result && <article className="front-result" aria-label="Captured front photo">
         <h2>Captured front photo</h2>
         {running && <p>Your previous photo stays available until the retake succeeds.</p>}
-        <CapturePreview result={result} onDelete={capture.deleteResult} />
+        <CapturePreview result={result} onDelete={deletePhoto} />
       </article>}
     </section>
   )

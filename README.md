@@ -30,8 +30,8 @@ as future reference; left/right capture is deferred. The automatic capture engin
 guidance, reset logging, and `useAutoCapture` integration hook are implemented.
 The camera page uses automatic capture by default. Choose **Start camera**, follow
 the positioning guidance, and hold steady; the app takes the photo once all checks
-pass. The manual checkpoint remains available at `?mode=manual`. A future UI can
-reuse the same capture state and actions without changing the agreed defaults.
+pass. Choose **Manual** for a single-photo manual reference, or use `?capture=manual`.
+The original manual checkpoint remains available at `?mode=manual`.
 Stage 1 produces a JPEG and metadata; a later backend adapter can hand that result
 to the AWS Strands workflow. No upload or AWS execution is implemented.
 
@@ -65,7 +65,8 @@ The repository currently implements the camera and local face-analysis foundatio
 - Browser camera access, camera switching, and photo capture.
 - MediaPipe Face Landmarker analysis of each captured photo, including face
   counts, facial landmarks, and transformation matrices.
-- A landmark overlay and downloads for the original photo, overlay, and analysis JSON.
+- Automatic capture integrated with optional subject details and a preview of fictional findings; manual capture requires one reference photo.
+- Automatic photo/metadata downloads and a manual landmark overlay; the original manual checkpoint also exports the photo, overlay, and analysis JSON.
 - Separate Python tools for initializing the detector and analyzing a local photo.
 
 Public-image search, facial identity matching, match-certainty labels, and Threat
@@ -133,10 +134,12 @@ cd frontend
 npm run dev
 ```
 
-Open the URL printed by Vite (normally `http://localhost:5173`). Click **Start
-camera**, allow camera access, then click **Take photo** to see the face count
-and landmark overlay. You can compare the original photo, download the results,
-or delete a snapshot.
+Open the URL printed by Vite (normally `http://localhost:5173`). Choose **Start
+camera**, accept consent, and allow camera access. Follow the guidance and hold
+steady to capture one photo automatically. Choose **Manual** to take one photo
+yourself and review its face count and landmark overlay. Subject details are
+optional; a valid photo and authorization enable **Preview sample findings**.
+The preview uses fictional findings and does not upload the photo.
 
 The development and build scripts automatically copy the model and MediaPipe
 WebAssembly files into `frontend/public/mediapipe/`. Production builds include

@@ -1,216 +1,78 @@
-# Frontend
+# CyberPI — frontend preview
 
-React + TypeScript + Vite app with front-facing automatic capture by default and
-a separate manual camera checkpoint. The camera page consumes `useAutoCapture`;
-the same guidance/state contract supports later UI integration.
-MediaPipe runs locally; the app does not upload images.
+Migrated onto `an-frontend-rework` in the original repository.
 
-First download `models/face_landmarker.task` in the project root using Step 3 of
-the [project README](../README.md). Then run these commands from `frontend/`:
+The Member 5 first assignment: a subject form and source-linked candidate review, built on the team's existing React/TypeScript camera and local MediaPipe UI. The application name remains CyberPI, as confirmed by Adeeba. The green/ash palette, Calibri stack, and three screens are preserved.
 
-```bash
-npm install
-npm run dev       # http://localhost:5173
-npm run build     # type-check + production build into dist/
-npm run lint
+**Mock mode only. No search requests or photo uploads.** Member 1’s backend is not ready yet. Camera capture and local landmarks work; candidate findings are fictional and unrelated to the camera photo.
+
+## Run locally
+
+From this checkout's `frontend` folder (Node 26.11.1 verified):
+
+```sh
+npm ci
+npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
 ```
 
-`npm run dev` and `npm run build` verify the pinned SDK version and model checksum, then copy the model and the installed
-MediaPipe WebAssembly files to `public/mediapipe/`. That generated directory is
-ignored by Git. Production builds include these assets in `dist/`; no CDN or
-Python analysis service is needed at runtime.
+Open http://127.0.0.1:5174. Reuse the existing server if that port is occupied. On a fresh checkout, first download `models/face_landmarker.task` using the root README; dev/build copies it and installed WASM files into `public/mediapipe/`. The model is already present in Adeeba's local checkout. No AWS credentials or Python process is needed for this preview.
 
-## Automatic capture
-
-Open the local Vite URL (or `?mode=front`), choose **Start camera**, and allow
-camera access. Follow the live instruction and hold steady. The app takes one
-photo automatically after every angle and framing check passes for 400 ms, then
-stops the camera. No shutter click is needed. Choose **Retake front photo** to
-start again. The page stays simple, with no mode selector.
-
-`src/CameraCapture.tsx` attaches `camera.videoRef` to the video and invokes
-`useAutoCapture().start()` from the Start action. The hook never starts on mount.
-
-Render `state.guidanceCode` through `guidance(state)`, the hold progress and
-framing/pose state, and `troubleshooting(state)` when `state.troubleshooting` is
-true. The hook exposes pause/resume/stop/retry/retake/changeCamera actions and the
-latest `result`. The component owns Blob URLs for previews and downloads and must
-revoke them when replacing/deleting images or unmounting.
-
-The engine still requires **±5° on each axis** and a **400 ms** qualifying hold.
-It saves the exact qualifying full-resolution, unmirrored JPEG, stops the camera,
-and preserves the previous result until a successful retake. Framing remains one
-face, a 4% edge margin, 35–75% face height, and 40–60% box center on both axes.
-
-Reset diagnostics remain in `state.diagnostics`: cumulative reason counts, the
-latest 50 events, and aggregate blocked-check counts. The troubleshooting flag
-activates after three failed holds or 10 seconds of active guidance. These values
-drive the live instructions and troubleshooting. Expand **Capture diagnostics**
-to see estimated angles, face height/center, current failed checks, and reset
-counts, or download the reset log. Tolerances never relax automatically. Pause/resume, camera
-switching, and retry preserve the session log; a new Start after Stop or a retake
-begins a new session. Successful metadata includes that session's diagnostics.
-
-Pause, Stop, a hidden page, camera loss/change, or unmount cancels pending work.
-Model loading, inference, and encoding cannot publish a late image after cancellation.
-
-Implementation boundaries:
-
-- `src/capture/engine.ts`: UI-independent rules, hold timing, reset diagnostics,
-  one-shot commit, and `onState` / `onCaptured` / `onError` callbacks.
-- `src/capture/pose.ts` and `gates.ts`: validated column-major matrix conversion
-  and face-oval framing. No first-frame neutral calibration or angle smoothing.
-- `src/capture/browserSource.ts`: one local VIDEO detector, two-face capacity,
-  at most 10 sampled frames/sec, inference at up to 640 px on the longest edge.
-  Each full-resolution frame is frozen before deriving its inference canvas.
-- `src/hooks/useAutoCapture.ts`: React adapter with state, latest result, and
-  start/pause/resume/stop/retake/retry/changeCamera actions. Camera ownership stays
-  in `useCamera.ts`; UI components own and revoke download URLs.
-- `src/CameraCapture.tsx`: guidance, hold progress, camera controls, diagnostics,
-  photo preview and downloads; capture decisions remain in the engine.
-- `src/capture/types.ts`: centralized defaults and the versioned
-  `FrontCaptureResult` (`image: Blob` plus JSON metadata).
-
-The future Stage 2 adapter can receive `onCaptured(result)` and send image bytes
-and metadata through an authenticated backend to the AWS Strands workflow. No
-backend, AWS credentials, or Strands execution is included here. A browser Blob URL
-is only a local preview reference. See the [active spec](../docs/front-capture-spec.md).
-
-Photos, metadata, and diagnostics stay in page memory. Download any results or
-reset logs you need before refreshing or leaving the page.
-
-## Manual photo checkpoint
-
-Open the local Vite URL with `?mode=manual` to use this separate checkpoint.
-
-1. Click **Start camera** and allow camera access.
-2. Click **Take photo**. The exact JPEG from `useCamera.capture()` is decoded and
-   passed to the browser's local Face Landmarker.
-3. Review the face count and the landmark overlay on that snapshot. Use **Show
-   original** to compare alignment, or download the original, overlay, or JSON.
-
-The detector loads on the first photo and is reused for later photos. It uses
-`IMAGE` mode, up to two faces, transformation matrices enabled, and blendshapes
-disabled. One photo is analyzed at a time. This checkpoint uses per-photo analysis independently of the automatic flow.
-Both paths currently run inference synchronously on the main browser thread;
-worker execution is deferred pending device measurements.
-
-Each JSON report includes a unique `frame_id`, image dimensions, face count,
-normalized `x/y/z` landmarks, and transformation matrices. The browser keeps
-MediaPipe's web matrix format (`rows`, `columns`, flattened `data`); the separate
-Python checkpoint uses nested arrays. A zero-face result is valid and suggests
-trying a closer, well-lit photo. Failed analysis preserves the photo and offers
-**Retry analysis**.
-
-Camera photos stay in browser memory until deleted or the page is closed. Analysis
-does not upload them. Deleting a snapshot releases its download URLs, and leaving
-the page releases the camera and detector resources.
-
-The manual integration lives in `src/faceAnalysis.ts` and `src/ManualCapture.tsx`; the existing
-`src/hooks/useCamera.ts` still owns the camera stream and capture behavior.
-
-## Browser tests
-
-The app targets current desktop Safari, Firefox, Edge, and Chrome. Photo decoding
-uses a DOM image, and MediaPipe receives an explicit DOM canvas so analysis does
-not depend on `createImageBitmap` or `OffscreenCanvas`. The camera waits for video
-playback before enabling capture; restricted device enumeration does not prevent
-use of the active camera.
-
-Install Chrome and Edge normally, then install the two Playwright test engines:
-
-```bash
-npx playwright install firefox webkit
-npm test                        # all four projects, against the production build
-npm test -- --project=firefox    # or chrome, edge, webkit
-```
-
-The `edge` project launches Microsoft Edge itself. The `webkit` project uses
-Playwright WebKit, Safari's engine, rather than the installed Safari app. This
-does not replace physical-device testing in Safari or on iPhone/iPad. The Firefox
-project uses Playwright's Firefox build.
-
-Verification after connecting automatic capture to the camera page (October 11, 2026):
-
-| Check | Result |
-| --- | --- |
-| Build and lint | Passed |
-| `npm run test:unit` | 21 engine/geometry tests passed |
-| `npm run test:auto-ui` | 9 automatic scenarios passed in Chrome |
-| `npm run test:auto-real -- --project=chrome` | 3 real local-model scenarios passed |
-| `npm test -- --project=chrome` | 7 manual scenarios passed; optional personal-photo test skipped |
-
-Firefox and WebKit passed earlier camera checks; this latest application integration
-was verified in Chrome. Edge has not been reverified.
-
-`npm test` covers the separate manual checkpoint. Both automatic browser suites
-mount the actual application, including its default route. The simulated-detector
-suite verifies successful capture, frozen pixels, reset logs, retakes,
-cancellation, and layout. The real-model suite verifies no-face guidance,
-troubleshooting, model-load recovery, and cancellation with local MediaPipe assets.
-The mock detector is excluded from normal development and production builds.
-
-```bash
+```sh
+npm run build
 npm run test:unit
-npm run test:auto-ui
-npm run test:auto-real -- --project=chrome
+# Reproducible browser suite, with Chrome installed:
 npm test -- --project=chrome
 ```
 
-Run the two automatic browser suites sequentially: they share a test output
-bundle and port 4174. The production app uses port 4173 during tests.
+## Try the first assignment
 
-These tests never turn on the physical webcam. Physical-device trials are still
-needed to validate pose direction, tolerance usability, angle jitter, and captured
-image quality. The current two-face setting does not use MediaPipe's single-face
-smoothing; CPU inference may stall on slower devices. Neither sharpness/exposure
-nor liveness/identity checks are part of capture qualification.
+1. Automatic capture is selected by default. Choose **Start camera**, accept local capture consent, and allow the browser's camera prompt.
+2. Follow the face-position and angle guidance; a qualifying 400 ms hold automatically captures one reference and stops the camera. Alternatively, select **Manual**, open the camera, and choose **Take photo** once. Retaking replaces the single reference. Manual mode includes the original/landmark toggle.
+3. Optionally provide First Name, Last Name, City, and Age, and confirm authorization. The information icon beside **Subject details** explains how these fields help narrow results.
+4. Choose **Preview sample findings**. The photo is not uploaded. A missing or invalid image or absent authorization keeps this action disabled. Failed manual landmark analysis does not block an otherwise valid photo.
+5. Use **Sample scenario** for multiple/one/no findings, partial findings, missing metadata, queued, running, or failed. These are static examples, not a simulated live investigation.
+6. **Clear session** discards photos, details and results and stops the camera. Leaving Home also clears the session.
 
-Optionally verify a personal JPEG through a simulated camera source:
+To review candidate cards without a camera, use **View sample**. Source links point to reserved example domains; they are not evidence about real people.
 
-```bash
-CHECKPOINT_PHOTO="/absolute/path/to/your/photo.jpg" npm test -- --grep personal-photo
-```
+## Implemented now
 
-The optional photo and generated screenshots are not committed. The Python
-checkpoint continues to run separately from the project root.
+- Automatic capture by default, with a manual option requiring only one photo; both supply the reference to the subject form. Consent, permissions/errors and local Face Landmarker integration are reused.
+- Subject form with optional first name, last name, city and age, an explanation icon and explicit authorization, inline feedback, and a proposed 5 MiB JPEG/PNG limit.
+- Candidate thumbnails/fallbacks, page titles, source hostnames and original links, high/medium/low/unknown contextual relevance, explanations and review labels.
+- No numeric identity-confidence claims. Relevance does not verify identity. Source risk is shown separately and defaults to not assessed; unknown is not low risk.
+- Typed proposed multipart payload builder and defensive response parser. They do not make HTTP requests.
+- Fictional fixtures, contract unit tests, and reproducible browser tests for the new UI.
 
-For a project-local browser cache, set `PLAYWRIGHT_BROWSERS_PATH` to
-`./node_modules/.cache/ms-playwright` for both installation and testing.
-`EDGE_EXECUTABLE_PATH` and `FIREFOX_EXECUTABLE_PATH` can select isolated test-browser
-executables instead of the default installations.
+The parser rejects malformed status/completion payloads, preserves incomplete candidates, suppresses unsafe links, and substitutes safe public error copy for arbitrary backend errors. Remote text is rendered as plain React text.
 
-On macOS 27, Firefox automation may fail before loading the page with
-“Could not find profile folder” because its application bookkeeping shares the
-protected personal Firefox directory. See the
-[upstream Playwright issue](https://github.com/microsoft/playwright/issues/42768).
-The local verification used the downloaded Firefox engine with separate
-`PlaywrightCameraCheck` application bookkeeping through `FIREFOX_EXECUTABLE_PATH`;
-it did not use the personal Firefox profile.
+## Preserved team capture work
 
-For a manual hardware check, open the app in each installed browser, allow camera
-access, use the manual checkpoint to confirm landmark alignment and download results,
-switch cameras if available, and stop the camera. Camera permission is separate
-for each browser. On the default automatic page, test directions, retakes,
-and reset guidance on the actual camera. Test mobile orientation on-device.
+The latest main branch's automatic capture engine, pose/framing rules, model checksum validation, and camera-disconnection cancellation remain intact. Automatic capture is integrated into the default CyberPI page and subject form. Select **Manual** or use `?capture=manual` for the one-photo manual flow. Switching capture modes clears the session. Use the **Automatic capture** footer link or `?mode=front` for the separate automatic checkpoint; `?mode=manual` retains the original manual checkpoint. These checkpoints keep their own styles and do not submit photos into the mock investigation form. See [AUTOMATIC-CAPTURE.md](AUTOMATIC-CAPTURE.md).
 
-## Camera access
+The new contract tests are in `tests/unit/investigationContract.test.ts`. The original checkpoint tests are preserved as `tests/manual-checkpoint.spec.ts`; `tests/camera.spec.ts` covers the new consent-based UI. The automatic suites now navigate to `?mode=front`.
 
-Camera logic lives in [`src/hooks/useCamera.ts`](src/hooks/useCamera.ts). It wraps
-`navigator.mediaDevices.getUserMedia` and exposes:
+## Handoff and remaining work
 
-| Field | |
-| --- | --- |
-| `videoRef` | Attach to a `<video autoPlay playsInline muted>` element |
-| `status` | `'idle' \| 'starting' \| 'active' \| 'error'` |
-| `error` | Human-readable reason the camera couldn't start |
-| `devices`, `activeDeviceId` | Available cameras and the one in use |
-| `start(deviceId?)`, `stop()` | Turn the camera on/off, or switch cameras |
-| `capture(type?, quality?)` | Current frame as a `Blob` (JPEG by default) |
+See [FRONTEND-WALKTHROUGH.md](FRONTEND-WALKTHROUGH.md) for the step-by-step explanation, flowcharts and FE-01–FE-12 status.
 
-The camera is released automatically when the component using the hook unmounts.
+- [FRONTEND-AUDIT.md](FRONTEND-AUDIT.md): FE-01 architecture, reuse points, image format, browser limitations and current task status.
+- [API-CONTRACT.md](API-CONTRACT.md): FE-04 proposal for Member 1. **Not agreed or live.** Includes endpoint shapes, limits, polling, auth/CORS and retention questions.
+- [VERIFICATION.md](VERIFICATION.md): checks actually performed and testing limitations.
+- [BACKEND-HANDOFF.md](BACKEND-HANDOFF.md): historical inspection of team branches and the older CLI output format, not the newly proposed HTTP API.
 
-Browsers only allow camera access in a **secure context**: `localhost` works, but to
-test from a phone on your LAN the page must be served over HTTPS (e.g. add
-[`@vitejs/plugin-basic-ssl`](https://github.com/vitejs/vite-plugin-basic-ssl) and run
-`npm run dev -- --host`).
+Still needed: Member 1's confirmed API/base URL/auth and retention policy; live HTTP client, polling/cancellation, real error handling, optional filters, and an end-to-end backend demo. No backend was modified, no API routes were invented as existing functionality, and no Strands/Jev/threat decision logic was added to the browser.
+
+## Main files
+
+- `src/components/Studio.tsx`: default automatic capture, capture mode selection and reference lifecycle.
+- `src/components/ManualStudio.tsx`: one-photo manual capture and local landmark review.
+- `src/hooks/useCamera.ts`, `src/faceAnalysis.ts`, `src/components/PhotoReview.tsx`: existing capture/analysis/review, preserved.
+- `src/components/SubjectForm.tsx`: subject details and authorization.
+- `src/components/ResultsPanel.tsx`, `CandidateCard.tsx`: mock scenario preview and candidate cards.
+- `src/types/investigation.ts`, `src/services/investigationContract.ts`: proposed types, validation, multipart builder and parser.
+- `src/mocks/investigationFixtures.ts`: fictional result states.
+- `src/index.css`: palette, typography and responsive layout.
+- `src/App.tsx`, `src/data/team.ts`: page content and five developer placeholders.
+
+Photos, local analysis and subject fields are kept in temporary tab state, not persistent app storage. The existing CSP blocks external fetch/XHR, including the SDK's background logging. Do not relax it globally. This local-only behavior does not promise deletion or zero retention for future backend services.

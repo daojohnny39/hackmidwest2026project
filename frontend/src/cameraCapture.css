@@ -6,10 +6,10 @@
 .guidance-panel[data-running="true"] { position: sticky; top: 8px; z-index: 1; }
 .auto-stage { width: 100%; align-self: center; }
 .guidance { margin: 0 0 10px; font-size: 19px; font-weight: 600; }
-progress { display: block; width: 100%; height: 12px; margin-bottom: 10px; accent-color: var(--accent); }
+.capture-view progress { display: block; width: 100%; height: 12px; margin-bottom: 10px; accent-color: var(--accent); }
 .mirror-control { display: flex; align-items: center; gap: 6px; font-size: 14px; }
 .troubleshooting, .diagnostics { padding: 16px; border: 1px solid var(--border); border-radius: 10px; }
-h2 { margin: 0 0 8px; font-size: 20px; }
+.capture-view h2 { margin: 0 0 8px; font-size: 20px; }
 .troubleshooting p { margin: 8px 0; }
 .diagnostics summary { cursor: pointer; }
 .front-result { display: flex; flex-direction: column; gap: 12px; }

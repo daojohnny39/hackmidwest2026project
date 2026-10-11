@@ -25,7 +25,7 @@ test.beforeEach(async ({ page }) => {
   })
 })
 async function start(page: Page, mode: TestVision['mode'] = 'no_face') {
-  await page.goto('/')
+  await page.goto('/?mode=front')
   await expect(page.getByRole('region', { name: 'Front-facing automatic capture' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Take photo' })).toHaveCount(0)
   await page.evaluate((next) => { window.testVision.mode = next }, mode)

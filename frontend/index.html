@@ -2,9 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Keep local face analysis local, including the SDK's background logging.
+         Loopback WebSockets are only for Vite's development reload connection. -->
+    <meta http-equiv="Content-Security-Policy" content="connect-src 'self' ws://127.0.0.1:* ws://localhost:*" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Camera</title>
+    <meta name="theme-color" content="#edf0ed" />
+    <meta name="description" content="CyberPI — reference photos and public-source review." />
+    <title>CyberPI</title>
   </head>
   <body>
     <div id="root"></div>
