@@ -58,6 +58,8 @@ export function useCamera(onDisconnected?: (message: string) => void): UseCamera
   }, [])
 
   const releaseStream = useCallback(() => {
+    // Reset playback before detaching an ended stream so WebKit can play a retake.
+    videoRef.current?.pause()
     streamRef.current?.getTracks().forEach((track) => track.stop())
     streamRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
