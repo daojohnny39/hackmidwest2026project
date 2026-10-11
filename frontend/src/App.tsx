@@ -44,7 +44,7 @@ function About() {
   </div>
 }
 function Team() {
-  return <div className="subpage team-page"><div className="page-intro"><h1>Our team</h1><p>Five developers. Hack Midwest 2026.</p></div>
-    <div className="team-grid">{team.map((member, index) => <article className="team-card" key={member.id}><div className={`team-portrait portrait-${index}`} aria-hidden="true"><Mark /><span>0{index + 1}</span><div className="portrait-orbit" /></div><div className="team-copy"><h2>{member.name}</h2><p>{member.role}</p></div></article>)}</div>
+  return <div className="subpage team-page"><div className="page-intro"><h1>Our team</h1></div>
+    <div className="team-grid">{team.map(member => <article className="team-card" key={member.id}><div className="team-portrait"><img src={`${import.meta.env.BASE_URL}${member.photo}`} alt={member.name} loading="lazy" decoding="async" style={{ objectPosition: member.photoPosition }} /></div><div className="team-copy"><h2>{member.name}</h2><p>{member.role}</p></div></article>)}</div>
   </div>
 }

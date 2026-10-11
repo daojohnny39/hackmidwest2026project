@@ -187,15 +187,7 @@ details[open] > summary .icon { transform: rotate(45deg); }
 .team-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 18px; padding-bottom: 40px; }
 .team-card { min-width: 0; }
 .team-portrait { position: relative; height: 225px; color: #5d7953; background: #d5e6cf; border-radius: 6px; overflow: hidden; }
-.team-portrait > .brand-mark { position: absolute; left: 20px; top: 20px; width: 27px; height: 27px; }
-.team-portrait > span { font-size: 98px; position: absolute; bottom: 16px; left: 20px; font-weight: 300; line-height: 1; letter-spacing: -5px; z-index: 1; }
-.portrait-orbit { height: 230px; width: 145px; border: 1px solid currentColor; border-radius: 50%; position: absolute; transform: rotate(40deg); top: 28px; left: 65px; opacity: .16; }
-.portrait-orbit::before, .portrait-orbit::after { content: ''; position: absolute; border: 1px solid currentColor; border-radius: 50%; inset: 10px; }
-.portrait-orbit::after { inset: 25px; }
-.portrait-1 { background: #dce1db; color: #737c71; }
-.portrait-2 { background: #c9dec3; color: #526d49; }
-.portrait-3 { background: #e3e7e1; color: #6e7869; }
-.portrait-4 { background: #d7e5d0; color: #5d7851; }
+.team-portrait img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .team-copy { padding: 20px 0; }
 .team-copy h2 { font-size: 23px; font-weight: 400; letter-spacing: -.5px; }
 .team-copy p { color: var(--muted); font-size: 13px; margin-top: 9px; }
@@ -266,7 +258,6 @@ details[open] > summary .icon { transform: rotate(45deg); }
   .consent-actions { gap: 12px; }
   .consent-actions .button { font-size: 13px; padding: 12px; }
   .team-portrait { height: 175px; }
-  .team-portrait > span { font-size: 80px; }
   .team-copy h2 { font-size: 21px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

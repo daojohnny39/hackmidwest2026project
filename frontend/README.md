@@ -73,6 +73,6 @@ Still needed: Member 1's confirmed API/base URL/auth and retention policy; live 
 - `src/types/investigation.ts`, `src/services/investigationContract.ts`: proposed types, validation, multipart builder and parser.
 - `src/mocks/investigationFixtures.ts`: fictional result states.
 - `src/index.css`: palette, typography and responsive layout.
-- `src/App.tsx`, `src/data/team.ts`: page content and five developer placeholders.
+- `src/App.tsx`, `src/data/team.ts`: page content and team names/photos in Developer 01–05 order.
 
 Photos, local analysis and subject fields are kept in temporary tab state, not persistent app storage. The existing CSP blocks external fetch/XHR, including the SDK's background logging. Do not relax it globally. This local-only behavior does not promise deletion or zero retention for future backend services.
