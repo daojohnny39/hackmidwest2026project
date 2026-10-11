@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useCamera } from '../hooks/useCamera'
 import { FaceArtwork, Icon } from './Artwork'
 import { ConsentDialog } from './ConsentDialog'
@@ -23,12 +23,14 @@ function releaseSnapshot(photo: Snapshot | null) {
   if (photo.overlayUrl) URL.revokeObjectURL(photo.overlayUrl)
 }
 
-export function ManualStudio() {
+interface ManualStudioProps { previewOptions: ReactNode; mirrored: boolean }
+
+export function ManualStudio({ previewOptions, mirrored }: ManualStudioProps) {
   const [session, setSession] = useState(0)
-  return <ManualSession key={session} onClear={() => setSession(value => value + 1)} />
+  return <ManualSession key={session} previewOptions={previewOptions} mirrored={mirrored} onClear={() => setSession(value => value + 1)} />
 }
 
-function ManualSession({ onClear }: { onClear: () => void }) {
+function ManualSession({ onClear, previewOptions, mirrored }: ManualStudioProps & { onClear: () => void }) {
   const { videoRef, status, error, devices, activeDeviceId, start, stop, capture } = useCamera()
   const [consentOpen, setConsentOpen] = useState(false)
   const [photo, setPhoto] = useState<Snapshot | null>(null)
@@ -109,7 +111,7 @@ function ManualSession({ onClear }: { onClear: () => void }) {
   return <>
     <section className="studio-intro"><div><h1>Public sources. <em>Clearer context.</em></h1></div></section>
     <div className="workspace-grid"><div className="capture-column"><section className="camera-panel" aria-label="Camera studio">
-      <div className={`camera-stage ${isActive ? 'is-live' : ''}`}><video ref={videoRef} autoPlay playsInline muted className={isActive ? 'is-active' : ''} onLoadedData={() => setVideoReady(true)} onEmptied={() => setVideoReady(false)} aria-label="Live camera preview" aria-hidden={!isActive} />
+      <div className={`camera-stage ${isActive ? 'is-live' : ''}`}><video ref={videoRef} autoPlay playsInline muted className={isActive ? 'is-active' : ''} style={{ transform: mirrored ? 'scaleX(-1)' : 'none' }} onLoadedData={() => setVideoReady(true)} onEmptied={() => setVideoReady(false)} aria-label="Live camera preview" aria-hidden={!isActive} />
         <div className="camera-heading"><span className="eyebrow recognition-text">Face capture</span><span className={`camera-status ${isActive ? 'active' : ''}`}><span className="status-dot" /> {isActive ? 'Live' : status === 'starting' ? 'Connecting' : 'Camera off'}</span></div>
         {!isActive && <div className="camera-idle"><FaceArtwork /><div className="idle-copy"><h2>{status === 'starting' ? 'Allow camera access' : photo ? 'Review your photo' : 'Ready to begin'}</h2></div></div>}
         {isActive && <div className="live-guidance"><div className="viewfinder" aria-hidden="true" /><span>Face forward.</span></div>}
@@ -117,6 +119,7 @@ function ManualSession({ onClear }: { onClear: () => void }) {
       <div className="camera-toolbar"><p>{isActive ? 'Use good lighting.' : photo ? 'Reference photo ready.' : 'Your consent comes first.'}</p>
         {isActive ? <div className="capture-controls"><button className="icon-button" onClick={stopCamera} aria-label="Stop camera"><Icon name="stop" /></button><button className="button primary" onClick={takePhoto} disabled={!videoReady || capturing}><Icon name="camera" />{capturing ? 'Analyzing…' : 'Take photo'}</button></div> : status === 'starting' ? <button className="button secondary" onClick={stopCamera}>Cancel <Icon name="close" /></button> : <button className="button primary" onClick={() => setConsentOpen(true)} disabled={capturing}><Icon name="camera" />{status === 'error' ? 'Retry camera' : photo ? 'Retake photo' : 'Open camera'}</button>}
       </div>
+      <div className="manual-preview-options">{previewOptions}</div>
       {(error || captureError) && <p className="camera-error" role="alert">{captureError || error}</p>}
       {isActive && devices.length > 1 && <label className="camera-picker">Camera<select value={activeDeviceId ?? ''} onChange={event => { sessionRef.current++; setVideoReady(false); void start(event.target.value) }}>{devices.map((device, index) => <option value={device.deviceId} key={device.deviceId}>{device.label || `Camera ${index + 1}`}</option>)}</select></label>}
       <div className="photo-tray"><div className="tray-heading"><span className="eyebrow">Reference photo <span className="count">{photo ? '1 / 1' : '0 / 1'}</span></span><span>Only in this tab</span></div>

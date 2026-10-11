@@ -108,7 +108,7 @@ test('one manual capture stops the camera and enables a preview without a name; 
   await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'About', exact: true }).click()
   await page.getByRole('link', { name: 'Home', exact: true }).click()
   await expect(photos(page)).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Manual', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('checkbox', { name: 'Automatic capture', exact: true })).not.toBeChecked()
   await expect(page.getByRole('button', { name: 'Open camera', exact: true })).toBeEnabled()
 })
 

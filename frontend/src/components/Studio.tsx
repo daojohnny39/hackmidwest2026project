@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import CameraCapture from '../CameraCapture'
 import type { FrontCaptureResult } from '../capture/types'
 import type { PreviewState } from '../mocks/investigationFixtures'
@@ -9,18 +9,18 @@ import { SubjectForm } from './SubjectForm'
 
 export function Studio() {
   const [mode, setMode] = useState(() => new URLSearchParams(window.location.search).get('capture') === 'manual' ? 'manual' : 'automatic')
-  return <>
-    <div className="capture-mode" role="group" aria-label="Capture mode">
-      <span>Capture mode</span>
-      <button className="button secondary" aria-pressed={mode === 'automatic'} onClick={() => setMode('automatic')}>Automatic</button>
-      <button className="button secondary" aria-pressed={mode === 'manual'} onClick={() => setMode('manual')}>Manual</button>
-      <small>Switching modes clears the current session.</small>
-    </div>
-    {mode === 'automatic' ? <AutomaticStudio /> : <ManualStudio />}
-  </>
+  const [mirrored, setMirrored] = useState(true)
+  const previewOptions = <div className="preview-options" role="group" aria-label="Camera options">
+    <label className="mirror-control"><input type="checkbox" checked={mirrored} onChange={event => setMirrored(event.target.checked)} /> Mirror preview</label>
+    <label className="mirror-control"><input type="checkbox" checked={mode === 'automatic'} onChange={event => setMode(event.target.checked ? 'automatic' : 'manual')} aria-describedby="capture-mode-hint" /> Automatic capture</label>
+    <small id="capture-mode-hint">Switching modes clears the current session.</small>
+  </div>
+  return mode === 'automatic'
+    ? <AutomaticStudio previewOptions={previewOptions} mirrored={mirrored} />
+    : <ManualStudio previewOptions={previewOptions} mirrored={mirrored} />
 }
 
-function AutomaticStudio() {
+function AutomaticStudio({ previewOptions, mirrored }: { previewOptions: ReactNode; mirrored: boolean }) {
   const [reference, setReference] = useState<FrontCaptureResult | null>(null)
   const [results, setResults] = useState<PreviewState>('idle')
   const [session, setSession] = useState(0)
@@ -54,6 +54,8 @@ function AutomaticStudio() {
         <section className="camera-panel automatic-studio" aria-label="Camera studio">
           <CameraCapture
             key={session}
+            previewOptions={previewOptions}
+            mirrorPreview={mirrored}
             onStartRequested={start => setPendingStart(() => start)}
             onCaptured={photo => { setReference(photo); setResults('idle') }}
             onDelete={() => { setReference(null); setResults('idle') }}

@@ -33,7 +33,7 @@ as future reference; left/right capture is deferred. The automatic capture engin
 guidance, reset logging, and `useAutoCapture` integration hook are implemented.
 The camera page uses automatic capture by default. Choose **Start camera**, follow
 the positioning guidance, and hold steady; the app takes the photo once all checks
-pass. Choose **Manual** for a single-photo manual reference, or use `?capture=manual`.
+pass. Uncheck **Automatic capture** beside **Mirror preview** for a single-photo manual reference, or use `?capture=manual`.
 The original manual checkpoint remains available at `?mode=manual`.
 Stage 1 produces a JPEG and metadata; a later backend adapter can hand that result
 to the AWS Strands workflow. No upload or AWS execution is implemented.
@@ -139,7 +139,7 @@ npm run dev
 
 Open the URL printed by Vite (normally `http://localhost:5173`). Choose **Start
 camera**, accept consent, and allow camera access. Follow the guidance and hold
-steady to capture one photo automatically. Choose **Manual** to take one photo
+steady to capture one photo automatically. Uncheck **Automatic capture** to take one photo
 yourself and review its face count and landmark overlay. Subject details are
 optional; a valid photo and authorization enable **Submit**.
 The preview uses fictional findings and does not upload the photo.
