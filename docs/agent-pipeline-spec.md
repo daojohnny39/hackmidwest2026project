@@ -4,7 +4,7 @@ Owner: Johnny. Drafted 2026-10-10. Revised 2026-10-10 after review. Status: draf
 
 This spec covers the agent pipeline, the right half of `../docs/architecture.png`: everything from the AWS Strands Agent onward. The capture pipeline (camera, MediaPipe, frame selection) belongs to the teammates and shows up here only as the input contract in Section 0. Paths here are relative to the repo root.
 
-Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
+Items marked **Proposal** answer an open question from `../brain/open-questions.md`. Dependent contracts, thresholds, and test targets are proposed implementation defaults too. Only `../brain/decisions.md` records decisions. The recorded choices are one Strands agent per image, Jev for typed decisions, Yandex through SerpApi, and the local mock for development. FaceCheck face search replaced Yandex as the default backend on 2026-10-10 (Johnny), after a live Yandex run on his own photo returned only lookalikes; the state before that is tagged `cyberpi-backend-v1`. Section 0 (the `pipeline/` package foundation and mock capture fixtures), Section 1 (search and scrape), Section 2 (profiles and graph), Section 3 (verification), and Section 4 (summarization) are built; Section 5 is not finished. Johnny owns Sections 0–5; teammates own capture and must agree to the handoff.
 
 ## Contents
 
@@ -36,8 +36,8 @@ Each section reads the artifacts named in its **In** line and writes its **Out**
 
 ## 2. Ground rules
 
-- **Consent gate.** Require affirmative participant consent before reading real images, creating an artifact, or making a call. Live consent must cover image disclosure to S3, SerpApi and Yandex, and evidence disclosure to the selected model providers. Apply the gate to `run`, `stage`, and `smoke-search`. Real tests use consenting team members; mock tests use fictional participants.
-- **SerpApi by default, mock for tests.** Search defaults to SerpApi (Johnny, 2026-10-10); `run --mock` or `SEARCH_BACKEND=mock` selects the mock internet, which costs no search credits. `LLM_MODE=off` and `JEV_MODE=fake` stay the defaults, and `--models` separately permits paid model calls, including models used with mock evidence. Normal tests force the mock and block non-loopback connections.
+- **Consent gate.** Require affirmative participant consent before reading real images, creating an artifact, or making a call. Live consent must cover image disclosure to FaceCheck (or S3, the tunnel, SerpApi and Yandex), and evidence disclosure to the selected model providers. Apply the gate to `run`, `stage`, and `smoke-search`. Real tests use consenting team members; mock tests use fictional participants.
+- **FaceCheck by default, SerpApi as the alternative, mock for tests.** Search defaults to FaceCheck face search (Johnny, 2026-10-10; it replaced SerpApi, the default since earlier that day). `SEARCH_BACKEND=serpapi` selects Yandex through SerpApi, and `run --mock` or `SEARCH_BACKEND=mock` selects the mock internet, which costs no search credits. `LLM_MODE=off` and `JEV_MODE=fake` stay the defaults, and `--models` separately permits paid model calls, including models used with mock evidence. Normal tests force the mock and block non-loopback connections.
 - **Code holds the data; models make judgments.** Tools store evidence and provenance. The LLM may extract supported fields, triage URLs, and write a sourced bio. Code sets IDs, graph values, confidence, and acceptance. Treat page text as untrusted data, never as tool instructions.
 - **Every model step has a fallback.** Tests run without an LLM or Jev. Runtime failures use the rules and template below and record the fallback. A mock demonstration is not proof of live retrieval or identity accuracy.
 - **Keep data out of git.** Add `runs/` and `captures/` to `.gitignore` before collecting real data; they are not ignored today. Existing rules cover `.env`, bytecode, and `data/*.sqlite3*`. Keep real photos, pages, prompts, responses, caches, and traces under those ignored roots. Commit only synthetic fixtures and blank key placeholders.
@@ -68,7 +68,8 @@ Project Directory/
     search/
       base.py                 SearchBackend protocol
       mock_backend.py         wraps MockInternetClient
-      serpapi_backend.py      SerpApi yandex_images + bounded live HTTP fetch
+      serpapi_backend.py      SerpApi yandex_images + bounded live HTTP fetch (LivePages)
+      facecheck_backend.py    FaceCheck.ID face search; reuses LivePages for page fetches
     hosting.py                live only: upload image, presigned URL, delete
     jev.py                    Jev wrapper with modes typesafe | openrouter | fake | off
     llm.py                    Strands model factory (one provider first)
@@ -95,10 +96,12 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 
 | Variable | Values | Default | Used by |
 |---|---|---|---|
-| `SEARCH_BACKEND` | `serpapi`, `mock` | `serpapi` | Section 1 |
+| `SEARCH_BACKEND` | `facecheck`, `serpapi`, `mock` | `facecheck` | Section 1 |
 | `MOCK_INTERNET_URL` | loopback URL | `http://127.0.0.1:8765` | mock backend |
 | `MOCK_SCENARIO` | `default`, `ambiguous`, `stale`, `duplicates`, `empty`, `rate_limited`, `server_error` | `default` | mock backend |
 | `MOCK_DELAY_MS` | integer 0–5000, search requests only | `0` | concurrency tests |
+| `FACECHECK_API_KEY` | token; save with `set-key facecheck` | none | facecheck backend |
+| `FACECHECK_DEMO` | `true`/`false`; true searches only 100,000 faces, free | `false` | facecheck backend |
 | `SERPAPI_KEY` | key; save with `set-key serpapi` | none | serpapi backend |
 | `IMAGE_HOST` | `tunnel` or `s3` | `tunnel` | `hosting.py` (live only) |
 | `IMAGE_BUCKET` + AWS credentials | S3 bucket name; keys via `set-key aws` (to `~/.aws/credentials`) | none | `hosting.py` (`IMAGE_HOST=s3`) |
@@ -110,9 +113,9 @@ Use Python 3.12 for the pipeline. Declare `pydantic`, `httpx`, `beautifulsoup4`,
 | `LLM_MODEL` | provider-specific model ID | `claude-sonnet-5-5` for Anthropic; required for Bedrock | `llm.py` |
 | `AWS_REGION` | region with bucket/model access | required for S3/Bedrock | hosting and Bedrock |
 
-`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `serpapi`, which requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. Hosting settings (`IMAGE_HOST`, then `ssh` for the tunnel or `IMAGE_BUCKET` for S3) are checked by `hosting.require_hosting` before a SerpApi search, not at load, so stages that only read saved evidence don't need them. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
+`config.py` loads `.env` without overriding exported variables. CLI options win. Search defaults to `facecheck`, which requires `FACECHECK_API_KEY`; `serpapi` requires `SERPAPI_KEY`; `run --mock` or `SEARCH_BACKEND=mock` selects the mock. Hosting settings (`IMAGE_HOST`, then `ssh` for the tunnel or `IMAGE_BUCKET` for S3) are checked by `hosting.require_hosting` before a SerpApi search, not at load, so stages that only read saved evidence don't need them. Real `JEV_MODE` or `LLM_MODE` requires `--models`. Missing credentials or an unimplemented provider fail before uploads. Bedrock uses AWS credentials and model access, not `ANTHROPIC_API_KEY`. Add these variables to `.env.example` during implementation, with blank secrets and safe non-secret defaults.
 
-`python -m pipeline set-key {serpapi,typesafe,openrouter,anthropic,aws}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`. python-dotenv's parser locates the assignment, so quoted keys, multi-line values, comments, and CRLF endings survive. The file is replaced atomically, through a temp file named `.env.*`, so a crash can't leave an unignored copy. The command requests mode 0600, which protects the key on filesystems that enforce POSIX permissions. On `/mnt/c` those modes aren't enforced, and `.env` inherits the folder's Windows ACLs, so protect the repo folder there. If the terminal can't hide input, the command refuses before reading anything. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. A TypeSafe key is checked by listing TypeSafe's models (`GET /v1/models`, authenticated; a fake key gets 401, checked 2026-10-10), which makes no Jev decision. A rejected key is not saved, and an unreachable check saves with a warning. `--no-check` skips the checks. Saving a model key never changes `JEV_MODE` or `LLM_MODE`; the command prints the setting to change, and real modes still need `--models`. `set-key aws` (`aws_credentials.py`) is the exception to `.env`: S3 hosting and Bedrock use boto3's standard credential chain, so it saves an IAM user's access key pair as the `[default]` profile of `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`), keeping other profiles, with mode 0600 in a 0700 folder, outside the repo and off `/mnt/c`. Both prompts are hidden. Key formats are checked first, and temporary `ASIA` keys are refused. The keys are checked with STS GetCallerIdentity, which is free and needs no IAM permissions, and the command prints only the account and ARN, warning on root-user keys. Rejected keys aren't saved (real STS answers `InvalidClientTokenId` for AWS's example key, checked 2026-10-10). `--region` also saves `AWS_REGION` to `.env`. `OfflineTestCase` points `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at `os.devnull`, so tests never load the saved keys.
+`python -m pipeline set-key {facecheck,serpapi,typesafe,openrouter,anthropic,aws}` prompts for a key with hidden input, so it never lands in shell history, and writes it to `.env`. A missing `.env` starts as a copy of `.env.example`. python-dotenv's parser locates the assignment, so quoted keys, multi-line values, comments, and CRLF endings survive. The file is replaced atomically, through a temp file named `.env.*`, so a crash can't leave an unignored copy. The command requests mode 0600, which protects the key on filesystems that enforce POSIX permissions. On `/mnt/c` those modes aren't enforced, and `.env` inherits the folder's Windows ACLs, so protect the repo folder there. If the terminal can't hide input, the command refuses before reading anything. A FaceCheck token is first checked with FaceCheck's free `POST /api/info`, which returns the credit balance and runs no search (a missing or invalid token gets HTTP 200 with `code` `INVALID_TOKEN` or `EXCEPTION`, checked 2026-10-10); a rejected token isn't saved. A SerpApi key is first checked against SerpApi's free [Account API](https://serpapi.com/account-api), which doesn't count toward the search quota. The command prints only the plan and quota fields, and saves nothing if SerpApi rejects the key. If SerpApi can't be reached it saves with a warning. A TypeSafe key is checked by listing TypeSafe's models (`GET /v1/models`, authenticated; a fake key gets 401, checked 2026-10-10), which makes no Jev decision. A rejected key is not saved, and an unreachable check saves with a warning. `--no-check` skips the checks. Saving a model key never changes `JEV_MODE` or `LLM_MODE`; the command prints the setting to change, and real modes still need `--models`. `set-key aws` (`aws_credentials.py`) is the exception to `.env`: S3 hosting and Bedrock use boto3's standard credential chain, so it saves an IAM user's access key pair as the `[default]` profile of `~/.aws/credentials` (or `AWS_SHARED_CREDENTIALS_FILE`), keeping other profiles, with mode 0600 in a 0700 folder, outside the repo and off `/mnt/c`. Both prompts are hidden. Key formats are checked first, and temporary `ASIA` keys are refused. The keys are checked with STS GetCallerIdentity, which is free and needs no IAM permissions, and the command prints only the account and ARN, warning on root-user keys. Rejected keys aren't saved (real STS answers `InvalidClientTokenId` for AWS's example key, checked 2026-10-10). `--region` also saves `AWS_REGION` to `.env`. `OfflineTestCase` points `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` at `os.devnull`, so tests never load the saved keys.
 
 The Anthropic model ID above is documented. The existing Haiku alternative, `claude-haiku-4-5-20251001`, is also documented; access still needs a smoke check. Never reuse an Anthropic API ID as a Bedrock ID. See [Claude model IDs](https://platform.claude.com/docs/en/models/overview) and [Haiku 4.5](https://platform.claude.com/docs/en/models/haiku-4-5/overview).
 
@@ -153,7 +156,7 @@ class Consent(BaseModel):
     confirmed: bool
     participant: str
     confirmed_at: datetime
-    external_processing: bool = False  # required true for SerpApi search or --models
+    external_processing: bool = False  # required true for live search or --models
 
 class CaptureImage(BaseModel):
     image_id: str
@@ -174,8 +177,8 @@ class CaptureArtifact(BaseModel):
     run_id: str
     capture: CaptureBundle
     capture_dir: str                  # validated local folder; images remain here
-    backend: Literal["mock", "serpapi"]
-    scenario: str                     # mock scenario; "default" with SerpApi
+    backend: Literal["mock", "serpapi", "facecheck"]
+    scenario: str                     # mock scenario; "default" for live search
     llm_mode: Literal["off", "anthropic", "bedrock"]
     jev_mode: Literal["fake", "typesafe", "openrouter", "off"]
     llm_model: str | None = None
@@ -203,6 +206,7 @@ Each run gets a folder `runs/<run_id>/` containing:
 - `04_final.json`
 - `run_log.jsonl`: stage, backend, endpoint path without query, status, latency, retry count, and fallback/error code. Jev also records returned model and usage. No raw prompts, evidence, authorization headers, or signed URLs.
 - `trace.jsonl` (`trace.py`): the debug record, appended by every stage the CLI runs. It holds each stage's start and end (settings, duration, outcome, and the exception if the stage raised one), every search and page fetch with its URL, and each Strands agent's prompts, messages (text, reasoning, tool calls and results, structured output), model and tool calls, and usage. It also holds Jev requests, answers, and HTTP error bodies, and every error a stage turned into a fallback or a code, with its exception chain. That chain includes causes hidden by `raise ... from None`. Library log records at INFO and above are kept too. The trace holds evidence, so it stays in the run folder and `purge` deletes it. Every value goes through the `run_log.jsonl` scrubber, which redacts keys, tokens, signatures, URL query strings, and tunnel URLs.
+- `cache/facecheck/`: converted FaceCheck results (URLs and scores, no thumbnails) for this run only, keyed by image hash and demo mode.
 - `cache/serpapi/`: sanitized successful responses for this run only, keyed by image hash plus engine and tab. Redact submitted image URLs and embedded signed URLs. `--refresh` bypasses this local cache; it does not force a new provider search.
 - `uploads.json` (`UploadsManifest`): bucket, random object key, optional version ID, and deletion status. Record each key before upload so crash cleanup can retry. Never store presigned URLs here.
 
@@ -273,6 +277,17 @@ Rules:
 - Cache only successful search responses inside the run (0.5). Replaying Section 2 onward needs no search cache. Defer shared caches across participants/runs; they complicate consent and purge.
 - Normal tests block all non-loopback sockets as well as selecting mock/fake/off. Real runs use SerpApi unless `--mock` is given; real models require `--models`. Starting the mock alone does not redirect another client's traffic.
 - Smoke-search uses a consent-bearing capture: `python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1`. It writes a run and cleanup record, uploads one photo, queries `tab=about`, and prints hits. `about` is already Yandex's default; do not pay to compare it with itself. The free plan currently lists 250 searches/month and 50/hour; check the account dashboard before the demo. Quota reporting is optional and uses the separate Account API; allowlist counters because its response includes the key. See [pricing](https://serpapi.com/pricing) and [Account API](https://serpapi.com/account-api).
+
+**FaceCheck backend (default since 2026-10-10, `facecheck_backend.py`).** A live Yandex run on Johnny's own selfie (run `johnny-1-25669bcf`) returned 102 results, all lookalikes: Yandex's `about` tab matches overall appearance, not identity. FaceCheck.ID matches the face against its own index of faces from public pages ([API](https://facecheck.id/en/Face-Search/API), [OpenAPI](https://facecheck.id/swagger/v1/swagger.json)). Built as follows:
+
+- `POST https://facecheck.id/api/upload_pic` (multipart field `images`) returns `id_search`; `POST /api/search` with `{id_search, with_progress: true, status_only: false, demo}` is polled every 2 s until `output` arrives, for at most 180 s. The token goes only in the `Authorization` header. Errors arrive on HTTP 200 with `error` and `code`: token problems map to `unauthorized`, credit problems to `no_credits`, the rest to `provider_error`.
+- The upload is a JPEG copy at most 1,600 px on its longest side, EXIF stripped (`hosting.search_copy`). No hosting or tunnel is needed.
+- Output items (`score`, `url.value`, `base64`) become the Yandex-shaped payload `parse_image_results` reads: best score first, title empty, source the domain, snippet `FaceCheck face match 92/100 (certain match)`, and `face_score` on each `ImageHit`. Thumbnails are dropped because they show other people's faces. `search_extras` records `demo` and `searched_faces`.
+- Cost: 3 credits ($0.30) per search, one per image. `FACECHECK_DEMO=true` is free but scans only the first 100,000 faces. Before the first paid search of a run, `build_facecheck_backend` calls the free `/api/info` and stops with a configuration error if `has_credits_to_search` is false. A retry polls the image's existing `id_search` instead of uploading again, so it can't start a second paid search. A timeout is not retried.
+- Results are cached under `cache/facecheck/` (0.5); demo results are cached separately and never reused for a real search.
+- The image deadline becomes 35 s plus 180 s (`extra_deadline_s`), because FaceCheck can queue a search.
+- The per-image agent sees `face_score` on each hit and is told FaceCheck's bands (90+ certain, 83–89 confident, 70–82 uncertain, under 70 weak), to prefer high scores, and to treat hits under 70 as likely lookalikes.
+- Not yet checked live: the polling behavior, error codes beyond the token errors, and the result quality. The first paid run on Johnny's photo is the check.
 
 ### 1.2 Image hosting (live only; default changed to a tunnel, see below)
 
@@ -446,6 +461,7 @@ class ImageHit(BaseModel):
     source: str
     snippet: str = ""
     thumbnail_url: str | None = None
+    face_score: int | None = None  # FaceCheck's 0-100 face match; None for Yandex and the mock
 
 class FetchError(BaseModel):
     url: str | None               # None when the search itself failed
@@ -960,7 +976,9 @@ Checked against seed-derived fixtures and real Section 1–4 artifact runs over 
 Today `run` works through every stage registered in `STAGE_RUNNERS` (stages 1–4 are all registered) and exits with code 3 at the first stage that isn't. `stage N --run` re-checks consent, invalidates stage N and later outputs, and reruns stage N. `smoke-search` runs one image through deterministic stage 1 with models off, and `purge` and `set-key` work. `purge` also deletes uploaded images when `AWS_REGION` is set. The rest are commands to implement.
 
 ```bash
-# Save the SerpApi key once (hidden prompt; checked with the free Account API)
+# Save the FaceCheck token once (hidden prompt; checked with the free /api/info call)
+python3 -m pipeline set-key facecheck
+# Or the SerpApi key, for SEARCH_BACKEND=serpapi
 python3 -m pipeline set-key serpapi
 
 # Mock search, no credits. Start the mock internet in another terminal first.
@@ -974,8 +992,9 @@ python3 -m pipeline stage 2 --run runs/<run_id>
 # Optional paid models with mock search; select modes and keys in .env first
 python3 -m pipeline run --capture tests/fixtures/captures/alex --mock --models
 
-# SerpApi search (default): consent-bearing manifest with real images
+# FaceCheck search (default): consent-bearing manifest with real images
 python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
+python3 -m pipeline smoke-search --capture captures/<session_id> --image-id img-1 --backend serpapi
 python3 -m pipeline run --capture captures/<session_id> --models
 
 # Delete a run's data and any uploaded images
@@ -984,7 +1003,7 @@ python3 -m pipeline purge --run runs/<run_id>
 python3 -m pipeline purge --run runs/<run_id> --include-capture
 ```
 
-- `run --until N` stops after stage N (0–4). `--scenario` overrides `MOCK_SCENARIO` for mock search; reject it with SerpApi. Each run gets new artifacts and a new cache.
+- `run --until N` stops after stage N (0–4). `--scenario` overrides `MOCK_SCENARIO` for mock search; reject it with live search. Each run gets new artifacts and a new cache.
 - `stage N --run ...` supports 1–4 and loads saved run settings/prerequisites. A saved run keeps the search backend it was created with, and real model calls need `--models`. Re-read the source manifest's consent; refuse a missing/revoked manifest or changed participant/session. Later stages read saved SerpApi evidence locally and make no new search. Invalidate downstream outputs and never reuse mismatched artifacts.
 - `--models` authorizes the selected modes, without choosing a provider. If modes remain fake/off, print that no real model is enabled. A SerpApi run without `--models` therefore performs live collection with deterministic verification and returns `review_required` if it finds a candidate.
 - `--refresh` is valid for live search in `run`, `stage 1`, or `smoke-search`; it bypasses only this run's cache. Smoke-search stores a stage-0 bundle containing only the selected image and stage-1 evidence with `num_images=1`, while retaining the original capture folder for consent/cleanup.

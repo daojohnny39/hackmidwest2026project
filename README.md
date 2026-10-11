@@ -213,9 +213,33 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-Search uses SerpApi by default. Save your key once; the prompt hides what you
-type, checks the key with SerpApi's free Account API (no search credits), and
-writes it to the gitignored `.env`, creating it from `.env.example` if needed:
+Search uses [FaceCheck.ID](https://facecheck.id/en/Face-Search/API) face search by
+default. FaceCheck matches the face itself against faces it has indexed from public
+web pages, and scores each match from 0 to 100 (90+ certain, 83-89 confident, 70-82
+uncertain, 50-69 weak). Yandex, the other live backend (`SEARCH_BACKEND=serpapi`),
+only finds visually similar images, which for a selfie are mostly lookalikes. Save
+your FaceCheck API token once; the prompt hides what you type, checks the token
+with FaceCheck's free `/api/info` call (it shows the credit balance and runs no
+search), and writes it to the gitignored `.env`, creating it from `.env.example`
+if needed:
+
+```bash
+.venv/bin/python -m pipeline set-key facecheck
+```
+
+Each FaceCheck search costs 3 credits ($0.30), one per image. Credits are bought
+with Bitcoin or Litecoin. `FACECHECK_DEMO=true` in `.env` makes searches free, but
+they scan only the first 100,000 faces, so their results aren't meaningful; use it
+to test the plumbing. A run checks the balance before its first paid search and
+stops if there are no credits. Results are cached in the run folder, so `stage 1
+--run` on the same run doesn't pay again (`--refresh` does). A failed request is
+retried by polling the same FaceCheck search, never by starting a second one. The
+upload is a JPEG copy at most 1,600 px on its longest side with EXIF stripped;
+FaceCheck says it doesn't add uploads to its index and deletes search history
+within 24 hours. Match thumbnails show other people's faces, so they're dropped.
+
+For Yandex instead, save a SerpApi key (checked with SerpApi's free Account API)
+and set `SEARCH_BACKEND=serpapi`:
 
 ```bash
 .venv/bin/python -m pipeline set-key serpapi
@@ -268,9 +292,9 @@ first with `python3 -m mock_internet serve`.
 ```
 
 Every run needs a capture folder whose `manifest.json` records the participant's
-consent (spec 0.4). SerpApi search (the default) and `--models` (paid model calls)
-send data to outside services, so both require `consent.external_processing: true`,
-and SerpApi runs need real image files. The mock fixtures under `tests/fixtures/`
+consent (spec 0.4). Live search (FaceCheck, the default, or SerpApi) and `--models`
+(paid model calls) send data to outside services, so both require
+`consent.external_processing: true`, and live runs need real image files. The mock fixtures under `tests/fixtures/`
 require the mock backend (`--mock` or `SEARCH_BACKEND=mock`). The offline tests
 always force the mock. `runs/`, `captures/`, and `.env` are gitignored.
 
@@ -292,11 +316,16 @@ briefly (spec 1.2). `IMAGE_HOST` picks how:
   10 minutes, and deleted after its search. `uploads.json` in the run folder tracks
   it until then, and `purge` deletes anything left over.
 
-Try one consenting teammate's photo first. It costs one search and never calls a model:
+Try one consenting teammate's photo first. It costs one search (3 FaceCheck credits,
+or one SerpApi search with `--backend serpapi`) and never calls a model:
 
 ```bash
 .venv/bin/python -m pipeline smoke-search --capture captures/<session_id> --image-id img-1
 ```
+
+With FaceCheck, each hit carries its face score: the console view prints
+`face 92/100` in place of a title, and the per-image agent is told to prefer high
+scores and treat anything under 70 as a likely lookalike.
 
 With `LLM_MODE=anthropic` (or `bedrock`) and `--models`, each image gets its own
 Strands agent that decides which hits to fetch and which pages are about the

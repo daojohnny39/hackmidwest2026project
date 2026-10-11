@@ -248,7 +248,7 @@ def verify(
 ) -> VerificationResult:
     """Score every candidate and accept at most one (3.2).
 
-    `jev` is None for JEV_MODE=off. `live` is true for a SerpApi run, where a
+    `jev` is None for JEV_MODE=off. `live` is true for a live (FaceCheck or SerpApi) run, where a
     fallback result needs human review instead of an automatic match.
     """
     validate_references(raw=raw, profiles=profiles)
@@ -396,7 +396,7 @@ def run_stage(run_dir: Path, settings: Settings) -> VerificationResult:
     """Read the run's 00/01/02 artifacts and return its VerificationResult.
 
     The live policy follows the run's recorded backend, not the current settings,
-    because `stage 3` replays saved SerpApi evidence with mock search settings.
+    because `stage 3` replays saved live evidence with mock search settings.
     """
     capture = read_artifact(run_dir, 0)
     raw = read_artifact(run_dir, 1)
@@ -406,7 +406,7 @@ def run_stage(run_dir: Path, settings: Settings) -> VerificationResult:
     except ValueError as exc:
         raise ArtifactError(str(exc)) from exc
     jev = None if settings.jev_mode == "off" else Jev(settings, run_dir=run_dir, stage=3)
-    result = verify(raw, profiles, jev=jev, live=capture.backend == "serpapi")
+    result = verify(raw, profiles, jev=jev, live=capture.backend != "mock")
     validate_references(profiles=profiles, verification=result)
     return result
 

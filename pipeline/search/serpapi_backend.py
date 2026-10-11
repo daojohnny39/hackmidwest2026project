@@ -157,11 +157,57 @@ def sanitize(payload: dict) -> dict:
     return clean
 
 
-class SerpApiBackend:
+class LivePages:
+    """Guarded live page fetches for the live search backends; subclasses set self.pages (page_client())."""
+
+    fetch_endpoint = "page-fetch"  # live page URLs are evidence, so the log never names them
+    pages: httpx.AsyncClient
+
+    async def fetch(self, url: str) -> FetchedPage:
+        try:
+            return await asyncio.wait_for(self._fetch(url), timeout=FETCH_TIMEOUT_S)
+        except TimeoutError:
+            raise BackendError("timeout") from None
+
+    async def _fetch(self, url: str) -> FetchedPage:
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            check_url(current)
+            try:
+                async with self.pages.stream("GET", current) as response:
+                    if response.is_redirect and "location" in response.headers:
+                        current = urldefrag(urljoin(current, response.headers["location"]))[0]
+                        continue
+                    final = str(response.url)
+                    if _login_wall(final):
+                        raise BackendError("login_wall", status_code=response.status_code)
+                    if response.status_code >= 400:
+                        raise status_error(response.status_code, response.headers)
+                    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if content_type not in HTML_TYPES:
+                        raise BackendError("unsupported_content", status_code=response.status_code)
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body += chunk
+                        if len(body) >= MAX_HTML_BYTES:
+                            break  # bounded: keep the first 1 MB
+                    html = bytes(body[:MAX_HTML_BYTES]).decode(response.encoding or "utf-8", errors="replace")
+                    return FetchedPage(requested_url=url, final_url=normalize_url(final) or url,
+                                       fetched_url=normalize_url(final) or url, status_code=response.status_code,
+                                       content_type=content_type, html=html)
+            except httpx.TimeoutException:
+                raise BackendError("timeout") from None
+            except httpx.HTTPError as error:
+                # httpx re-raises connection failures as ConnectError, keeping ours as the cause.
+                blocked = isinstance(error.__cause__, BlockedDestination)
+                raise BackendError("blocked_destination" if blocked else "connection_error") from None
+        raise BackendError("too_many_redirects")
+
+
+class SerpApiBackend(LivePages):
     name = "serpapi"
     origin = None
     search_endpoint = "/search.json"
-    fetch_endpoint = "page-fetch"  # live page URLs are evidence, so the log never names them
 
     def __init__(self, *, api_key: str, capture_dir: Path, host, cache_dir: Path | None = None, refresh: bool = False,
                  search_client: httpx.AsyncClient | None = None, pages: httpx.AsyncClient | None = None):
@@ -260,48 +306,6 @@ class SerpApiBackend:
             await asyncio.to_thread(close)
         await self.search_client.aclose()
         await self.pages.aclose()
-
-    # Fetch
-
-    async def fetch(self, url: str) -> FetchedPage:
-        try:
-            return await asyncio.wait_for(self._fetch(url), timeout=FETCH_TIMEOUT_S)
-        except TimeoutError:
-            raise BackendError("timeout") from None
-
-    async def _fetch(self, url: str) -> FetchedPage:
-        current = url
-        for _ in range(MAX_REDIRECTS + 1):
-            check_url(current)
-            try:
-                async with self.pages.stream("GET", current) as response:
-                    if response.is_redirect and "location" in response.headers:
-                        current = urldefrag(urljoin(current, response.headers["location"]))[0]
-                        continue
-                    final = str(response.url)
-                    if _login_wall(final):
-                        raise BackendError("login_wall", status_code=response.status_code)
-                    if response.status_code >= 400:
-                        raise status_error(response.status_code, response.headers)
-                    content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-                    if content_type not in HTML_TYPES:
-                        raise BackendError("unsupported_content", status_code=response.status_code)
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        body += chunk
-                        if len(body) >= MAX_HTML_BYTES:
-                            break  # bounded: keep the first 1 MB
-                    html = bytes(body[:MAX_HTML_BYTES]).decode(response.encoding or "utf-8", errors="replace")
-                    return FetchedPage(requested_url=url, final_url=normalize_url(final) or url,
-                                       fetched_url=normalize_url(final) or url, status_code=response.status_code,
-                                       content_type=content_type, html=html)
-            except httpx.TimeoutException:
-                raise BackendError("timeout") from None
-            except httpx.HTTPError as error:
-                # httpx re-raises connection failures as ConnectError, keeping ours as the cause.
-                blocked = isinstance(error.__cause__, BlockedDestination)
-                raise BackendError("blocked_destination" if blocked else "connection_error") from None
-        raise BackendError("too_many_redirects")
 
 
 def _login_wall(url: str) -> bool:

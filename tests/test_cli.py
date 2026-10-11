@@ -23,6 +23,7 @@ from tests.support import FIXTURE_CAPTURES, REPO_ROOT, MockServerTestCase, read_
 
 ALEX = FIXTURE_CAPTURES / "alex"
 SERPAPI_ENV = {"SEARCH_BACKEND": "serpapi", "SERPAPI_KEY": "test-serpapi-key"}
+FACECHECK_ENV = {"SEARCH_BACKEND": "facecheck", "FACECHECK_API_KEY": "test-facecheck-token"}
 HOSTING_ENV = {"IMAGE_HOST": "s3", "IMAGE_BUCKET": "test-bucket", "AWS_REGION": "us-east-1"}
 
 
@@ -189,13 +190,50 @@ class CliTests(MockServerTestCase):
         self.assertNotIn("test-anthropic-key", err)
         self.assertEqual(self.run_dirs(), [])
 
-    def test_serpapi_is_the_default_and_needs_a_key(self):
+    def test_facecheck_is_the_default_and_needs_a_key(self):
         del os.environ["SEARCH_BACKEND"]
         code, _, err = self.cli("run", "--capture", str(ALEX), "--until", "0")
         self.assertEqual(code, BAD_CONFIG)
-        self.assertIn("SERPAPI_KEY", err)
-        self.assertIn("set-key serpapi", err)
+        self.assertIn("FACECHECK_API_KEY", err)
+        self.assertIn("set-key facecheck", err)
         self.assertEqual(self.run_dirs(), [])
+
+    def test_facecheck_run_needs_no_image_hosting(self):
+        from tests.test_stage1 import FakeBackend, page_html, yandex
+
+        os.environ.update(FACECHECK_ENV)
+        capture = self.real_image_capture()
+        url = "https://example.com/pat"
+        backend = FakeBackend({"img-1": yandex(url)}, {url: page_html(title="Pat")})
+        backend.name = "facecheck"
+        with patch("pipeline.hosting.find_ssh", return_value=None), \
+                patch("pipeline.stage1_collect.make_backend", return_value=backend):
+            code, out, err = self.cli("run", "--capture", str(capture), "--until", "1")
+        self.assertEqual(code, OK, err)
+        self.assertIn("search: facecheck", out)
+        self.assertNotIn("test-facecheck-token", out + err)
+        [run_dir] = self.run_dirs()
+        self.assertEqual(read_artifact(run_dir, 0).backend, "facecheck")
+        self.assertEqual(read_artifact(run_dir, 1).images[0].backend, "facecheck")
+        self.assertNotIn("test-facecheck-token", "".join(path.read_text() for path in run_dir.iterdir()
+                                                         if path.is_file()))
+
+    def test_stage_1_of_facecheck_run_uses_facecheck(self):
+        from tests.test_stage1 import FakeBackend, yandex
+
+        os.environ.update(FACECHECK_ENV)
+        capture = self.real_image_capture()
+        self.assertEqual(self.cli("run", "--capture", str(capture), "--until", "0")[0], OK)
+        [run_dir] = self.run_dirs()
+        os.environ["SEARCH_BACKEND"] = "mock"  # the run's recorded backend wins
+        backend = FakeBackend({"img-1": yandex()}, {})
+        backend.name = "facecheck"
+        with patch("pipeline.stage1_collect.make_backend", return_value=backend) as make_backend:
+            code, _, err = self.cli("stage", "1", "--run", str(run_dir))
+        self.assertEqual(code, OK, err)
+        self.assertEqual(make_backend.call_args.args[0].search_backend, "facecheck")
+        del os.environ["FACECHECK_API_KEY"]
+        self.assertEqual(self.cli("stage", "1", "--run", str(run_dir))[0], BAD_CONFIG)
 
     def test_mock_flag_overrides_serpapi_setting(self):
         os.environ.update(SEARCH_BACKEND="serpapi")
@@ -263,31 +301,41 @@ class CliTests(MockServerTestCase):
         self.assertFalse(run_dir.exists())
         self.assertTrue(capture.exists(), "plain purge must not delete the source capture")
 
-    def test_smoke_search_always_uses_serpapi(self):
+    def test_smoke_search_always_uses_a_live_backend(self):
         code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
-        self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; the key is missing
+        self.assertEqual(code, BAD_CONFIG)  # SEARCH_BACKEND=mock doesn't apply; FaceCheck's key is missing
+        self.assertIn("FACECHECK_API_KEY", err)
+        os.environ.update(FACECHECK_API_KEY="test-facecheck-token")
+        code, _, _ = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
+        self.assertEqual(code, REFUSED)  # mock fixtures can't be searched live
+
+    def test_smoke_search_on_serpapi_needs_its_key_and_hosting(self):
+        smoke = ("smoke-search", "--capture", str(ALEX), "--image-id", "img-1", "--backend", "serpapi")
+        code, _, err = self.cli(*smoke)
+        self.assertEqual(code, BAD_CONFIG)
         self.assertIn("SERPAPI_KEY", err)
         os.environ.update(SERPAPI_KEY="test-serpapi-key", IMAGE_HOST="s3")
-        code, _, err = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
+        code, _, err = self.cli(*smoke)
         self.assertEqual(code, BAD_CONFIG)  # image hosting isn't configured
         self.assertIn("IMAGE_BUCKET", err)
         os.environ.update(HOSTING_ENV)
-        code, _, _ = self.cli("smoke-search", "--capture", str(ALEX), "--image-id", "img-1")
-        self.assertEqual(code, REFUSED)  # mock fixtures can't be searched on SerpApi
+        self.assertEqual(self.cli(*smoke)[0], REFUSED)  # mock fixtures can't be searched on SerpApi
 
     def test_smoke_search_runs_one_image_without_models(self):
         from tests.test_stage1 import FakeBackend, page_html, yandex
 
-        os.environ.update({**SERPAPI_ENV, **HOSTING_ENV})
+        os.environ.update(FACECHECK_API_KEY="test-facecheck-token")
         capture = self.real_image_capture()
         url = "https://example.com/pat"
         backend = FakeBackend({"img-1": yandex(url)}, {url: page_html(title="Pat")})
+        backend.name = "facecheck"
         with patch("pipeline.stage1_collect.make_backend", return_value=backend) as make_backend:
             code, out, _ = self.cli("smoke-search", "--capture", str(capture), "--image-id", "img-1")
         self.assertEqual(code, OK)
         self.assertEqual(make_backend.call_args.kwargs, {"refresh": False})
         [run_dir] = self.run_dirs()
         artifact, bundle = read_artifact(run_dir, 0), read_artifact(run_dir, 1)
+        self.assertEqual(artifact.backend, "facecheck")
         self.assertEqual(([image.image_id for image in artifact.capture.images], artifact.llm_mode), (["img-1"], "off"))
         self.assertEqual((bundle.num_images, bundle.images[0].collection_method), (1, "deterministic"))
         self.assertEqual(backend.released, ["img-1"])

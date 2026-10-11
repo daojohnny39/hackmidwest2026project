@@ -510,6 +510,10 @@ def make_backend(settings: Settings, capture: CaptureArtifact, run_dir: Path, *,
         from pipeline.search.mock_backend import MockSearchBackend
 
         return MockSearchBackend(settings.mock_internet_url, scenario=capture.scenario, delay_ms=settings.mock_delay_ms)
+    if capture.backend == "facecheck":
+        from pipeline.search.facecheck_backend import build_facecheck_backend
+
+        return build_facecheck_backend(settings, capture, run_dir, refresh=refresh)
     from pipeline.search.serpapi_backend import build_serpapi_backend
 
     return build_serpapi_backend(settings, capture, run_dir, refresh=refresh)
@@ -530,17 +534,19 @@ def run_stage1(run_dir: Path, settings: Settings, *, refresh: bool = False, back
                agent: AgentRunner | None = None) -> RawEvidenceBundle:
     """Read 00_capture.json, collect evidence, validate it against the capture, and write 01_raw_evidence.json."""
     capture = read_artifact(run_dir, 0)
-    if capture.backend == "serpapi" and settings.search_backend != "serpapi":
-        raise ConfigError("this run searches with SerpApi; load settings with the serpapi backend")
+    if capture.backend != "mock" and settings.search_backend != capture.backend:
+        raise ConfigError(f"this run searches with {capture.backend}; load settings with the {capture.backend} backend")
     backend = backend or make_backend(settings, capture, run_dir, refresh=refresh)
     agent = agent or make_agent(settings)
+    # FaceCheck can queue a search for minutes, so its images get that much longer.
+    deadline_s = IMAGE_DEADLINE_S + getattr(backend, "extra_deadline_s", 0.0)
 
     def log(**fields: object) -> None:
         log_event(run_dir, stage=1, **fields)
 
     async def collect() -> RawEvidenceBundle:
         try:
-            bundle, _ = await collect_evidence(capture, backend, agent=agent, log=log)
+            bundle, _ = await collect_evidence(capture, backend, agent=agent, log=log, image_deadline_s=deadline_s)
         finally:
             await backend.aclose()
         return bundle
@@ -565,7 +571,8 @@ def format_hits(bundle: RawEvidenceBundle) -> str:
             status += ", errors: " + ", ".join(sorted({error.reason for error in image.errors}))
         lines.append(f"  {image.image_id} ({image.angle}): {status}")
         for hit in image.hits:
-            lines.append(f"    {hit.position:>2}. {hit.title[:60]}  {hit.url}")
+            label = f"face {hit.face_score:>3}/100" if hit.face_score is not None else hit.title[:60]
+            lines.append(f"    {hit.position:>2}. {label}  {hit.url}")
     html = sum(page.extraction == "html" for page in bundle.pages.values())
     lines.append(f"Pages: {len(bundle.pages)} ({html} HTML, {len(bundle.pages) - html} snippet-only)")
     for page in bundle.pages.values():

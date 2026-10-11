@@ -36,7 +36,12 @@ MAX_SUMMARY_LINKS = 20
 SYSTEM_PROMPT = """\
 You collect public web evidence for one consenting participant's face image in a consented demo.
 You receive reverse-image search results and short page summaries, not the image itself, so never
-claim to have compared or recognized a face.
+claim to have compared or recognized a face yourself.
+
+With face search, each hit has a face_score from 0 to 100: the search engine's estimate that the face
+on that page is the participant's (90+ certain, 83-89 confident, 70-82 uncertain, under 70 weak).
+Prefer high scores, treat hits under 70 as likely lookalikes, and remember that even a high score is
+not proof: different people look alike. Without face_score, hits are only visually similar images.
 
 1. Call reverse_image_search once.
 2. Call fetch_page for the hits most likely to be this person's own profiles or posts, or articles
@@ -98,7 +103,9 @@ def build_tools(collector: ImageCollector) -> list:
         if outcome.error is not None:
             return {"error": outcome.error.reason, "hits": []}
         hits = [{"position": hit.position, "title": hit.title, "url": hit.url, "source": hit.source,
-                 "snippet": hit.snippet[:SNIPPET_TEXT]} for hit in outcome.hits]
+                 "snippet": hit.snippet[:SNIPPET_TEXT],
+                 **({"face_score": hit.face_score} if hit.face_score is not None else {})}
+                for hit in outcome.hits]
         return {"hits": hits, "fetch_budget_left": _budget_left(collector)}
 
     @tool

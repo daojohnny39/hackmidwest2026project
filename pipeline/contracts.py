@@ -27,7 +27,7 @@ from pydantic import (
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 Angle = Literal["front", "left", "right", "up", "down", "unknown"]
-Backend = Literal["mock", "serpapi"]
+Backend = Literal["mock", "serpapi", "facecheck"]
 LlmMode = Literal["off", "anthropic", "bedrock"]
 JevMode = Literal["fake", "typesafe", "openrouter", "off"]
 
@@ -55,7 +55,7 @@ class Consent(Contract):
     confirmed: StrictBool
     participant: str = Field(min_length=1)
     confirmed_at: AwareDatetime
-    external_processing: StrictBool = False  # required true for SerpApi search or --models
+    external_processing: StrictBool = False  # required true for live search or --models
 
 
 class CaptureImage(Contract):
@@ -107,7 +107,7 @@ class CaptureArtifact(Contract):
     capture: CaptureBundle
     capture_dir: str  # validated local folder; images remain here
     backend: Backend
-    scenario: str  # mock scenario; "default" with SerpApi
+    scenario: str  # mock scenario; "default" for live search
     llm_mode: LlmMode
     jev_mode: JevMode
     llm_model: str | None = None
@@ -246,6 +246,7 @@ class ImageHit(Contract):
     source: str
     snippet: str = ""
     thumbnail_url: str | None = None
+    face_score: int | None = Field(default=None, ge=0, le=100)  # FaceCheck's face match, 0-100; None for Yandex
 
 
 class FetchError(Contract):

@@ -277,14 +277,14 @@ class TunnelImageHost:
         return found["url"]
 
 
-def search_copy(data: bytes) -> bytes:
-    """A JPEG at most SEARCH_IMAGE_MAX_SIDE px on its longest side, upright, with no EXIF or other metadata."""
+def search_copy(data: bytes, max_side: int = SEARCH_IMAGE_MAX_SIDE) -> bytes:
+    """A JPEG at most max_side px on its longest side, upright, with no EXIF or other metadata."""
     from PIL import Image, ImageOps
 
     try:
         with Image.open(io.BytesIO(data)) as opened:
             image = ImageOps.exif_transpose(opened)  # apply the orientation tag before it's dropped
-            image.thumbnail((SEARCH_IMAGE_MAX_SIDE, SEARCH_IMAGE_MAX_SIDE))
+            image.thumbnail((max_side, max_side))
             output = io.BytesIO()
             image.convert("RGB").save(output, "JPEG", quality=SEARCH_IMAGE_QUALITY)
     except (OSError, ValueError, Image.DecompressionBombError):

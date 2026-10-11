@@ -54,7 +54,7 @@ class BackendError(Exception):
 
 
 class SearchBackend(Protocol):
-    name: str  # "mock" or "serpapi"
+    name: str  # "mock", "serpapi" or "facecheck"
     origin: str | None  # mock server origin for normalize_url; None when live
     search_endpoint: str  # endpoint paths for run_log.jsonl; never a page URL
     fetch_endpoint: str
@@ -140,7 +140,8 @@ async def with_retries(
 
 
 def parse_image_results(payload: object, *, mock_origin: str | None = None) -> SearchResult:
-    """Normalize a Yandex-shaped reverse-image response (SerpApi or the mock) into ImageHits.
+    """Normalize a Yandex-shaped reverse-image response (SerpApi, the mock, or FaceCheck's
+    converted results) into ImageHits.
 
     A provider error or a non-success status is a failure even on HTTP 200, except
     SerpApi's "hasn't returned any results", which is zero hits. Missing
@@ -179,13 +180,19 @@ def parse_image_results(payload: object, *, mock_origin: str | None = None) -> S
             source=_text(row.get("source"), TITLE_LIMIT),
             snippet=_text(row.get("snippet"), SNIPPET_LIMIT),
             thumbnail_url=_thumbnail(row.get("thumbnail")),
+            face_score=_face_score(row.get("face_score")),
         ))
     hits.sort(key=lambda hit: hit.position)
 
     extras: dict = {"status": status or "Success"}
     info = payload.get("search_information")
-    if isinstance(info, dict) and isinstance(info.get("total_results"), int):
-        extras["total_results"] = info["total_results"]
+    if isinstance(info, dict):
+        if isinstance(info.get("total_results"), int):
+            extras["total_results"] = info["total_results"]
+        if isinstance(info.get("demo"), bool):  # FaceCheck demo mode: only 100,000 faces searched
+            extras["demo"] = info["demo"]
+        if isinstance(info.get("searched_faces"), int):
+            extras["searched_faces"] = info["searched_faces"]
     if skipped:
         extras["skipped_hits"] = skipped
     request_id = metadata.get("id")
@@ -194,6 +201,10 @@ def parse_image_results(payload: object, *, mock_origin: str | None = None) -> S
 
 def _text(value: object, limit: int) -> str:
     return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+
+def _face_score(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
 
 
 def _thumbnail(value: object) -> str | None:

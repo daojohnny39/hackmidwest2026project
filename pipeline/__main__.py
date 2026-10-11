@@ -1,8 +1,9 @@
 """CLI: python3 -m pipeline {run,stage,smoke-search,purge,set-key}.
 
-Search uses SerpApi unless `run --mock` (or SEARCH_BACKEND=mock) picks the local
-mock internet. `set-key {serpapi,typesafe,openrouter,anthropic}` prompts for a key
-with hidden input and saves it to .env; SerpApi and TypeSafe keys are checked first.
+Search uses FaceCheck face search unless SEARCH_BACKEND=serpapi picks Yandex through
+SerpApi, or `run --mock` (or SEARCH_BACKEND=mock) picks the local mock internet.
+`set-key {facecheck,serpapi,typesafe,openrouter,anthropic}` prompts for a key with
+hidden input and saves it to .env; FaceCheck, SerpApi and TypeSafe keys are checked first.
 `set-key aws` saves an AWS access key pair to ~/.aws/credentials after a free STS check.
 
 Exit codes: 0 done, 1 refused (consent, capture, or artifact error),
@@ -28,7 +29,10 @@ from pipeline.artifacts import (
     ArtifactError, create_run, invalidate_from, log_event, purge_run, read_artifact, resolve_run_dir, write_artifact,
 )
 from pipeline.capture import CaptureError, ConsentError, load_capture, recheck_consent
-from pipeline.config import REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings, set_env_value
+from pipeline.config import (
+    DEFAULT_SEARCH_BACKEND, LIVE_BACKENDS, REPO_ROOT, SECRET_ENV, SECRET_PATTERN, ConfigError, Settings, load_settings,
+    set_env_value,
+)
 from pipeline.contracts import CaptureArtifact
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected, check_typesafe_key
 from pipeline.hosting import remote_deleter, require_hosting
@@ -51,7 +55,8 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 DEFAULT_CAPTURES_DIR = REPO_ROOT / "captures"
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 ENV_TEMPLATE = REPO_ROOT / ".env.example"
-SERVICE_NAMES = {"serpapi": "SerpApi", "typesafe": "TypeSafe", "openrouter": "OpenRouter", "anthropic": "Anthropic"}
+SERVICE_NAMES = {"facecheck": "FaceCheck", "serpapi": "SerpApi", "typesafe": "TypeSafe", "openrouter": "OpenRouter",
+                 "anthropic": "Anthropic"}
 # The .env mode that puts a saved model key to use; real modes also need --models.
 KEY_MODES = {"typesafe": "JEV_MODE=typesafe", "openrouter": "JEV_MODE=openrouter", "anthropic": "LLM_MODE=anthropic"}
 
@@ -99,7 +104,7 @@ def settings_for(args: argparse.Namespace, *, backend: str | None = None, scenar
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         settings = settings_for(args, backend="mock" if args.mock else None, scenario=args.scenario)
-        if settings.live and args.until >= 1:
+        if settings.search_backend == "serpapi" and args.until >= 1:
             require_hosting(settings)  # before the run folder exists, let alone an upload
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
@@ -154,8 +159,8 @@ def cmd_stage(args: argparse.Namespace) -> int:
     except ArtifactError as exc:
         return fail(f"Refused (run): {exc}", REFUSED)
     try:
-        # The run keeps the backend it was made with, so a SerpApi run needs external consent.
-        recheck_consent(artifact, live=artifact.backend == "serpapi", models=args.models)
+        # The run keeps the backend it was made with, so a live run needs external consent.
+        recheck_consent(artifact, live=artifact.backend != "mock", models=args.models)
     except ConsentError as exc:
         return fail(f"Refused (consent): {exc}", REFUSED)
     except CaptureError as exc:
@@ -164,10 +169,10 @@ def cmd_stage(args: argparse.Namespace) -> int:
         return not_built(args.number)
     try:
         # Stage 1 keeps the run's search backend and mock scenario. Stages 2-4 only read saved
-        # evidence, so they load search settings as mock and need no SerpApi key; they read the
+        # evidence, so they load search settings as mock and need no search key; they read the
         # run's backend from 00_capture.json. Model modes come from .env behind --models.
-        if args.number == 1 and artifact.backend == "serpapi":
-            settings = settings_for(args, backend="serpapi")
+        if args.number == 1 and artifact.backend != "mock":
+            settings = settings_for(args, backend=artifact.backend)
         else:
             settings = settings_for(args, backend="mock", scenario=artifact.scenario if artifact.backend == "mock" else None)
     except ConfigError as exc:
@@ -178,10 +183,12 @@ def cmd_stage(args: argparse.Namespace) -> int:
 
 def cmd_smoke_search(args: argparse.Namespace) -> int:
     """One live reverse search on one image (spec 1.1): a stage-0 bundle with only that image,
-    then deterministic stage 1. Never calls a model, so it costs one SerpApi search."""
+    then deterministic stage 1. Never calls a model, so it costs one search: 3 FaceCheck credits
+    (free with FACECHECK_DEMO=true) or one SerpApi search."""
     try:
-        settings = settings_for(args, backend="serpapi")
-        require_hosting(settings)
+        settings = settings_for(args, backend=args.backend)
+        if args.backend == "serpapi":
+            require_hosting(settings)
     except ConfigError as exc:
         return fail(f"Configuration error: {exc}", BAD_CONFIG)
     try:
@@ -203,9 +210,9 @@ def cmd_smoke_search(args: argparse.Namespace) -> int:
     with tracing(run_dir, 0, name=STAGE_NAMES[0], command="smoke-search", settings=settings.describe(),
                  capture_dir=str(loaded.capture_dir), images=[image.model_dump(mode="json")]):
         write_artifact(run_dir, 0, CaptureArtifact(
-            run_id=run_id, capture=bundle, capture_dir=str(loaded.capture_dir), backend="serpapi", scenario="default",
-            llm_mode="off", jev_mode=settings.jev_mode, jev_model=settings.jev_model))
-        log_event(run_dir, stage=0, backend="serpapi", status="ok", code="smoke_search")
+            run_id=run_id, capture=bundle, capture_dir=str(loaded.capture_dir), backend=args.backend,
+            scenario="default", llm_mode="off", jev_mode=settings.jev_mode, jev_model=settings.jev_model))
+        log_event(run_dir, stage=0, backend=args.backend, status="ok", code="smoke_search")
     print(f"Smoke search {run_id}: {image.image_id} ({image.angle}) from {loaded.capture_dir}")
     print(f"  trace: {run_dir / TRACE_FILE}")
     code = run_stages(run_dir, settings, range(1, 2), refresh=args.refresh)
@@ -271,6 +278,16 @@ def cmd_set_key(args: argparse.Namespace) -> int:
         return fail("That doesn't look like an API key (expected only letters, digits, '.', '_' and '-'); "
                     "nothing was saved.", BAD_CONFIG)
 
+    if args.service == "facecheck" and args.check:
+        # /api/info returns the credit balance and runs no search.
+        from pipeline.search.facecheck_backend import InfoCheckFailed, TokenRejected, account_info, describe_info
+
+        try:
+            print(f"FaceCheck accepted the token: {describe_info(account_info(value))}.")
+        except TokenRejected as exc:
+            return fail(f"FaceCheck rejected the token ({exc}); nothing was saved.", REFUSED)
+        except InfoCheckFailed as exc:
+            print(f"Warning: couldn't check the token with FaceCheck ({exc}); saving it anyway.")
     if args.service == "serpapi" and args.check:
         try:
             print(f"SerpApi accepted the key: {describe_quota(account_quota(value))}.")
@@ -293,6 +310,9 @@ def cmd_set_key(args: argparse.Namespace) -> int:
     if args.service in KEY_MODES:
         print(f"To use it, set {KEY_MODES[args.service]} in .env and add --models to `run` or `stage`; "
               "those calls are paid.")
+    if args.service == "facecheck":
+        print("Each FaceCheck search costs 3 credits ($0.30). Set FACECHECK_DEMO=true in .env for free demo "
+              "searches, which scan only 100,000 faces.")
     if os.environ.get(name, "").strip():
         print(f"Note: {name} is also exported in this shell, and exported values win over .env. "
               f"Run `unset {name}` to use the saved key.")
@@ -352,7 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def gates(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--models", action="store_true", help="allow paid model calls for the modes set in .env")
-        sub.add_argument("--refresh", action="store_true", help="bypass this run's search cache (SerpApi only)")
+        sub.add_argument("--refresh", action="store_true", help="bypass this run's search cache (live search only)")
 
     def runs_dir(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS_DIR, help=argparse.SUPPRESS)
@@ -361,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--capture", type=Path, required=True)
     run.add_argument("--until", type=int, choices=range(5), default=4, metavar="N", help="stop after stage N (0-4)")
     run.add_argument("--mock", action="store_true",
-                     help="search the local mock internet instead of SerpApi (no search credits)")
+                     help="search the local mock internet instead of the live backend (no search credits)")
     run.add_argument("--scenario", help="mock scenario (overrides MOCK_SCENARIO; mock search only)")
     gates(run)
     runs_dir(run)
@@ -374,9 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     runs_dir(stage)
     stage.set_defaults(handler=cmd_stage)
 
-    smoke = commands.add_parser("smoke-search", help="one SerpApi reverse-image search on one image")
+    smoke = commands.add_parser("smoke-search", help="one live reverse-image search on one image")
     smoke.add_argument("--capture", type=Path, required=True)
     smoke.add_argument("--image-id", required=True)
+    smoke.add_argument("--backend", choices=LIVE_BACKENDS, default=DEFAULT_SEARCH_BACKEND,
+                       help=f"live search backend (default {DEFAULT_SEARCH_BACKEND})")
     gates(smoke)
     runs_dir(smoke)
     smoke.set_defaults(handler=cmd_smoke_search)
@@ -393,8 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
                                                   "(aws: to ~/.aws/credentials)")
     set_key.add_argument("service", choices=[*SECRET_ENV, "aws"], help="which key to save")
     set_key.add_argument("--no-check", dest="check", action="store_false",
-                         help="save without checking the key (SerpApi's free Account API, TypeSafe's model list, "
-                              "AWS STS GetCallerIdentity)")
+                         help="save without checking the key (FaceCheck's free /api/info, SerpApi's free Account "
+                              "API, TypeSafe's model list, AWS STS GetCallerIdentity)")
     set_key.add_argument("--region", help="aws only: also save this AWS_REGION to .env (for example us-east-1)")
     set_key.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help=argparse.SUPPRESS)
     set_key.add_argument("--credentials-file", type=Path, default=None, help=argparse.SUPPRESS)

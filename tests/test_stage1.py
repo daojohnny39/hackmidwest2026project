@@ -6,12 +6,14 @@ use canned live-shaped responses for merge rules, budgets, and deadlines.
 
 import asyncio
 import json
+import tempfile
 import time
+from unittest.mock import patch
 from datetime import datetime, timezone
 
 from pipeline.artifacts import create_run, read_artifact, write_artifact
 from pipeline.capture import load_capture
-from pipeline.config import load_settings
+from pipeline.config import ConfigError, load_settings
 from pipeline.contracts import CaptureArtifact, CaptureBundle, FetchedPage, validate_references
 from pipeline.search.base import BackendError
 from pipeline.search.mock_backend import MockSearchBackend
@@ -304,6 +306,25 @@ class FakeBackendTests(OfflineTestCase):
         self.assertEqual(bundle.images[0].search_extras["collection_error"], "timeout")
         self.assertEqual([(e.url, e.reason) for e in bundle.images[0].errors], [(url, "timeout")])
         self.assertEqual(store.pending(), [])  # nothing left running to write late
+
+    def test_face_search_run_gets_a_longer_deadline_and_shows_scores(self):
+        from pipeline.search.facecheck_backend import to_payload
+
+        url = "https://github.com/pat"
+        backend = FakeBackend({"img-1": to_payload("s1", {"items": [{"score": 91, "url": {"value": url}}]}, demo=False)},
+                              {url: page_html(title="Pat")})
+        backend.name, backend.extra_deadline_s = "facecheck", 180.0
+        capture = live_capture("img-1").model_copy(update={"backend": "facecheck"})
+        run_id, run_dir = create_run(self.enterContext(tempfile.TemporaryDirectory()), capture.capture.session_id)
+        write_artifact(run_dir, 0, capture.model_copy(update={"run_id": run_id}))
+        settings = load_settings(backend="facecheck", environ={"FACECHECK_API_KEY": "k"}, dotenv_path=None)
+        with patch("pipeline.stage1_collect.collect_evidence", wraps=collect_evidence) as collect:
+            bundle = run_stage1(run_dir, settings, backend=backend)
+        self.assertEqual(collect.call_args.kwargs["image_deadline_s"], 35.0 + 180.0)
+        self.assertEqual((bundle.images[0].backend, bundle.images[0].hits[0].face_score), ("facecheck", 91))
+        self.assertIn(f"1. face  91/100  {url}", format_hits(bundle))
+        with self.assertRaisesRegex(ConfigError, "searches with facecheck"):
+            run_stage1(run_dir, load_settings(backend="mock", environ={}, dotenv_path=None), backend=backend)
 
     def test_searched_at_is_the_attempt_start(self):
         before = datetime.now(timezone.utc)

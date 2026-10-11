@@ -14,7 +14,7 @@ from strands.models import Model
 
 from pipeline.capture import load_capture
 from pipeline.contracts import CaptureArtifact
-from pipeline.image_agent import make_agent_runner
+from pipeline.image_agent import SYSTEM_PROMPT, make_agent_runner
 from pipeline.search.mock_backend import MockSearchBackend
 from pipeline.stage1_collect import collect_evidence
 from pipeline.trace import tracing
@@ -44,6 +44,7 @@ class ScriptedModel(Model):
         self.skip_search = skip_search
         self.phase = 0
         self.hit_urls: list[str] = []
+        self.hits: list[dict] = []
         self.fetched: dict[str, dict] = {}
         self.sneak_result = None
         self.config = {}
@@ -61,6 +62,7 @@ class ScriptedModel(Model):
     def next_calls(self, messages):
         for result in tool_results(messages):
             if "hits" in result:
+                self.hits = result["hits"]
                 self.hit_urls = [hit["url"] for hit in result["hits"]]
             for page in result.get("pages", [result]):
                 if "url" in page and "kind" in page:
@@ -134,6 +136,23 @@ class ImageAgentTests(MockServerTestCase):
         self.assertNotIn(ARCHIVE, bundle.images[2].page_urls)
         self.assertTrue(bundle.pages["https://chatter.test/alexbuilds"].relevant)
         self.assertEqual(sum(page.page_kind == "profile" and page.relevant for page in bundle.pages.values()), 5)
+
+    def test_face_search_hits_carry_face_scores(self):
+        from pipeline.search.facecheck_backend import to_payload
+        from tests.test_stage1 import FakeBackend, live_capture, page_html, yandex
+
+        a, b = "https://github.com/pat", "https://lookalike.example/x"
+        output = {"items": [{"score": 55, "url": {"value": b}}, {"score": 92, "url": {"value": a}}]}
+        pages = {a: page_html(title="Pat"), b: page_html()}
+        for payload, expected in ((to_payload("s1", output, demo=False), [(a, 92), (b, 55)]),
+                                  (yandex(a, b), [(a, None), (b, None)])):
+            with self.subTest(face_search=expected[0][1] is not None):
+                model = ScriptedModel()
+                asyncio.run(collect_evidence(live_capture("img-1"), FakeBackend({"img-1": payload}, pages),
+                                             agent=make_agent_runner(lambda: model)))
+                self.assertEqual([(hit["url"], hit.get("face_score")) for hit in model.hits], expected)
+        self.assertIn("face_score", SYSTEM_PROMPT)
+        self.assertIn("under 70 as likely lookalikes", SYSTEM_PROMPT)
 
     def test_tools_refuse_urls_outside_the_image(self):
         other_image_hit = "https://photogram.test/alexbuilds"  # img-2's hit, not img-1's

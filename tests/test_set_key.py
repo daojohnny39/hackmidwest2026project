@@ -1,6 +1,6 @@
-"""`python -m pipeline set-key`, the .env writer, and the SerpApi, TypeSafe, and AWS key checks.
+"""`python -m pipeline set-key`, the .env writer, and the FaceCheck, SerpApi, TypeSafe, and AWS key checks.
 
-The prompt, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
+The prompt, FaceCheck, SerpApi, TypeSafe, and AWS STS are patched or stubbed; nothing leaves the machine.
 """
 
 import configparser
@@ -27,6 +27,7 @@ from pipeline import aws_credentials
 from pipeline.__main__ import BAD_CONFIG, OK, REFUSED, main
 from pipeline.config import REPO_ROOT, load_settings, set_env_value
 from pipeline.jev import KeyCheckFailed as TypeSafeCheckFailed, KeyRejected as TypeSafeKeyRejected
+from pipeline.search.facecheck_backend import InfoCheckFailed, TokenRejected
 from pipeline.serpapi_account import AccountCheckFailed, KeyRejected, account_quota, describe_quota
 from tests.support import OfflineTestCase
 
@@ -34,6 +35,7 @@ KEY = "0123abcdSECRETkey9876"
 QUOTA = {"plan_name": "Free Plan", "searches_per_month": 250, "total_searches_left": 250,
          "account_rate_limit_per_hour": 50}
 MODELS = ["jev-1.13.0"]
+FACECHECK_INFO = {"remaining_credits": 30, "has_credits_to_search": True, "is_online": True, "faces": 1_000_000}
 
 
 class EnvFileCase(OfflineTestCase):
@@ -50,7 +52,7 @@ class SetEnvValueTests(EnvFileCase):
         set_env_value(self.env_file, "SERPAPI_KEY", KEY, template=REPO_ROOT / ".env.example")
         values = dotenv_values(self.env_file)
         self.assertEqual(values["SERPAPI_KEY"], KEY)
-        self.assertEqual(values["SEARCH_BACKEND"], "serpapi")
+        self.assertEqual(values["SEARCH_BACKEND"], "facecheck")
         self.assertEqual(values["JEV_MODE"], "fake")
 
     def test_new_file_without_template(self):
@@ -162,7 +164,7 @@ class SetKeyCommandTests(EnvFileCase):
         checked.assert_called_once_with(KEY)
         self.assertIn("SerpApi accepted the key: Free Plan, 250 searches left", out)
         self.assertEqual(self.saved(), KEY)
-        self.assertEqual(dotenv_values(self.env_file)["SEARCH_BACKEND"], "serpapi")  # from .env.example
+        self.assertEqual(dotenv_values(self.env_file)["SEARCH_BACKEND"], "facecheck")  # from .env.example
 
     def test_rejected_key_is_not_saved(self):
         code, _, err, _ = self.set_key("serpapi", quota=KeyRejected("HTTP 401"))
@@ -181,6 +183,44 @@ class SetKeyCommandTests(EnvFileCase):
         self.assertEqual(code, OK)
         checked.assert_not_called()
         self.assertEqual(self.saved(), KEY)
+
+    def facecheck_info(self, result=FACECHECK_INFO):
+        return patch("pipeline.search.facecheck_backend.account_info",
+                     side_effect=result if isinstance(result, BaseException) else None, return_value=result)
+
+    def facecheck_saved(self):
+        return dotenv_values(self.env_file).get("FACECHECK_API_KEY") if self.env_file.exists() else None
+
+    def test_saves_a_checked_facecheck_token(self):
+        with self.facecheck_info() as info:
+            code, out, _, checked = self.set_key("facecheck")
+        self.assertEqual(code, OK)
+        info.assert_called_once_with(KEY)
+        checked.assert_not_called()
+        self.assertIn("FaceCheck accepted the token: 30 credits left (10 searches at 3 credits, $0.30 each)", out)
+        self.assertIn("FACECHECK_DEMO=true", out)
+        self.assertEqual(self.facecheck_saved(), KEY)
+
+    def test_rejected_facecheck_token_is_not_saved(self):
+        with self.facecheck_info(TokenRejected("INVALID_TOKEN")):
+            code, _, err, _ = self.set_key("facecheck")
+        self.assertEqual(code, REFUSED)
+        self.assertIn("FaceCheck rejected the token (INVALID_TOKEN)", err)
+        self.assertIsNone(self.facecheck_saved())
+
+    def test_unreachable_facecheck_check_still_saves(self):
+        with self.facecheck_info(InfoCheckFailed("ConnectError")):
+            code, out, _, _ = self.set_key("facecheck")
+        self.assertEqual(code, OK)
+        self.assertIn("couldn't check the token with FaceCheck", out)
+        self.assertEqual(self.facecheck_saved(), KEY)
+
+    def test_no_check_skips_facecheck(self):
+        with self.facecheck_info() as info:
+            code, _, _, _ = self.set_key("facecheck", "--no-check")
+        self.assertEqual(code, OK)
+        info.assert_not_called()
+        self.assertEqual(self.facecheck_saved(), KEY)
 
     def test_other_services_are_saved_without_a_check(self):
         for service, name, mode in (("openrouter", "OPENROUTER_API_KEY", "JEV_MODE=openrouter"),

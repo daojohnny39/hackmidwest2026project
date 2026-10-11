@@ -15,7 +15,9 @@ SECRETS = {
     "TYPESAFE_API_KEY": "ts-SECRET-2222",
     "OPENROUTER_API_KEY": "or-SECRET-3333",
     "ANTHROPIC_API_KEY": "sk-ant-SECRET-4444",
+    "FACECHECK_API_KEY": "fc-SECRET-5555",
 }
+FACECHECK = {"FACECHECK_API_KEY": SECRETS["FACECHECK_API_KEY"]}
 LIVE = {"SERPAPI_KEY": SECRETS["SERPAPI_KEY"], "IMAGE_BUCKET": "hm-bucket", "AWS_REGION": "us-east-1"}
 
 
@@ -50,17 +52,20 @@ class ConfigTestCase(OfflineTestCase):
 
 
 class DefaultsTests(ConfigTestCase):
-    def test_default_backend_is_serpapi(self):
-        settings = load({"SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend=None)
-        self.assertEqual(settings.search_backend, "serpapi")
+    def test_default_backend_is_facecheck(self):
+        settings = load({**FACECHECK, "SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend=None)
+        self.assertEqual(settings.search_backend, "facecheck")
         self.assertTrue(settings.live)
-        self.assertEqual(settings.serpapi_key, SECRETS["SERPAPI_KEY"])
+        self.assertEqual(settings.facecheck_api_key, SECRETS["FACECHECK_API_KEY"])
+        self.assertIsNone(settings.serpapi_key)
+        self.assertFalse(settings.facecheck_demo)
         self.assertEqual((settings.jev_mode, settings.llm_mode), ("fake", "off"))
         self.assertFalse(settings.models or settings.real_models_enabled)
 
-    def test_default_backend_needs_serpapi_key(self):
-        error = self.assertConfigError(r"SERPAPI_KEY \(for SerpApi search\)", backend=None)
-        self.assertIn("set-key serpapi", str(error))
+    def test_default_backend_needs_facecheck_key(self):
+        error = self.assertConfigError(r"FACECHECK_API_KEY \(for FaceCheck search\)", backend=None)
+        self.assertIn("set-key facecheck", str(error))
+        self.assertIn("SEARCH_BACKEND=serpapi", str(error))
         self.assertIn("--mock", str(error))
 
     def test_mock_backend_is_offline(self):
@@ -80,9 +85,10 @@ class DefaultsTests(ConfigTestCase):
 
     def test_empty_strings_count_as_unset(self):
         env = {"SEARCH_BACKEND": "", "MOCK_SCENARIO": " ", "JEV_MODE": "", "LLM_MODE": "", "MOCK_DELAY_MS": "",
-               "SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}
+               "FACECHECK_DEMO": "", **FACECHECK}
         settings = load(env, backend=None)
-        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("serpapi", "fake", "off"))
+        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("facecheck", "fake", "off"))
+        self.assertFalse(settings.facecheck_demo)
         self.assertEqual((settings.mock_scenario, settings.mock_delay_ms), ("default", 0))
 
     def test_settings_are_frozen(self):
@@ -128,11 +134,12 @@ class DotenvTests(ConfigTestCase):
     def test_missing_dotenv_file_is_ignored(self):
         self.assertEqual(load(dotenv_path=self.folder / "absent.env").mock_scenario, "default")
 
-    def test_env_example_selects_serpapi_and_needs_the_key(self):
+    def test_env_example_selects_facecheck_and_needs_the_key(self):
         example = REPO_ROOT / ".env.example"
-        self.assertConfigError("SERPAPI_KEY", backend=None, dotenv_path=example)
-        settings = load({"SERPAPI_KEY": SECRETS["SERPAPI_KEY"]}, backend=None, dotenv_path=example)
-        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("serpapi", "fake", "off"))
+        self.assertConfigError("FACECHECK_API_KEY", backend=None, dotenv_path=example)
+        settings = load(FACECHECK, backend=None, dotenv_path=example)
+        self.assertEqual((settings.search_backend, settings.jev_mode, settings.llm_mode), ("facecheck", "fake", "off"))
+        self.assertFalse(settings.facecheck_demo)
 
 
 class SearchBackendTests(ConfigTestCase):
@@ -154,7 +161,31 @@ class SearchBackendTests(ConfigTestCase):
 
     def test_dotenv_supplies_serpapi_key(self):
         path = self.write_dotenv(f"SERPAPI_KEY={SECRETS['SERPAPI_KEY']}\n")
-        self.assertEqual(load(backend=None, dotenv_path=path).serpapi_key, SECRETS["SERPAPI_KEY"])
+        self.assertEqual(load(backend="serpapi", dotenv_path=path).serpapi_key, SECRETS["SERPAPI_KEY"])
+
+    def test_dotenv_supplies_facecheck_key(self):
+        path = self.write_dotenv(f"FACECHECK_API_KEY={SECRETS['FACECHECK_API_KEY']}\nFACECHECK_DEMO=true\n")
+        settings = load(backend=None, dotenv_path=path)
+        self.assertEqual((settings.facecheck_api_key, settings.facecheck_demo), (SECRETS["FACECHECK_API_KEY"], True))
+
+    def test_env_can_still_select_serpapi(self):
+        settings = load({**LIVE, **FACECHECK, "SEARCH_BACKEND": "serpapi"}, backend=None)
+        self.assertEqual((settings.search_backend, settings.live), ("serpapi", True))
+        self.assertIsNone(settings.facecheck_api_key)
+
+    def test_facecheck_key_dropped_with_other_backends(self):
+        self.assertIsNone(load(FACECHECK).facecheck_api_key)
+        self.assertIsNone(load({**LIVE, **FACECHECK}, backend="serpapi").facecheck_api_key)
+
+    def test_facecheck_demo_flag(self):
+        for value, expected in (("true", True), ("1", True), ("YES", True), ("false", False), ("0", False)):
+            with self.subTest(value=value):
+                self.assertEqual(load({**FACECHECK, "FACECHECK_DEMO": value}, backend="facecheck").facecheck_demo,
+                                 expected)
+        self.assertConfigError("FACECHECK_DEMO", {**FACECHECK, "FACECHECK_DEMO": "maybe"}, backend="facecheck")
+
+    def test_scenario_rejected_with_facecheck(self):
+        self.assertConfigError("--scenario.*--mock", FACECHECK, backend="facecheck", scenario="ambiguous")
 
     def test_unknown_backend(self):
         self.assertConfigError("SEARCH_BACKEND", {"SEARCH_BACKEND": "google"}, backend=None)
@@ -340,7 +371,8 @@ class SecretTests(ConfigTestCase):
 
     def test_secret_fields_exist_but_are_hidden(self):
         hidden = {name for name, spec in Settings.__dataclass_fields__.items() if not spec.repr}
-        self.assertEqual(hidden, {"serpapi_key", "typesafe_api_key", "openrouter_api_key", "anthropic_api_key"})
+        self.assertEqual(hidden, {"serpapi_key", "facecheck_api_key", "typesafe_api_key", "openrouter_api_key",
+                                  "anthropic_api_key"})
 
     def test_errors_never_contain_secrets(self):
         cases = (
