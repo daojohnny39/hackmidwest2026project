@@ -41,7 +41,14 @@ from pipeline.contracts import (
     validate_references,
 )
 from pipeline.jev import Jev, noul
-from pipeline.names import differing_facts, looks_like_person_name, name_in_text, names_compatible, same_fact
+from pipeline.names import (
+    differing_facts,
+    looks_like_person_name,
+    name_in_text,
+    name_tokens,
+    names_compatible,
+    same_fact,
+)
 from pipeline.platforms import PLATFORM_LABELS, account_handle, account_url_for, is_account_url, normalize_url, platform_for
 
 MAX_ACCOUNTS = 12  # caps pair questions at 66 (2b)
@@ -438,6 +445,7 @@ class PairFacts:
     handle_match: bool
     same_workplace: bool
     conflict: bool  # different stated workplaces and cities, with no link between them
+    names_conflict: bool  # both names have first and last tokens, and they disagree
 
     @property
     def rule(self) -> bool:
@@ -457,15 +465,18 @@ class PairFacts:
 def pair_facts(x: Account, y: Account) -> PairFacts:
     x_to_y, y_to_x = y.url in x.links_to, x.url in y.links_to
     linked = x_to_y or y_to_x
+    names_ok = names_compatible(x.display_name, y.display_name)
     return PairFacts(
         a=x.account_id,
         b=y.account_id,
         linked=linked,
         mutual=x_to_y and y_to_x,
-        names_ok=names_compatible(x.display_name, y.display_name),
+        names_ok=names_ok,
         handle_match=bool(x.handle and y.handle and x.handle.lower() == y.handle.lower()),
         same_workplace=same_fact(x.workplace, y.workplace),
         conflict=not linked and differing_facts(x.workplace, y.workplace) and differing_facts(x.location, y.location),
+        names_conflict=(len(name_tokens(x.display_name)) >= 2 and len(name_tokens(y.display_name)) >= 2
+                        and not names_ok),
     )
 
 
@@ -543,9 +554,15 @@ def group_accounts(
     veto: dict[tuple[str, str], float] = {}
 
     def join(decision: PairDecision) -> None:
-        """Join two components unless any cross pair strongly conflicts or a real Jev answer vetoes it."""
+        """Join two components unless any cross pair strongly conflicts or a real Jev answer vetoes it.
+
+        Conflicting full names on the decided pair block too, unless it has a mutual link and a matching handle.
+        """
         left, right = components.find(decision.a), components.find(decision.b)
         if left == right:
+            return
+        decided = fact(decision.a, decision.b)
+        if decided.names_conflict and not (decided.mutual and decided.handle_match):
             return
         for x in components.members(left):
             for y in components.members(right):
