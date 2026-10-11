@@ -177,6 +177,7 @@ class Classification(Contract):
     source_type: SourceType = "unknown"
     reasons: list[Evidence] = Field(default_factory=list)
     model: str | None = None
+    sdk_version: str | None = Field(default=None, max_length=100)
     rubric_version: Literal["context-v1"] = "context-v1"
 
     @model_validator(mode="after")

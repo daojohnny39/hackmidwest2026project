@@ -5,10 +5,8 @@ limits and IMG-03 original-image preservation requirements, plus the INT-01 asse
 handoff. It does not complete image validation or face detection. Those checks
 belong to Section 3.
 
-**Commit grouping update:** storage and all Stage A image-processing work now
-belong in one commit, per your request. Use the current
-[combined commit guide](member-3-commit-sections.md). The separate staging example
-below records the earlier checkpoint and is superseded by that combined list.
+Storage was included in the combined [Stage A checkpoint](member-3-stage-a.md).
+Current Jev work and commit instructions are in the [Stage B guide](member-3-stage-b.md).
 
 ## Using the store
 
@@ -85,23 +83,7 @@ temporary directories; no photos, credentials or network access are needed.
 .venv/bin/python -m unittest discover -s tests/member3 -v
 ```
 
-Commit Section 1 first if it is still uncommitted, using the explicit file list
-in the [commit guide](member-3-commit-sections.md). Then stage this section:
-
-```bash
-git add candidate_processing/storage.py tests/member3/test_storage.py \
-  docs/member-3-storage.md docs/member-3-commit-sections.md \
-  docs/member-3-implementation-plan.md contracts/README.md
-git diff --cached --stat
-git diff --cached
-git commit -m "feat: add private candidate asset storage"
-```
-
-The three shared documentation files may already be included in the Section 1
-commit if both sections were reviewed together. The new storage module, tests
-and this guide form Section 2's implementation. The unrelated untracked frontend
-test is excluded from these staging commands.
-
-Storage is now included in the combined Stage A checkpoint, alongside validation,
-MediaPipe/OpenCV reuse, face crops and quality flags. Pause after Stage A for your
-commit; Jev integration follows when you ask to continue.
+Storage is included in the completed [Stage A checkpoint](member-3-stage-a.md),
+alongside validation, MediaPipe/OpenCV reuse, face crops and quality flags.
+The [Stage B guide](member-3-stage-b.md) contains the subsequent Jev implementation
+and its current verification and commit instructions.
