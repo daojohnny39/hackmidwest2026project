@@ -2,14 +2,15 @@ import type { CandidateImage, EvidenceLevel, InvestigationResult, SearchAccepted
 
 // Frontend limits for this draft; Member 1 must confirm server limits before connection.
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024
-export const FIELD_LIMITS = { name: 120, username: 100, context: 500 } as const
+export const FIELD_LIMITS = { firstName: 120, lastName: 120, city: 120 } as const
 export type FormErrors = Partial<Record<keyof SubjectInput | 'image', string>>
 export function validateSubject(input: SubjectInput, image?: Blob): FormErrors {
   const errors: FormErrors = {}
-  if (!input.name.trim()) errors.name = 'Enter the subject’s name.'
-  for (const key of ['name', 'username', 'context'] as const) {
+  for (const key of ['firstName', 'lastName', 'city'] as const) {
     if (input[key].trim().length > FIELD_LIMITS[key]) errors[key] = `Use ${FIELD_LIMITS[key]} characters or fewer.`
   }
+  const age = input.age.trim()
+  if (age && (!/^\d+$/.test(age) || !Number.isSafeInteger(Number(age)))) errors.age = 'Enter an age as a whole number of 0 or more.'
   if (!input.authorized) errors.authorized = 'Confirm that you have authorization.'
   if (!image || image.size === 0) errors.image = 'Take and select a reference photo first.'
   else if (!['image/jpeg', 'image/png'].includes(image.type)) errors.image = 'Use a JPEG or PNG photo.'
@@ -21,9 +22,9 @@ export function createSearchFormData(input: SubjectInput, image: Blob): FormData
   if (Object.keys(validateSubject(input, image)).length) throw new Error('Check the subject details, authorization, and photo.')
   const form = new FormData()
   form.append('image', image, image.type === 'image/png' ? 'reference.png' : 'reference.jpg')
-  form.append('name', input.name.trim())
-  if (input.username.trim()) form.append('username', input.username.trim())
-  if (input.context.trim()) form.append('context', input.context.trim())
+  for (const key of ['firstName', 'lastName', 'city', 'age'] as const) {
+    if (input[key].trim()) form.append(key, input[key].trim())
+  }
   form.append('authorized', 'true')
   return form
 }

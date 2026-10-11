@@ -2,9 +2,10 @@
 export type InvestigationStatus = 'queued' | 'running' | 'completed' | 'failed'
 export type EvidenceLevel = 'high' | 'medium' | 'low' | 'unknown'
 export interface SubjectInput {
-  name: string
-  username: string
-  context: string
+  firstName: string
+  lastName: string
+  city: string
+  age: string
   authorized: boolean
 }
 export interface CandidateImage {

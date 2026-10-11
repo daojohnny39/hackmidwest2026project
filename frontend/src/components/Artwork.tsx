@@ -8,6 +8,7 @@ export function Icon({ name, className = '' }: { name: string; className?: strin
     close: <path d="m6 6 12 12M6 18 18 6" />,
     check: <path d="m5 12 4 4L19 6" />,
     plus: <path d="M12 5v14M5 12h14" />,
+    info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7h.01" /></>,
     stop: <rect x="6" y="6" width="12" height="12" rx="1" />,
     reset: <path d="M4 10a8 8 0 1 1 1 7M4 4v6h6" />,
     link: <path d="m10 13 4-4M8 15l-1 1a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0M13 9l1-1a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0" />,

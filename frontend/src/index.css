@@ -278,8 +278,13 @@ details[open] > summary .icon { transform: rotate(45deg); }
 .workspace-grid { grid-template-columns: minmax(0, 1.4fr) minmax(350px, 1fr); align-items: start; }
 .studio-intro h1 { font-size: clamp(30px, 3.5vw, 46px); }
 .subject-form { padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
-.form-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 20px; }
+.form-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 20px; }
 .form-heading h2 { font-size: 24px; font-weight: 400; letter-spacing: -.5px; }
+.subject-title { display: flex; align-items: center; gap: 8px; }
+.subject-info { position: relative; flex-shrink: 0; }
+.subject-info summary { min-width: 32px; min-height: 36px; justify-content: center; color: var(--muted); cursor: pointer; }
+.subject-info summary .icon { width: 18px; height: 18px; transform: none; }
+.subject-info p { position: absolute; z-index: 3; top: 100%; right: 0; width: min(250px, calc(100vw - 64px)); padding: 12px; font-size: 13px; line-height: 1.5; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; box-shadow: 0 4px 16px #303b3426; }
 .subject-form label:not(.authorization-check) { display: block; font-size: 14px; margin-bottom: 7px; }
 .field-hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
 label > .field-hint { margin-left: 5px; }

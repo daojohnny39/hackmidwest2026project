@@ -2,11 +2,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSearchFormData, parseInvestigation, parseSearchAccepted, safePublicUrl, validateSubject, MAX_IMAGE_BYTES } from '../../src/services/investigationContract.ts'
 
-const subject = { name: '  Sample Person  ', username: '', context: '', authorized: true }
+const subject = { firstName: '  Sample  ', lastName: '', city: '', age: '', authorized: true }
 const jpeg = new Blob(['sample bytes'], { type: 'image/jpeg' })
 
-test('requires a name, authorization, and a nonempty supported photo', () => {
-  assert.deepEqual(Object.keys(validateSubject({ ...subject, name: ' ', authorized: false })).sort(), ['authorized', 'image', 'name'])
+test('requires authorization and a supported photo, while subject details are optional', () => {
+  assert.deepEqual(Object.keys(validateSubject({ ...subject, firstName: ' ', authorized: false })).sort(), ['authorized', 'image'])
+  assert.deepEqual(validateSubject({ ...subject, firstName: ' ' }, jpeg), {})
   assert.ok(validateSubject(subject, new Blob([], { type: 'image/jpeg' })).image)
   assert.ok(validateSubject(subject, new Blob(['x'], { type: 'image/svg+xml' })).image)
   assert.deepEqual(validateSubject(subject, jpeg), {})
@@ -14,23 +15,26 @@ test('requires a name, authorization, and a nonempty supported photo', () => {
 })
 test('enforces draft image and field limits', () => {
   assert.ok(validateSubject(subject, new Blob([new Uint8Array(MAX_IMAGE_BYTES + 1)], { type: 'image/jpeg' })).image)
-  assert.ok(validateSubject({ ...subject, name: 'n'.repeat(121) }, jpeg).name)
-  assert.ok(validateSubject({ ...subject, username: 'u'.repeat(101), context: 'c'.repeat(501) }, jpeg).context)
+  for (const key of ['firstName', 'lastName', 'city'] as const) assert.ok(validateSubject({ ...subject, [key]: 'x'.repeat(121) }, jpeg)[key])
+  for (const age of ['-1', '1.5', 'abc', 'Infinity']) assert.ok(validateSubject({ ...subject, age }, jpeg).age)
+  for (const age of ['', '0', '32']) assert.deepEqual(validateSubject({ ...subject, age }, jpeg), {})
 })
 test('multipart contract trims details, omits empty optionals, and uses the original Blob', async () => {
   const form = createSearchFormData(subject, jpeg)
-  assert.equal(form.get('name'), 'Sample Person')
+  assert.equal(form.get('firstName'), 'Sample')
   assert.equal(form.get('authorized'), 'true')
-  assert.equal(form.has('username'), false)
-  assert.equal(form.has('context'), false)
+  for (const key of ['lastName', 'city', 'age']) assert.equal(form.has(key), false)
   const image = form.get('image') as File
   assert.equal(image.name, 'reference.jpg')
   assert.equal(image.type, 'image/jpeg')
   assert.equal(await image.text(), await jpeg.text())
   assert.throws(() => createSearchFormData({ ...subject, authorized: false }, jpeg))
-  const optional = createSearchFormData({ ...subject, username: ' sample ', context: ' public work ' }, jpeg)
-  assert.equal(optional.get('username'), 'sample')
-  assert.equal(optional.get('context'), 'public work')
+  const unnamed = createSearchFormData({ ...subject, firstName: ' ' }, jpeg)
+  assert.equal(unnamed.has('firstName'), false)
+  const optional = createSearchFormData({ ...subject, lastName: ' Person ', city: ' Kansas City ', age: ' 32 ' }, jpeg)
+  assert.equal(optional.get('lastName'), 'Person')
+  assert.equal(optional.get('city'), 'Kansas City')
+  assert.equal(optional.get('age'), '32')
 })
 test('unknown statuses and malformed completion never become successful empty results', () => {
   for (const value of [null, {}, { investigationId: 'test', status: 'maybe' }, { investigationId: 'test', status: ['completed'] }]) {
