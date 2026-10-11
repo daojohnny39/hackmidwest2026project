@@ -16,6 +16,8 @@ data/*.sqlite3*
 /cache/
 /traces/
 
+# Face photos for the Rekognition gallery and its local index (face_gallery.py).
+/gallery/
 # Downloaded MediaPipe model bundles and incomplete downloads.
 /models/*.task
 /models/*.task.part

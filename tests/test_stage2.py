@@ -366,6 +366,83 @@ class GroupingModeTests(OfflineTestCase):
         self.assertEqual((profiles[0].name, calls), ("Alex Morgan", []))  # mutual link: nothing left to ask
 
 
+class AdversarialGroupingTests(OfflineTestCase):
+    """Inputs built to tempt a false merge (spec 2b); each pair must stay apart."""
+
+    def assert_separate(self, accounts):
+        profiles, _, _ = group_accounts(accounts, fake_jev())
+        self.assertEqual(len(profiles), 2)
+        self.assertEqual([p.account_ids for p in profiles], [["a1"], ["a2"]])
+
+    def test_same_name_same_city_no_link_stays_separate(self):
+        # 2b: a shared name or city alone is insufficient; no mutual link and no shared workplace.
+        self.assert_separate({
+            "a1": account("a1", "linkedin", "https://linkedin.com/in/jordanlee-acme", name="Jordan Lee",
+                          handle="jordanlee-acme", workplace="Acme Labs", location="Austin, TX"),
+            "a2": account("a2", "github", "https://github.com/jlee-globex", name="Jordan Lee",
+                          handle="jlee-globex", workplace="Globex", location="Austin, TX"),
+        })
+
+    def test_mutual_link_with_conflicting_names_does_not_merge(self):
+        # 2b: a link merges only when the names are compatible; Chris Parker -> Dana Wong is one directed link.
+        self.assert_separate({
+            "a1": account("a1", "linkedin", "https://linkedin.com/in/chrisparker", name="Chris Parker",
+                          handle="chrisparker", links=["https://x.com/danawong"]),
+            "a2": account("a2", "x", "https://x.com/danawong", name="Dana Wong", handle="danawong"),
+        })
+
+    def test_same_handle_different_names_does_not_merge(self):
+        # 2b: a handle match still needs compatible names, and Michael and Maria are not.
+        self.assert_separate({
+            "a1": account("a1", "github", "https://github.com/mjones", name="Michael Jones", handle="mjones"),
+            "a2": account("a2", "instagram", "https://instagram.com/mjones", name="Maria Jones", handle="mjones"),
+        })
+
+
+class RealJevOverconfidenceTests(OfflineTestCase):
+    """The AdversarialGroupingTests pairs again, with a real Jev that answers every question 0.9.
+
+    The join guard blocks conflicting full names unless a mutual link and matching handle
+    bind the pair, so a confident but wrong 0.9 can't merge two differently named people.
+    """
+
+    def grouped(self, accounts):
+        def responder(state, questions):
+            return {"model": "jev-test", "answers": {qid: {"type": "noul", "noul": 0.9} for qid in questions},
+                    "usage": {}}
+
+        profiles, _, _ = group_accounts(accounts, Jev(settings("typesafe"), responder=responder))
+        return [p.account_ids for p in profiles]
+
+    def assert_separate(self, accounts):
+        self.assertEqual(self.grouped(accounts), [["a1"], ["a2"]])
+
+    def test_realjev_same_name_same_city_no_link(self):
+        # Accepted boundary: the same name plus a confident Jev answer is trusted. A shared city keeps the
+        # conflict guard off and the names agree, so no deterministic signal overrides Jev here.
+        self.assertEqual(self.grouped({
+            "a1": account("a1", "linkedin", "https://linkedin.com/in/jordanlee-acme", name="Jordan Lee",
+                          handle="jordanlee-acme", workplace="Acme Labs", location="Austin, TX"),
+            "a2": account("a2", "github", "https://github.com/jlee-globex", name="Jordan Lee",
+                          handle="jlee-globex", workplace="Globex", location="Austin, TX"),
+        }), [["a1", "a2"]])
+
+    def test_realjev_conflicting_names_one_link(self):
+        # One directed link plus Jev's 0.9 must not merge Chris Parker and Dana Wong: the names conflict.
+        self.assert_separate({
+            "a1": account("a1", "linkedin", "https://linkedin.com/in/chrisparker", name="Chris Parker",
+                          handle="chrisparker", links=["https://x.com/danawong"]),
+            "a2": account("a2", "x", "https://x.com/danawong", name="Dana Wong", handle="danawong"),
+        })
+
+    def test_realjev_same_handle_different_names(self):
+        # A shared handle plus Jev's 0.9 must not merge Michael and Maria Jones without a mutual link.
+        self.assert_separate({
+            "a1": account("a1", "github", "https://github.com/mjones", name="Michael Jones", handle="mjones"),
+            "a2": account("a2", "instagram", "https://instagram.com/mjones", name="Maria Jones", handle="mjones"),
+        })
+
+
 class ExtractionTests(OfflineTestCase):
     def test_title_patterns(self):
         self.assertEqual(title_fields("Alex Morgan | Linkup"), {"display_name": "Alex Morgan"})
