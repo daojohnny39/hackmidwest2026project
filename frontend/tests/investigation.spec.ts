@@ -22,12 +22,15 @@ test('optional subject details explain narrowing results; a photo and authorizat
   await expect(page.getByRole('checkbox', { name: /I am this person/ })).not.toBeChecked()
 })
 
-test('sample cards are source-linked evidence with separate unknown relevance and risk', async ({ page }) => {
+test('sample cards are source-linked evidence with adjacent confidence and risk badges', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: 'View sample', exact: true }).click()
   await expect(page.locator('.candidate-card')).toHaveCount(4)
-  await expect(page.getByText('Contextual relevance does not verify a person’s identity.')).toBeVisible()
-  await expect(page.getByText('Relevance: unknown', { exact: true })).toBeVisible()
+  await expect(page.getByText('Confidence reflects contextual evidence and does not verify a person’s identity.')).toBeVisible()
+  await expect(page.getByText('Confidence: unknown', { exact: true })).toBeVisible()
+  const firstCard = page.locator('.candidate-card').first()
+  await expect(firstCard.locator('.candidate-labels .evidence-badge')).toHaveText(['Confidence: high', 'Source risk: not assessed'])
+  await expect(firstCard.locator('.candidate-bottom')).not.toContainText('Source risk:')
   const link = page.getByRole('link', { name: 'Open source: Sample professional profile' })
   await expect(link).toHaveAttribute('href', 'https://example.com/profile')
   await expect(link).toHaveAttribute('rel', 'noopener noreferrer')

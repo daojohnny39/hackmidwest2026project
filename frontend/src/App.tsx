@@ -37,7 +37,7 @@ function About() {
     <section className="principles"><div className="principles-art"><Orbit /></div><div><h2>Your privacy</h2>
       <details open><summary>Photos stay in this tab<Icon name="plus" /></summary><p>No uploads in this demo. Clear, reload, or leave Home to discard photos.</p></details>
       <details><summary>Public sources only<Icon name="plus" /></summary><p>Planned searches require consent and exclude private accounts.</p></details>
-      <details><summary>Relevance needs review<Icon name="plus" /></summary><p>Contextual relevance does not verify identity. Check each original source.</p></details>
+      <details><summary>Confidence needs review<Icon name="plus" /></summary><p>Confidence reflects contextual evidence and does not verify identity. Check each original source.</p></details>
       <details><summary>Demo status<Icon name="plus" /></summary><p>Face detection runs locally on each photo. Public-source search is not connected. Storage terms must be confirmed before uploads are enabled.</p></details>
     </div></section>
     <div className="page-cta"><a className="button primary" href="#studio">Open Home <Icon name="arrow" /></a></div>

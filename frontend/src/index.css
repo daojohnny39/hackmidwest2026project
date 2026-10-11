@@ -319,7 +319,7 @@ label > .field-hint { margin-left: 5px; }
 .evidence-badge { padding: 4px 7px; font-size: 11px; border-radius: 3px; border: 1px solid var(--line); background: #f0f2ef; color: #52604e; }
 .evidence-high { background: #deebd8; border-color: #c3d8ba; color: #36542d; }
 .evidence-medium { background: #f0ecdc; border-color: #dfd6b4; color: #6a5c26; }
-.review-label { font-size: 11px; color: var(--muted); }
+.review-label { flex-basis: 100%; font-size: 11px; color: var(--muted); }
 .candidate-reasons { list-style: none; padding: 0; margin: 0; }
 .candidate-reasons li + li { margin-top: 6px; }
 .candidate-reasons, .candidate-unknown { font-size: 13px; line-height: 1.5; color: var(--muted); }
